@@ -1,3 +1,9 @@
 [workspace]
-members = ["synergos-net", "ars-plugin-synergos"]
+members = [
+    "synergos-net",
+    "synergos-ipc",
+    "synergos-core",
+    "synergos-gui",
+    "ars-plugin-synergos",
+]
 resolver = "2"

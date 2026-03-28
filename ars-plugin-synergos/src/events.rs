@@ -1,27 +1,27 @@
-//! Synergos 固有の ArsEvent 定義
+//! Ars EventBus イベント定義
 //!
-//! これらのイベントは Ars の EventBus を通じて他モジュールに通知される。
+//! synergos-core の IPC イベントを Ars EventBus 向けに変換するための型。
 //! Synergos が存在しない環境では EventBus::subscribe() が None を返すだけ。
 
-use synergos_net::types::{FileId, PeerId, RouteKind, TransferId, Blake3Hash};
+use serde::{Deserialize, Serialize};
 
-/// ピアが接続した
-#[derive(Debug, Clone)]
+/// ピア接続イベント（Ars EventBus 向け）
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PeerConnected {
-    pub peer_id: PeerId,
+    pub peer_id: String,
     pub display_name: String,
-    pub route: RouteKind,
+    pub route: String,
     pub rtt_ms: u32,
 }
 
-/// ピアが切断した
-#[derive(Debug, Clone)]
+/// ピア切断イベント（Ars EventBus 向け）
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PeerDisconnected {
-    pub peer_id: PeerId,
+    pub peer_id: String,
     pub reason: DisconnectReason,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum DisconnectReason {
     Graceful,
     Timeout,
@@ -29,29 +29,28 @@ pub enum DisconnectReason {
     Remote(String),
 }
 
-/// ファイル転送の進捗
-#[derive(Debug, Clone)]
+/// ファイル転送進捗イベント（Ars EventBus 向け）
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileTransferProgress {
-    pub transfer_id: TransferId,
-    pub peer_id: PeerId,
+    pub transfer_id: String,
+    pub peer_id: String,
     pub resource_id: String,
     pub bytes_transferred: u64,
     pub total_bytes: u64,
     pub speed_bps: u64,
 }
 
-/// ファイル転送が完了した
-#[derive(Debug, Clone)]
+/// ファイル転送完了イベント（Ars EventBus 向け）
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileTransferCompleted {
-    pub transfer_id: TransferId,
-    pub peer_id: PeerId,
+    pub transfer_id: String,
+    pub peer_id: String,
     pub resource_id: String,
-    pub file_path: std::path::PathBuf,
-    pub checksum: Blake3Hash,
+    pub file_path: String,
 }
 
-/// ネットワーク状況が更新された
-#[derive(Debug, Clone)]
+/// ネットワーク状態更新イベント（Ars EventBus 向け）
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NetworkStatusUpdated {
     pub active_connections: u16,
     pub max_connections: u16,
@@ -60,9 +59,10 @@ pub struct NetworkStatusUpdated {
     pub avg_latency_ms: u32,
 }
 
-/// コンフリクトが検出された
-#[derive(Debug, Clone)]
+/// コンフリクト検出イベント（Ars EventBus 向け）
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConflictDetected {
-    pub file_id: FileId,
-    pub involved_peers: Vec<PeerId>,
+    pub file_id: String,
+    pub file_path: String,
+    pub involved_peers: Vec<String>,
 }

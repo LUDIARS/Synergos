@@ -1,0 +1,30 @@
+[package]
+name = "synergos-gui"
+version = "0.1.0"
+edition = "2021"
+description = "Synergos standalone GUI application — network monitor and transfer manager"
+
+[[bin]]
+name = "synergos-gui"
+path = "src/main.rs"
+
+[dependencies]
+# IPC protocol
+synergos-ipc = { path = "../synergos-ipc" }
+
+# GUI framework (cross-platform: Win/Linux/Mac)
+eframe = "0.31"
+egui = "0.31"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Error handling
+thiserror = "2"
