@@ -25,6 +25,15 @@ pub enum IpcResponse {
     /// プロジェクト一覧
     ProjectList(Vec<ProjectInfo>),
 
+    /// プロジェクト詳細
+    ProjectDetail(ProjectDetail),
+
+    /// 招待トークン
+    InviteToken {
+        token: String,
+        expires_at: Option<u64>,
+    },
+
     /// ピア一覧
     PeerList(Vec<PeerInfo>),
 
@@ -55,13 +64,30 @@ pub struct DaemonStatus {
     pub active_transfers: usize,
 }
 
-/// プロジェクト情報
+/// プロジェクト情報（一覧用サマリ）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectInfo {
     pub project_id: String,
+    pub display_name: String,
     pub root_path: String,
     pub peer_count: usize,
     pub active_transfers: usize,
+}
+
+/// プロジェクト詳細情報
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectDetail {
+    pub project_id: String,
+    pub display_name: String,
+    pub description: String,
+    pub root_path: String,
+    pub sync_mode: String,
+    pub max_peers: u16,
+    pub peer_count: usize,
+    pub active_transfers: usize,
+    pub created_at: u64,
+    /// 接続中のピア一覧（ID のみ）
+    pub connected_peer_ids: Vec<String>,
 }
 
 /// ピア情報
