@@ -11,12 +11,11 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 
 use synergos_ipc::command::IpcCommand;
-use synergos_ipc::event::IpcEvent;
 use synergos_ipc::response::{DaemonStatus, IpcResponse, NetworkStatusInfo};
 use synergos_ipc::transport::{IpcError, IpcTransport};
 
 use crate::event_bus::SharedEventBus;
-use crate::project::ProjectManager;
+use crate::project::{ProjectConfiguration, ProjectManager, ProjectSettingsPatch};
 
 /// IPC サーバー
 pub struct IpcServer {
@@ -164,19 +163,94 @@ async fn dispatch_command(
         IpcCommand::ProjectOpen {
             project_id,
             root_path,
-        } => {
-            project_manager.open(project_id, root_path).await;
-            IpcResponse::Ok
-        }
+            display_name,
+        } => match project_manager
+            .open_project(project_id, root_path, display_name)
+            .await
+        {
+            Ok(()) => IpcResponse::Ok,
+            Err(e) => IpcResponse::Error {
+                code: 1,
+                message: e.to_string(),
+            },
+        },
 
         IpcCommand::ProjectClose { project_id } => {
-            project_manager.close(&project_id).await;
-            IpcResponse::Ok
+            match project_manager.close_project(&project_id).await {
+                Ok(()) => IpcResponse::Ok,
+                Err(e) => IpcResponse::Error {
+                    code: 1,
+                    message: e.to_string(),
+                },
+            }
         }
 
         IpcCommand::ProjectList => {
-            let projects = project_manager.list();
+            let projects = project_manager.list_projects();
             IpcResponse::ProjectList(projects)
+        }
+
+        IpcCommand::ProjectGet { project_id } => {
+            match project_manager.get_project(&project_id).await {
+                Ok(detail) => IpcResponse::ProjectDetail(detail),
+                Err(e) => IpcResponse::Error {
+                    code: 1,
+                    message: e.to_string(),
+                },
+            }
+        }
+
+        IpcCommand::ProjectUpdate {
+            project_id,
+            display_name,
+            description,
+            sync_mode,
+            max_peers,
+        } => {
+            let patch = ProjectSettingsPatch {
+                display_name,
+                description,
+                sync_mode,
+                max_peers,
+            };
+            match project_manager.update_project(&project_id, patch).await {
+                Ok(()) => IpcResponse::Ok,
+                Err(e) => IpcResponse::Error {
+                    code: 1,
+                    message: e.to_string(),
+                },
+            }
+        }
+
+        IpcCommand::ProjectCreateInvite {
+            project_id,
+            expires_in_secs,
+        } => match project_manager
+            .create_invite(&project_id, expires_in_secs)
+            .await
+        {
+            Ok(invite) => IpcResponse::InviteToken {
+                token: invite.token,
+                expires_at: invite.expires_at,
+            },
+            Err(e) => IpcResponse::Error {
+                code: 1,
+                message: e.to_string(),
+            },
+        }
+
+        IpcCommand::ProjectJoin {
+            invite_token,
+            root_path,
+        } => match project_manager
+            .join_project(&invite_token, root_path)
+            .await
+        {
+            Ok(_project_id) => IpcResponse::Ok,
+            Err(e) => IpcResponse::Error {
+                code: 1,
+                message: e.to_string(),
+            },
         }
 
         IpcCommand::PeerList { .. } => {

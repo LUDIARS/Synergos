@@ -55,6 +55,9 @@ pub enum ProjectCommand {
         id: String,
         /// プロジェクトルートパス
         path: PathBuf,
+        /// 表示名
+        #[arg(short = 'n', long)]
+        name: Option<String>,
     },
     /// プロジェクトを閉じる
     Close {
@@ -63,6 +66,43 @@ pub enum ProjectCommand {
     },
     /// プロジェクト一覧
     List,
+    /// プロジェクト詳細
+    Get {
+        /// プロジェクトID
+        id: String,
+    },
+    /// プロジェクト設定を更新
+    Update {
+        /// プロジェクトID
+        id: String,
+        /// 表示名
+        #[arg(short = 'n', long)]
+        name: Option<String>,
+        /// 説明
+        #[arg(short, long)]
+        description: Option<String>,
+        /// 同期モード (full / manual / selective)
+        #[arg(short, long)]
+        sync_mode: Option<String>,
+        /// 最大接続ピア数
+        #[arg(short, long)]
+        max_peers: Option<u16>,
+    },
+    /// 招待トークンを生成
+    Invite {
+        /// プロジェクトID
+        id: String,
+        /// 有効期限（秒）
+        #[arg(short, long)]
+        expires: Option<u64>,
+    },
+    /// 招待トークンで参加
+    Join {
+        /// 招待トークン
+        token: String,
+        /// ローカルのプロジェクトルートパス
+        path: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -159,11 +199,12 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
 async fn handle_project(cmd: ProjectCommand) -> anyhow::Result<()> {
     let mut client = synergos_ipc::IpcClient::connect().await?;
     match cmd {
-        ProjectCommand::Open { id, path } => {
+        ProjectCommand::Open { id, path, name } => {
             client
                 .send(synergos_ipc::IpcCommand::ProjectOpen {
                     project_id: id,
                     root_path: path,
+                    display_name: name,
                 })
                 .await?;
             println!("Project opened.");
@@ -185,9 +226,96 @@ async fn handle_project(cmd: ProjectCommand) -> anyhow::Result<()> {
                     println!("No active projects.");
                 } else {
                     for p in projects {
-                        println!("  {} ({}) — {} peers", p.project_id, p.root_path, p.peer_count);
+                        println!(
+                            "  {} [{}] ({}) — {} peers",
+                            p.display_name, p.project_id, p.root_path, p.peer_count
+                        );
                     }
                 }
+            }
+        }
+        ProjectCommand::Get { id } => {
+            let resp = client
+                .send(synergos_ipc::IpcCommand::ProjectGet { project_id: id })
+                .await?;
+            match resp {
+                synergos_ipc::IpcResponse::ProjectDetail(d) => {
+                    println!("Project: {} [{}]", d.display_name, d.project_id);
+                    println!("  Path:        {}", d.root_path);
+                    println!("  Description: {}", d.description);
+                    println!("  Sync mode:   {}", d.sync_mode);
+                    println!("  Max peers:   {}", if d.max_peers == 0 { "unlimited".to_string() } else { d.max_peers.to_string() });
+                    println!("  Peers:       {}", d.peer_count);
+                    println!("  Transfers:   {}", d.active_transfers);
+                    if !d.connected_peer_ids.is_empty() {
+                        println!("  Connected:   {}", d.connected_peer_ids.join(", "));
+                    }
+                }
+                synergos_ipc::IpcResponse::Error { message, .. } => {
+                    eprintln!("Error: {}", message);
+                }
+                _ => println!("Unexpected response"),
+            }
+        }
+        ProjectCommand::Update {
+            id,
+            name,
+            description,
+            sync_mode,
+            max_peers,
+        } => {
+            let resp = client
+                .send(synergos_ipc::IpcCommand::ProjectUpdate {
+                    project_id: id,
+                    display_name: name,
+                    description,
+                    sync_mode,
+                    max_peers,
+                })
+                .await?;
+            match resp {
+                synergos_ipc::IpcResponse::Ok => println!("Project updated."),
+                synergos_ipc::IpcResponse::Error { message, .. } => {
+                    eprintln!("Error: {}", message);
+                }
+                _ => println!("Unexpected response"),
+            }
+        }
+        ProjectCommand::Invite { id, expires } => {
+            let resp = client
+                .send(synergos_ipc::IpcCommand::ProjectCreateInvite {
+                    project_id: id,
+                    expires_in_secs: expires,
+                })
+                .await?;
+            match resp {
+                synergos_ipc::IpcResponse::InviteToken { token, expires_at } => {
+                    println!("Invite token: {}", token);
+                    if let Some(exp) = expires_at {
+                        println!("Expires at:   {} (epoch)", exp);
+                    } else {
+                        println!("Expires:      never");
+                    }
+                }
+                synergos_ipc::IpcResponse::Error { message, .. } => {
+                    eprintln!("Error: {}", message);
+                }
+                _ => println!("Unexpected response"),
+            }
+        }
+        ProjectCommand::Join { token, path } => {
+            let resp = client
+                .send(synergos_ipc::IpcCommand::ProjectJoin {
+                    invite_token: token,
+                    root_path: path,
+                })
+                .await?;
+            match resp {
+                synergos_ipc::IpcResponse::Ok => println!("Joined project."),
+                synergos_ipc::IpcResponse::Error { message, .. } => {
+                    eprintln!("Error: {}", message);
+                }
+                _ => println!("Unexpected response"),
             }
         }
     }
