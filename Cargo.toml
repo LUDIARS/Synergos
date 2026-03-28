@@ -1,0 +1,3 @@
+[workspace]
+members = ["synergos-net", "ars-plugin-synergos"]
+resolver = "2"
