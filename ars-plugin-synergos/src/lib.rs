@@ -1,3 +1,4 @@
+#![allow(dead_code, unused_imports, unused_variables)]
 //! ars-plugin-synergos: Ars リアルタイムコラボレーションプラグイン
 //!
 //! synergos-core デーモンへの**薄い IPC アダプタ**として機能する。
