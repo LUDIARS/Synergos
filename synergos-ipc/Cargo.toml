@@ -1,0 +1,19 @@
+[package]
+name = "synergos-ipc"
+version = "0.1.0"
+edition = "2021"
+description = "Shared IPC protocol types for Synergos cross-platform communication"
+
+[dependencies]
+# Serialization
+serde = { version = "1", features = ["derive"] }
+rmp-serde = "1"
+
+# Async runtime
+tokio = { version = "1", features = ["io-util", "net", "sync", "macros"] }
+
+# Error handling
+thiserror = "2"
+
+# Logging
+tracing = "0.1"

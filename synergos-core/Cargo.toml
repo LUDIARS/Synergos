@@ -1,0 +1,39 @@
+[package]
+name = "synergos-core"
+version = "0.1.0"
+edition = "2021"
+description = "Synergos core daemon — resident application with EventBus and IPC server"
+
+[[bin]]
+name = "synergos-core"
+path = "src/main.rs"
+
+[dependencies]
+# Internal crates
+synergos-net = { path = "../synergos-net" }
+synergos-ipc = { path = "../synergos-ipc" }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+
+# Crypto / Hash
+blake3 = "1"
+
+# Config / Serialization
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Utilities
+dashmap = "6"
+uuid = { version = "1", features = ["v4"] }
+crc32fast = "1"
+thiserror = "2"
+anyhow = "1"

@@ -2,31 +2,21 @@
 name = "ars-plugin-synergos"
 version = "0.1.0"
 edition = "2021"
-description = "Ars real-time collaboration plugin powered by synergos-net"
+description = "Ars plugin — thin IPC adapter to synergos-core daemon"
 
 [dependencies]
-# Network Foundation
-synergos-net = { path = "../synergos-net" }
+# IPC protocol (synergos-net への直接依存は不要)
+synergos-ipc = { path = "../synergos-ipc" }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 async-trait = "0.1"
 
-# Crypto / Hash
-blake3 = "1"
-
-# Config
-toml = "0.8"
+# Serialization
 serde = { version = "1", features = ["derive"] }
-
-# mDNS
-mdns-sd = "0.11"
 
 # Logging
 tracing = "0.1"
 
-# Utilities
-uuid = { version = "1", features = ["v4"] }
-dashmap = "6"
-crc32fast = "1"
+# Error handling
 thiserror = "2"
