@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! synergos-ipc: Shared IPC protocol types for Synergos
 //!
 //! synergos-core デーモンと各クライアント（GUI / CLI / Ars Plugin）間の

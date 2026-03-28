@@ -53,13 +53,5 @@ jobs:
             libglib2.0-dev libpango1.0-dev libgdk-pixbuf-2.0-dev \
             libssl-dev pkg-config
 
-      - name: Build core modules
-        run: |
-          cargo build --package synergos-net
-          cargo build --package synergos-ipc
-          cargo build --package ars-plugin-synergos
-
-      - name: Build applications
-        run: |
-          cargo build --package synergos-core
-          cargo build --package synergos-gui
+      - name: Build workspace
+        run: cargo build --workspace
