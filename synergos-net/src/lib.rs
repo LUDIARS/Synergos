@@ -1,4 +1,4 @@
-#![allow(dead_code)]
+#![allow(dead_code, unused_imports, unused_variables)]
 //! synergos-net: P2P network foundation
 //!
 //! Ars に依存しない汎用ネットワークライブラリ。
