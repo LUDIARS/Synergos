@@ -27,6 +27,7 @@ pub enum IpcEvent {
     /// 転送進捗
     TransferProgress {
         transfer_id: String,
+        peer_id: String,
         file_name: String,
         bytes_transferred: u64,
         total_bytes: u64,
@@ -36,6 +37,7 @@ pub enum IpcEvent {
     /// 転送完了
     TransferCompleted {
         transfer_id: String,
+        peer_id: String,
         file_name: String,
         file_path: String,
     },
@@ -43,6 +45,7 @@ pub enum IpcEvent {
     /// 転送失敗
     TransferFailed {
         transfer_id: String,
+        peer_id: String,
         file_name: String,
         error: String,
     },

@@ -19,10 +19,14 @@ pub mod types;
 // Re-export primary types
 pub use catalog::{CatalogManager, RootCatalog};
 pub use chain::{ChainBlock, ChainPayload, FileChain, TransferLedger};
+pub use conduit::{Conduit, PeerConnectionStatus};
 pub use config::NetConfig;
 pub use dht::DhtNode;
 pub use error::{Result, SynergosNetError};
 pub use gossip::{GossipMessage, GossipNode};
+pub use mesh::Mesh;
+pub use quic::{QuicManager, SpeedTestResult, CalibratedParams, ConnectionCalibrator};
+pub use tunnel::{TunnelManager, TunnelState};
 pub use types::*;
 
 use std::sync::Arc;
@@ -47,6 +51,10 @@ pub struct SynergosNet {
     pub gossip: GossipNode,
     pub catalog: CatalogManager,
     pub ledger: TransferLedger,
+    pub quic: Arc<QuicManager>,
+    pub tunnel: Arc<TunnelManager>,
+    pub mesh: Arc<Mesh>,
+    pub conduit: Conduit,
     handler: Arc<dyn NetEventHandler>,
 }
 
@@ -62,6 +70,15 @@ impl SynergosNet {
         let gossip = GossipNode::new(local_peer_id, config.gossipsub.clone());
         let catalog = CatalogManager::new(project_id, 256, 10);
         let ledger = TransferLedger::new();
+        let quic = Arc::new(QuicManager::new(config.quic.clone()));
+        let tunnel = Arc::new(TunnelManager::new(&config.tunnel));
+        let mesh = Arc::new(Mesh::new(config.mesh.clone()));
+        let conduit = Conduit::new(
+            quic.clone(),
+            tunnel.clone(),
+            mesh.clone(),
+            std::time::Duration::from_secs(15),
+        );
 
         Self {
             config,
@@ -69,13 +86,31 @@ impl SynergosNet {
             gossip,
             catalog,
             ledger,
+            quic,
+            tunnel,
+            mesh,
+            conduit,
             handler,
         }
     }
 
     /// グレースフルシャットダウン
     pub async fn shutdown(self) -> Result<()> {
-        // TODO: 接続のクリーンアップ
+        tracing::info!("Shutting down synergos-net...");
+
+        // 1. 全ピアとの接続を切断
+        self.conduit.shutdown().await;
+
+        // 2. QUIC エンドポイントをシャットダウン
+        self.quic.shutdown().await;
+
+        // 3. Tunnel を停止
+        let _ = self.tunnel.stop().await;
+
+        // 4. Mesh セッションをクリーンアップ
+        self.mesh.cleanup_expired_sessions();
+
+        tracing::info!("synergos-net shutdown complete");
         Ok(())
     }
 }
