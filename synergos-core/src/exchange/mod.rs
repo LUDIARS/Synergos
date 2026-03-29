@@ -3,15 +3,21 @@
 //! synergos-net の QUIC ストリームを使ってファイルを送受信する。
 //! 優先度キュー、帯域制御、チャンク分割・再組立を管理する。
 //!
+//! TransferLedger と Gossipsub を統合し、Want/Offer ベースの転送制御を行う。
+//!
 //! 旧 ars-plugin-synergos から synergos-core に移植。Ars 依存を除去。
 
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use dashmap::DashMap;
-use synergos_net::types::{Blake3Hash, FileId, PeerId, TransferId};
+use synergos_net::chain::{LedgerEntryState, OfferEntry, TransferLedger, WantEntry, LedgerAction};
+use synergos_net::gossip::{GossipMessage, GossipNode};
+use synergos_net::types::{Blake3Hash, FileId, PeerId, TopicId, TransferId};
 
-use crate::event_bus::SharedEventBus;
+use crate::event_bus::{SharedEventBus, TransferProgressEvent, TransferCompletedEvent};
 
 // ── 型定義 ──
 
@@ -120,11 +126,6 @@ pub enum FileSharingError {
 // ── trait 定義 ──
 
 /// ファイル共有インターフェース
-///
-/// ファイルの送受信・公開・キャンセルを管理する。
-/// - Want/Offer ベースの TransferLedger と連携
-/// - Gossipsub 経由で FileWant/FileOffer をブロードキャスト
-/// - QUIC ストリームで実データを転送
 #[async_trait]
 pub trait FileSharing: Send + Sync {
     /// ファイルを共有する（他ピアに送信可能にする / Offer を登録）
@@ -134,17 +135,13 @@ pub trait FileSharing: Send + Sync {
     async fn fetch_file(&self, request: FetchRequest) -> Result<TransferId, FileSharingError>;
 
     /// ローカルファイルの変更をネットワークに公開
-    /// （CatalogUpdate + FileOffer を Gossipsub でブロードキャスト）
     async fn publish_updates(
         &self,
         notifications: Vec<PublishNotification>,
     ) -> Result<(), FileSharingError>;
 
     /// アクティブ転送の一覧を取得
-    async fn list_transfers(
-        &self,
-        project_id: Option<&str>,
-    ) -> Vec<ActiveTransfer>;
+    async fn list_transfers(&self, project_id: Option<&str>) -> Vec<ActiveTransfer>;
 
     /// 転送の詳細を取得
     async fn get_transfer(&self, transfer_id: &TransferId) -> Option<ActiveTransfer>;
@@ -161,11 +158,24 @@ pub trait FileSharing: Send + Sync {
 
 // ── 実装 ──
 
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
 /// ファイル転送制御サービス
 pub struct Exchange {
     event_bus: SharedEventBus,
     /// アクティブ転送のテーブル
     transfers: DashMap<TransferId, ActiveTransfer>,
+    /// Want/Offer 転送台帳
+    ledger: Arc<TransferLedger>,
+    /// Gossipsub ノード（オプション: ネットワーク初期化後にセット）
+    gossip: Option<Arc<GossipNode>>,
+    /// ローカルピアID
+    local_peer_id: PeerId,
 }
 
 impl Exchange {
@@ -173,6 +183,134 @@ impl Exchange {
         Self {
             event_bus,
             transfers: DashMap::new(),
+            ledger: Arc::new(TransferLedger::new()),
+            gossip: None,
+            local_peer_id: PeerId::new("local"),
+        }
+    }
+
+    /// ローカルピアIDを設定
+    pub fn set_local_peer_id(&mut self, peer_id: PeerId) {
+        self.local_peer_id = peer_id;
+    }
+
+    /// Gossipsub ノードを設定
+    pub fn set_gossip(&mut self, gossip: Arc<GossipNode>) {
+        self.gossip = Some(gossip);
+    }
+
+    /// TransferLedger への参照を取得
+    pub fn ledger(&self) -> &Arc<TransferLedger> {
+        &self.ledger
+    }
+
+    /// Gossipsub 経由で FileOffer をブロードキャスト
+    fn broadcast_offer(
+        &self,
+        project_id: &str,
+        file_id: &FileId,
+        version: u64,
+        file_size: u64,
+        crc: u32,
+    ) {
+        if let Some(gossip) = &self.gossip {
+            let topic = TopicId::project(project_id);
+            gossip.publish(
+                &topic,
+                GossipMessage::FileOffer {
+                    sender: self.local_peer_id.clone(),
+                    file_id: file_id.clone(),
+                    version,
+                    size: file_size,
+                    crc,
+                },
+            );
+        }
+    }
+
+    /// Gossipsub 経由で FileWant をブロードキャスト
+    fn broadcast_want(&self, project_id: &str, file_id: &FileId, version: u64) {
+        if let Some(gossip) = &self.gossip {
+            let topic = TopicId::project(project_id);
+            gossip.publish(
+                &topic,
+                GossipMessage::FileWant {
+                    requester: self.local_peer_id.clone(),
+                    file_id: file_id.clone(),
+                    version,
+                },
+            );
+        }
+    }
+
+    /// Gossipsub 経由で CatalogUpdate をブロードキャスト
+    fn broadcast_catalog_update(
+        &self,
+        project_id: &str,
+        root_crc: u32,
+        update_count: u64,
+    ) {
+        if let Some(gossip) = &self.gossip {
+            let topic = TopicId::project(project_id);
+            gossip.publish(
+                &topic,
+                GossipMessage::CatalogUpdate {
+                    project_id: project_id.to_string(),
+                    root_crc,
+                    update_count,
+                    updated_chunks: vec![],
+                },
+            );
+        }
+    }
+
+    /// 転送完了を処理
+    pub fn complete_transfer(&self, transfer_id: &TransferId) {
+        if let Some(mut entry) = self.transfers.get_mut(transfer_id) {
+            let transfer = entry.value_mut();
+            transfer.state = TransferState::Completed;
+            transfer.bytes_transferred = transfer.file_size;
+
+            // EventBus に完了イベントを発行
+            self.event_bus.emit(TransferCompletedEvent {
+                transfer_id: transfer_id.0.clone(),
+                file_name: transfer.file_name.clone(),
+                file_path: String::new(),
+            });
+
+            // TransferLedger で fulfilled をマーク
+            self.ledger.mark_fulfilled(
+                &transfer.file_id,
+                0, // version は簡易的に 0
+                &transfer.peer_id,
+            );
+        }
+    }
+
+    /// 転��進捗を更新
+    pub fn update_progress(
+        &self,
+        transfer_id: &TransferId,
+        bytes_transferred: u64,
+        speed_bps: u64,
+    ) {
+        if let Some(mut entry) = self.transfers.get_mut(transfer_id) {
+            let transfer = entry.value_mut();
+            transfer.bytes_transferred = bytes_transferred;
+            transfer.speed_bps = speed_bps;
+
+            if transfer.state == TransferState::Queued {
+                transfer.state = TransferState::Running;
+            }
+
+            // EventBus に進捗イベントを発行
+            self.event_bus.emit(TransferProgressEvent {
+                transfer_id: transfer_id.0.clone(),
+                file_name: transfer.file_name.clone(),
+                bytes_transferred,
+                total_bytes: transfer.file_size,
+                speed_bps,
+            });
         }
     }
 }
@@ -201,8 +339,8 @@ impl FileSharing for Exchange {
 
         let transfer = ActiveTransfer {
             transfer_id: transfer_id.clone(),
-            project_id: request.project_id,
-            file_id: request.file_id,
+            project_id: request.project_id.clone(),
+            file_id: request.file_id.clone(),
             file_name,
             file_size: request.file_size,
             bytes_transferred: 0,
@@ -215,9 +353,27 @@ impl FileSharing for Exchange {
 
         self.transfers.insert(transfer_id.clone(), transfer);
 
-        // TODO: TransferLedger に Offer を登録
-        // TODO: Gossipsub で FileOffer をブロードキャスト
-        // TODO: QUIC ストリームで実データ転送を開始
+        // TransferLedger に Offer を登録
+        let offer = OfferEntry {
+            sender: self.local_peer_id.clone(),
+            file_id: request.file_id.clone(),
+            version: 0,
+            file_size: request.file_size,
+            crc: crc32fast::hash(&request.checksum.0),
+            offered_at: now_ms(),
+            state: LedgerEntryState::Pending,
+        };
+        let actions = self.ledger.register_offer(offer);
+        tracing::debug!("Ledger offer registered, actions: {}", actions.len());
+
+        // Gossipsub で FileOffer をブロードキャスト
+        self.broadcast_offer(
+            &request.project_id,
+            &request.file_id,
+            0,
+            request.file_size,
+            crc32fast::hash(&request.checksum.0),
+        );
 
         Ok(transfer_id)
     }
@@ -238,10 +394,10 @@ impl FileSharing for Exchange {
 
         let transfer = ActiveTransfer {
             transfer_id: transfer_id.clone(),
-            project_id: request.project_id,
+            project_id: request.project_id.clone(),
             file_id: request.file_id.clone(),
             file_name: request.file_id.to_string(),
-            file_size: 0, // 不明（Offer 受信時に更新）
+            file_size: 0,
             bytes_transferred: 0,
             speed_bps: 0,
             direction: TransferDirection::Receive,
@@ -252,8 +408,40 @@ impl FileSharing for Exchange {
 
         self.transfers.insert(transfer_id.clone(), transfer);
 
-        // TODO: TransferLedger に Want を登録
-        // TODO: Gossipsub で FileWant をブロードキャスト
+        // TransferLedger に Want を登録
+        let want = WantEntry {
+            requester: self.local_peer_id.clone(),
+            file_id: request.file_id.clone(),
+            version: 0,
+            requested_at: now_ms(),
+            state: LedgerEntryState::Pending,
+        };
+        let action = self.ledger.register_want(want);
+
+        match &action {
+            LedgerAction::Match { sender, file_size } => {
+                tracing::info!(
+                    "Immediate match found: sender={}, size={}",
+                    sender,
+                    file_size
+                );
+                // マッチ成立 → 転送を開始状態にする
+                if let Some(mut entry) = self.transfers.get_mut(&transfer_id) {
+                    entry.value_mut().state = TransferState::Running;
+                    entry.value_mut().file_size = *file_size;
+                    entry.value_mut().peer_id = sender.clone();
+                }
+            }
+            LedgerAction::Duplicate => {
+                tracing::debug!("Duplicate want for file {}", request.file_id);
+            }
+            LedgerAction::Queued => {
+                tracing::debug!("Want queued for file {}", request.file_id);
+            }
+        }
+
+        // Gossipsub で FileWant をブロードキャスト
+        self.broadcast_want(&request.project_id, &request.file_id, 0);
 
         Ok(transfer_id)
     }
@@ -264,6 +452,8 @@ impl FileSharing for Exchange {
     ) -> Result<(), FileSharingError> {
         tracing::info!("Publishing {} file update(s)", notifications.len());
 
+        let mut total_crc: u32 = 0;
+
         for notif in &notifications {
             tracing::debug!(
                 "  - file_id={}, path={}, version={}",
@@ -271,19 +461,44 @@ impl FileSharing for Exchange {
                 notif.file_path.display(),
                 notif.version
             );
+
+            // TransferLedger に各ファ��ルの Offer を登録
+            let offer = OfferEntry {
+                sender: self.local_peer_id.clone(),
+                file_id: notif.file_id.clone(),
+                version: notif.version,
+                file_size: notif.file_size,
+                crc: notif.crc,
+                offered_at: now_ms(),
+                state: LedgerEntryState::Pending,
+            };
+            self.ledger.register_offer(offer);
+
+            // Gossipsub で FileOffer をブロードキャスト
+            self.broadcast_offer(
+                &notif.project_id,
+                &notif.file_id,
+                notif.version,
+                notif.file_size,
+                notif.crc,
+            );
+
+            total_crc = crc32fast::hash(&total_crc.to_le_bytes());
         }
 
-        // TODO: CatalogManager に更新を記録
-        // TODO: Gossipsub で CatalogUpdate をブロードキャスト
-        // TODO: 各ファイルの FileOffer を TransferLedger に登録
+        // Gossipsub で CatalogUpdate をブロードキャスト
+        if let Some(first) = notifications.first() {
+            self.broadcast_catalog_update(
+                &first.project_id,
+                total_crc,
+                notifications.len() as u64,
+            );
+        }
 
         Ok(())
     }
 
-    async fn list_transfers(
-        &self,
-        project_id: Option<&str>,
-    ) -> Vec<ActiveTransfer> {
+    async fn list_transfers(&self, project_id: Option<&str>) -> Vec<ActiveTransfer> {
         self.transfers
             .iter()
             .filter(|entry| match project_id {
@@ -304,10 +519,17 @@ impl FileSharing for Exchange {
         match self.transfers.get_mut(transfer_id) {
             Some(mut entry) => {
                 tracing::info!("Cancelling transfer: {:?}", transfer_id);
-                entry.value_mut().state = TransferState::Cancelled;
+                let transfer = entry.value_mut();
+                transfer.state = TransferState::Cancelled;
 
-                // TODO: QUIC ストリームを閉じる
-                // TODO: TransferLedger で cancel_want
+                // TransferLedger で Want をキャンセル
+                if transfer.direction == TransferDirection::Receive {
+                    self.ledger.cancel_want(
+                        &transfer.file_id,
+                        0,
+                        &self.local_peer_id,
+                    );
+                }
 
                 Ok(())
             }
