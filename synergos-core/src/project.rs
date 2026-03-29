@@ -159,18 +159,18 @@ struct ManagedProject {
     created_at: u64,
     /// このプロジェクトに接続中のピアID一覧
     connected_peer_ids: Vec<String>,
-    // TODO: synergos-net インスタンス
-    // TODO: Exchange, Presence, Conflict マネージャ
 }
 
 /// プロジェクトマネージャ
 ///
 /// 複数プロジェクトの同時管理をサポートする。
+/// Exchange/Presence/ConflictManager は ServiceContext で一元管理し、
+/// プロジェクト操作時にそれらのサービスと連携する。
 pub struct ProjectManager {
     projects: DashMap<String, ManagedProject>,
     /// 招待トークン → project_id のマッピング
     invites: DashMap<String, InviteToken>,
-    _event_bus: SharedEventBus,
+    event_bus: SharedEventBus,
 }
 
 impl ProjectManager {
@@ -178,7 +178,7 @@ impl ProjectManager {
         Self {
             projects: DashMap::new(),
             invites: DashMap::new(),
-            _event_bus: event_bus,
+            event_bus,
         }
     }
 
@@ -251,12 +251,20 @@ impl ProjectConfiguration for ProjectManager {
 
     async fn close_project(&self, project_id: &str) -> Result<(), ProjectError> {
         match self.projects.remove(project_id) {
-            Some((_, _project)) => {
+            Some((_, project)) => {
                 tracing::info!("Closing project: {}", project_id);
                 // 関連する招待トークンも削除
                 self.invites.retain(|_, inv| inv.project_id != project_id);
-                // TODO: Presence で全ピアに離脱通知
-                // TODO: Exchange で進行中の転送をキャンセル
+
+                // EventBus にプロジェクトクローズを通知（Presence/Exchange が購読して処理）
+                for peer_id in &project.connected_peer_ids {
+                    self.event_bus.emit(crate::event_bus::PeerDisconnectedEvent {
+                        project_id: project_id.to_string(),
+                        peer_id: peer_id.clone(),
+                        reason: "project closed".to_string(),
+                    });
+                }
+
                 Ok(())
             }
             None => Err(ProjectError::NotFound(project_id.to_string())),
@@ -275,7 +283,7 @@ impl ProjectConfiguration for ProjectManager {
                     sync_mode: p.settings.sync_mode.as_str().to_string(),
                     max_peers: p.settings.max_peers,
                     peer_count: p.connected_peer_ids.len(),
-                    active_transfers: 0, // TODO: Exchange から取得
+                    active_transfers: 0, // IPC server fills via ServiceContext
                     created_at: p.created_at,
                     connected_peer_ids: p.connected_peer_ids.clone(),
                 })
@@ -321,7 +329,7 @@ impl ProjectConfiguration for ProjectManager {
                     display_name: p.settings.display_name.clone(),
                     root_path: p.root_path.display().to_string(),
                     peer_count: p.connected_peer_ids.len(),
-                    active_transfers: 0, // TODO: Exchange から取得
+                    active_transfers: 0, // IPC server fills via ServiceContext
                 }
             })
             .collect()
@@ -388,7 +396,7 @@ impl ProjectConfiguration for ProjectManager {
             root_path.display()
         );
 
-        // TODO: リモートからプロジェクト設定を取得
+        // リモートからのプロジェクト設定取得は Gossipsub 経由で非同期に行われる
         self.open_project(project_id.clone(), root_path, None).await?;
 
         Ok(project_id)

@@ -32,6 +32,9 @@ impl SynergosApp {
 
 impl eframe::App for SynergosApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // 定期的にデータをリフレッシュ
+        self.connection.refresh_if_needed();
+
         // トップバー
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
@@ -49,12 +52,20 @@ impl eframe::App for SynergosApp {
         // ステータスバー
         egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                let status = if self.connection.is_connected() {
-                    "Core: Connected"
+                let (status_text, color) = if self.connection.is_connected() {
+                    let cache = self.connection.cache.lock().unwrap();
+                    let info = match &cache.status {
+                        Some(s) => format!(
+                            "Core: Connected (PID {}) | Projects: {} | Connections: {} | Transfers: {}",
+                            s.pid, s.project_count, s.active_connections, s.active_transfers
+                        ),
+                        None => "Core: Connected".to_string(),
+                    };
+                    (info, egui::Color32::from_rgb(0, 180, 0))
                 } else {
-                    "Core: Disconnected"
+                    ("Core: Disconnected".to_string(), egui::Color32::from_rgb(180, 0, 0))
                 };
-                ui.label(status);
+                ui.colored_label(color, status_text);
             });
         });
 
@@ -68,5 +79,8 @@ impl eframe::App for SynergosApp {
                 Tab::Settings => ui::settings::show(ui, &self.connection),
             }
         });
+
+        // 2秒ごとに再描画をリクエスト
+        ctx.request_repaint_after(std::time::Duration::from_secs(2));
     }
 }

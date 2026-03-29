@@ -45,13 +45,14 @@ pub fn bridge_event(ipc_event: IpcEvent) -> Option<BridgedEvent> {
 
         IpcEvent::TransferProgress {
             transfer_id,
+            peer_id,
             file_name,
             bytes_transferred,
             total_bytes,
             speed_bps,
         } => Some(BridgedEvent::TransferProgress(FileTransferProgress {
             transfer_id,
-            peer_id: String::new(), // TODO: IPC イベントにピアIDを含める
+            peer_id,
             resource_id: file_name,
             bytes_transferred,
             total_bytes,
@@ -60,11 +61,12 @@ pub fn bridge_event(ipc_event: IpcEvent) -> Option<BridgedEvent> {
 
         IpcEvent::TransferCompleted {
             transfer_id,
+            peer_id,
             file_name,
             file_path,
         } => Some(BridgedEvent::TransferCompleted(FileTransferCompleted {
             transfer_id,
-            peer_id: String::new(),
+            peer_id,
             resource_id: file_name,
             file_path,
         })),
@@ -72,13 +74,13 @@ pub fn bridge_event(ipc_event: IpcEvent) -> Option<BridgedEvent> {
         IpcEvent::NetworkStatusUpdated {
             active_connections,
             total_bandwidth_bps,
-            used_bandwidth_bps: _,
+            used_bandwidth_bps,
             avg_latency_ms,
         } => Some(BridgedEvent::NetworkStatus(NetworkStatusUpdated {
             active_connections,
             max_connections: 0,
             total_bandwidth_bps,
-            used_bandwidth_bps: 0,
+            used_bandwidth_bps,
             avg_latency_ms,
         })),
 

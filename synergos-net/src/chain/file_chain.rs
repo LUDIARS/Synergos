@@ -143,6 +143,11 @@ impl FileChain {
         &self.blocks
     }
 
+    /// ブロックのイテレータを取得
+    pub fn blocks_iter(&self) -> impl Iterator<Item = &ChainBlock> {
+        self.blocks.iter()
+    }
+
     /// 指定ハッシュのブロックを検索
     pub fn find_block(&self, hash: &Blake3Hash) -> Option<&ChainBlock> {
         self.blocks.iter().find(|b| &b.hash == hash)
