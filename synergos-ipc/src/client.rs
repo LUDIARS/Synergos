@@ -6,7 +6,9 @@
 use crate::command::IpcCommand;
 use crate::event::IpcEvent;
 use crate::response::IpcResponse;
-use crate::transport::{IpcError, IpcTransport};
+use crate::transport::IpcError;
+#[cfg(unix)]
+use crate::transport::IpcTransport;
 use tokio::sync::mpsc;
 
 /// IPC クライアント
@@ -66,12 +68,12 @@ impl IpcClient {
     }
 
     /// コマンドを送信し、レスポンスを受信する
-    pub async fn send(&mut self, command: IpcCommand) -> Result<IpcResponse, IpcError> {
+    pub async fn send(&mut self, _command: IpcCommand) -> Result<IpcResponse, IpcError> {
         match &mut self._state {
             #[cfg(unix)]
             ClientState::Connected { stream } => {
                 let (mut reader, mut writer) = stream.split();
-                IpcTransport::write_message(&mut writer, &command).await?;
+                IpcTransport::write_message(&mut writer, &_command).await?;
                 let response: IpcResponse =
                     IpcTransport::read_message(&mut reader).await?;
                 Ok(response)
