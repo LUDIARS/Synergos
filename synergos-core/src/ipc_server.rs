@@ -61,6 +61,17 @@ impl IpcServer {
         let _ = tokio::fs::remove_file(&path).await;
 
         let listener = tokio::net::UnixListener::bind(&path)?;
+
+        // ソケットのパーミッションを所有者のみに制限（認証バイパス防止）
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(0o600);
+            if let Err(e) = std::fs::set_permissions(&path, perms) {
+                tracing::warn!("Failed to set socket permissions: {}", e);
+            }
+        }
+
         tracing::info!("IPC server listening on {}", path.display());
 
         let mut shutdown_rx = self.ctx.shutdown_tx.subscribe();
@@ -132,6 +143,29 @@ async fn handle_client(
     Ok(())
 }
 
+/// IPC 入力文字列のバリデーション
+fn validate_id(value: &str, field_name: &str) -> Result<(), IpcResponse> {
+    if value.is_empty() {
+        return Err(IpcResponse::Error {
+            code: 400,
+            message: format!("{} must not be empty", field_name),
+        });
+    }
+    if value.len() > 256 {
+        return Err(IpcResponse::Error {
+            code: 400,
+            message: format!("{} exceeds maximum length of 256", field_name),
+        });
+    }
+    if value.chars().any(|c| c.is_control()) {
+        return Err(IpcResponse::Error {
+            code: 400,
+            message: format!("{} contains invalid control characters", field_name),
+        });
+    }
+    Ok(())
+}
+
 /// コマンドをディスパッチしてレスポンスを生成
 async fn dispatch_command(command: IpcCommand, ctx: &ServiceContext) -> IpcResponse {
     match command {
@@ -174,19 +208,27 @@ async fn dispatch_command(command: IpcCommand, ctx: &ServiceContext) -> IpcRespo
             project_id,
             root_path,
             display_name,
-        } => match ctx
-            .project_manager
-            .open_project(project_id, root_path, display_name)
-            .await
-        {
+        } => {
+            if let Err(e) = validate_id(&project_id, "project_id") {
+                return e;
+            }
+            match ctx
+                .project_manager
+                .open_project(project_id, root_path, display_name)
+                .await
+            {
             Ok(()) => IpcResponse::Ok,
             Err(e) => IpcResponse::Error {
                 code: 1,
                 message: e.to_string(),
             },
-        },
+        }
+        }
 
         IpcCommand::ProjectClose { project_id } => {
+            if let Err(e) = validate_id(&project_id, "project_id") {
+                return e;
+            }
             match ctx.project_manager.close_project(&project_id).await {
                 Ok(()) => IpcResponse::Ok,
                 Err(e) => IpcResponse::Error {
@@ -269,6 +311,9 @@ async fn dispatch_command(command: IpcCommand, ctx: &ServiceContext) -> IpcRespo
         // ── ピア管理 ──
 
         IpcCommand::PeerList { project_id } => {
+            if let Err(e) = validate_id(&project_id, "project_id") {
+                return e;
+            }
             let nodes = ctx.presence.list_nodes(Some(&project_id)).await;
             let peers: Vec<PeerInfo> = nodes
                 .into_iter()
@@ -381,23 +426,44 @@ async fn dispatch_command(command: IpcCommand, ctx: &ServiceContext) -> IpcRespo
             project_id,
             file_paths,
         } => {
-            let notifications: Vec<PublishNotification> = file_paths
-                .iter()
-                .map(|path| {
-                    let file_size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-                    let crc = crc32fast::hash(
-                        path.to_string_lossy().as_bytes(),
-                    );
-                    PublishNotification {
-                        project_id: project_id.clone(),
-                        file_id: FileId::new(path.to_string_lossy().to_string()),
-                        file_path: path.clone(),
-                        file_size,
-                        crc,
-                        version: 1,
+            // パストラバーサル防止: プロジェクトルート外のファイルを拒否
+            let project_root = ctx
+                .project_manager
+                .get_project(&project_id)
+                .await
+                .ok()
+                .map(|p| std::path::PathBuf::from(&p.root_path));
+
+            let mut notifications = Vec::new();
+            for path in &file_paths {
+                // パスを正規化してプロジェクトルート内であることを確認
+                if let Some(ref root) = project_root {
+                    let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
+                    let root_canonical = root.canonicalize().unwrap_or_else(|_| root.clone());
+                    if !canonical.starts_with(&root_canonical) {
+                        return IpcResponse::Error {
+                            code: 4,
+                            message: format!(
+                                "Path traversal denied: {} is outside project root",
+                                path.display()
+                            ),
+                        };
                     }
-                })
-                .collect();
+                }
+
+                let file_size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+                let crc = crc32fast::hash(
+                    path.to_string_lossy().as_bytes(),
+                );
+                notifications.push(PublishNotification {
+                    project_id: project_id.clone(),
+                    file_id: FileId::new(path.to_string_lossy().to_string()),
+                    file_path: path.clone(),
+                    file_size,
+                    crc,
+                    version: 1,
+                });
+            }
             match ctx.exchange.publish_updates(notifications).await {
                 Ok(()) => IpcResponse::Ok,
                 Err(e) => IpcResponse::Error {

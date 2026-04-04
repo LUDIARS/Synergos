@@ -91,9 +91,9 @@ impl GossipNode {
 
     /// メッセージをメッシュに配信
     pub fn publish(&self, topic: &TopicId, message: GossipMessage) -> Vec<PeerId> {
-        // メッセージID を生成
-        let msg_bytes = format!("{:?}", message);
-        let msg_id = MessageId::from_content(msg_bytes.as_bytes());
+        // メッセージID を生成（serde シリアライズで安定したバイト列から算出）
+        let msg_bytes = serde_json::to_vec(&message).unwrap_or_default();
+        let msg_id = MessageId::from_content(&msg_bytes);
 
         // 重複チェック
         if self.message_cache.check_and_insert(&msg_id) {
@@ -117,8 +117,8 @@ impl GossipNode {
         message: GossipMessage,
         _from: &PeerId,
     ) -> bool {
-        let msg_bytes = format!("{:?}", message);
-        let msg_id = MessageId::from_content(msg_bytes.as_bytes());
+        let msg_bytes = serde_json::to_vec(&message).unwrap_or_default();
+        let msg_id = MessageId::from_content(&msg_bytes);
 
         // 重複チェック
         if self.message_cache.check_and_insert(&msg_id) {
