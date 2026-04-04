@@ -1,12 +1,10 @@
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use dashmap::DashMap;
 use tokio::sync::RwLock;
 
 use super::types::*;
 use crate::chain::{ChainBlock, FileChain};
 use crate::error::{Result, SynergosNetError};
-use crate::types::{ChunkId, FileId};
+use crate::types::{now_ms, ChunkId, FileId};
 
 /// カタログマネージャ
 pub struct CatalogManager {
@@ -237,13 +235,6 @@ impl CatalogManager {
             }
         }
     }
-}
-
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
 }
 
 #[cfg(test)]

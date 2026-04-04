@@ -34,13 +34,17 @@ impl SyncMode {
             Self::Selective { .. } => "selective",
         }
     }
+}
 
-    pub fn from_str(s: &str) -> Self {
-        match s {
+impl std::str::FromStr for SyncMode {
+    type Err = std::convert::Infallible;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        Ok(match s {
             "manual" => Self::Manual,
             "selective" => Self::Selective { patterns: vec![] },
             _ => Self::Full,
-        }
+        })
     }
 }
 
@@ -182,15 +186,6 @@ impl ProjectManager {
         }
     }
 
-    // 既存コードとの後方互換用ヘルパー
-    pub async fn open(&self, project_id: String, root_path: PathBuf) {
-        let _ = self.open_project(project_id, root_path, None).await;
-    }
-
-    pub async fn close(&self, project_id: &str) {
-        let _ = self.close_project(project_id).await;
-    }
-
     pub async fn close_all(&self) {
         let ids: Vec<String> = self
             .projects
@@ -202,9 +197,6 @@ impl ProjectManager {
         }
     }
 
-    pub fn list(&self) -> Vec<ProjectInfo> {
-        self.list_projects()
-    }
 }
 
 fn now_epoch_secs() -> u64 {
@@ -307,7 +299,7 @@ impl ProjectConfiguration for ProjectManager {
                     settings.description = desc;
                 }
                 if let Some(mode) = patch.sync_mode {
-                    settings.sync_mode = SyncMode::from_str(&mode);
+                    settings.sync_mode = mode.parse().unwrap_or(SyncMode::Full);
                 }
                 if let Some(max) = patch.max_peers {
                     settings.max_peers = max;
@@ -353,10 +345,11 @@ impl ProjectConfiguration for ProjectManager {
             expires_at,
         };
 
+        let masked_token = format!("{}...{}", &token[..8], &token[token.len()-4..]);
         tracing::info!(
             "Created invite for project {}: token={}, expires_at={:?}",
             project_id,
-            token,
+            masked_token,
             expires_at
         );
 

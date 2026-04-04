@@ -9,13 +9,12 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use dashmap::DashMap;
 use synergos_net::chain::{LedgerEntryState, OfferEntry, TransferLedger, WantEntry, LedgerAction};
 use synergos_net::gossip::{GossipMessage, GossipNode};
-use synergos_net::types::{Blake3Hash, FileId, PeerId, TopicId, TransferId};
+use synergos_net::types::{now_ms, Blake3Hash, FileId, PeerId, TopicId, TransferId};
 
 use crate::event_bus::{SharedEventBus, TransferProgressEvent, TransferCompletedEvent};
 
@@ -157,13 +156,6 @@ pub trait FileSharing: Send + Sync {
 }
 
 // ── 実装 ──
-
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
-}
 
 /// ファイル転送制御サービス
 pub struct Exchange {

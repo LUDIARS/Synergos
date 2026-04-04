@@ -188,6 +188,14 @@ pub struct PeerEndpoint {
     pub state: ConnectionState,
 }
 
+/// 現在時刻を Unix epoch ミリ秒で取得するユーティリティ
+pub fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
 /// ファイルサイズクラス
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum FileSizeClass {

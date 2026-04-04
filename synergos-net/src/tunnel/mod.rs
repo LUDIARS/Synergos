@@ -173,8 +173,29 @@ impl TunnelManager {
 
     // ── 内部ヘルパー ──
 
+    /// ホスト名のバリデーション（コマンドインジェクション防止）
+    fn validate_hostname(hostname: &str) -> Result<()> {
+        if hostname.is_empty() {
+            return Ok(());
+        }
+        // RFC 1123 準拠: 英数字、ハイフン、ドットのみ許可
+        let is_valid = hostname
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.');
+        if !is_valid || hostname.len() > 253 {
+            return Err(SynergosNetError::Tunnel(format!(
+                "Invalid hostname: contains disallowed characters or exceeds 253 chars: {}",
+                hostname
+            )));
+        }
+        Ok(())
+    }
+
     /// cloudflared プロセスを起動する
     async fn spawn_cloudflared(&self) -> Result<String> {
+        // ホスト名のバリデーション（コマンドインジェクション防止）
+        Self::validate_hostname(&self.config.hostname)?;
+
         // cloudflared が PATH にあるか確認
         let which_result = tokio::process::Command::new("which")
             .arg("cloudflared")

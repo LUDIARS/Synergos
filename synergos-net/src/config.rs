@@ -12,6 +12,7 @@ pub struct NetConfig {
     pub speed_test: SpeedTestConfig,
     pub peer_selection: PeerSelectionConfig,
     pub monitor: MonitorConfig,
+    pub catalog: CatalogConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -97,6 +98,20 @@ pub struct StreamAllocationConfig {
     pub small_ratio: u8,
 }
 
+impl StreamAllocationConfig {
+    /// 帯域比率の合計が 100 であることを検証する
+    pub fn validate(&self) -> std::result::Result<(), String> {
+        let total = self.large_ratio as u16 + self.medium_ratio as u16 + self.small_ratio as u16;
+        if total != 100 {
+            return Err(format!(
+                "Stream allocation ratios must sum to 100, got {}",
+                total
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpeedTestConfig {
     /// スピードテストを有効にするか
@@ -125,6 +140,14 @@ pub struct MonitorConfig {
     pub history_size: usize,
     /// 帯域履歴のサンプリング間隔 (秒)
     pub graph_sample_interval_secs: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CatalogConfig {
+    /// チャンクあたりの最大ファイル数
+    pub chunk_max_files: usize,
+    /// ファイルチェーンの最大深度
+    pub chain_max_depth: usize,
 }
 
 impl Default for NetConfig {
@@ -178,6 +201,10 @@ impl Default for NetConfig {
                 snapshot_interval_ms: 1000,
                 history_size: 3600,
                 graph_sample_interval_secs: 1,
+            },
+            catalog: CatalogConfig {
+                chunk_max_files: 256,
+                chain_max_depth: 10,
             },
         }
     }
