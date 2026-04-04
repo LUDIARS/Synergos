@@ -1,4 +1,3 @@
-#![allow(dead_code, unused_imports, unused_variables)]
 //! synergos-gui: Synergos 専用 GUI アプリケーション
 //!
 //! synergos-core デーモンに IPC 接続し、ネットワーク状態・ピア管理・
