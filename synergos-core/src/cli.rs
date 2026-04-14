@@ -156,16 +156,12 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Stop => {
             tracing::info!("Stopping Synergos core daemon...");
             let mut client = synergos_ipc::IpcClient::connect().await?;
-            client
-                .send(synergos_ipc::IpcCommand::Shutdown)
-                .await?;
+            client.send(synergos_ipc::IpcCommand::Shutdown).await?;
             println!("Daemon stopped.");
         }
         Command::Status => {
             let mut client = synergos_ipc::IpcClient::connect().await?;
-            let resp = client
-                .send(synergos_ipc::IpcCommand::Status)
-                .await?;
+            let resp = client.send(synergos_ipc::IpcCommand::Status).await?;
             match resp {
                 synergos_ipc::IpcResponse::Status(status) => {
                     println!("Synergos Core Daemon");
@@ -182,14 +178,15 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Transfer(cmd) => handle_transfer(cmd).await?,
         Command::Network => {
             let mut client = synergos_ipc::IpcClient::connect().await?;
-            let resp = client
-                .send(synergos_ipc::IpcCommand::NetworkStatus)
-                .await?;
+            let resp = client.send(synergos_ipc::IpcCommand::NetworkStatus).await?;
             match resp {
                 synergos_ipc::IpcResponse::NetworkStatus(info) => {
                     println!("Network Status");
                     println!("  Route:       {}", info.primary_route);
-                    println!("  Connections: {}/{}", info.active_connections, info.max_connections);
+                    println!(
+                        "  Connections: {}/{}",
+                        info.active_connections, info.max_connections
+                    );
                     println!("  Bandwidth:   {} bps", info.total_bandwidth_bps);
                     println!("  Latency:     {} ms", info.avg_latency_ms);
                 }
@@ -215,16 +212,12 @@ async fn handle_project(cmd: ProjectCommand) -> anyhow::Result<()> {
         }
         ProjectCommand::Close { id } => {
             client
-                .send(synergos_ipc::IpcCommand::ProjectClose {
-                    project_id: id,
-                })
+                .send(synergos_ipc::IpcCommand::ProjectClose { project_id: id })
                 .await?;
             println!("Project closed.");
         }
         ProjectCommand::List => {
-            let resp = client
-                .send(synergos_ipc::IpcCommand::ProjectList)
-                .await?;
+            let resp = client.send(synergos_ipc::IpcCommand::ProjectList).await?;
             if let synergos_ipc::IpcResponse::ProjectList(projects) = resp {
                 if projects.is_empty() {
                     println!("No active projects.");
@@ -248,7 +241,14 @@ async fn handle_project(cmd: ProjectCommand) -> anyhow::Result<()> {
                     println!("  Path:        {}", d.root_path);
                     println!("  Description: {}", d.description);
                     println!("  Sync mode:   {}", d.sync_mode);
-                    println!("  Max peers:   {}", if d.max_peers == 0 { "unlimited".to_string() } else { d.max_peers.to_string() });
+                    println!(
+                        "  Max peers:   {}",
+                        if d.max_peers == 0 {
+                            "unlimited".to_string()
+                        } else {
+                            d.max_peers.to_string()
+                        }
+                    );
                     println!("  Peers:       {}", d.peer_count);
                     println!("  Transfers:   {}", d.active_transfers);
                     if !d.connected_peer_ids.is_empty() {

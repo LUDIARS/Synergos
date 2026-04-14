@@ -198,7 +198,11 @@ impl Daemon {
             if transfer.state == crate::exchange::TransferState::Running
                 || transfer.state == crate::exchange::TransferState::Queued
             {
-                let _ = self.ctx.exchange.cancel_transfer(&transfer.transfer_id).await;
+                let _ = self
+                    .ctx
+                    .exchange
+                    .cancel_transfer(&transfer.transfer_id)
+                    .await;
             }
         }
 

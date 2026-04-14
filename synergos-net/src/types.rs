@@ -36,8 +36,8 @@ impl NodeId {
     /// 2つの NodeId 間の XOR 距離を計算（Kademlia）
     pub fn xor_distance(&self, other: &NodeId) -> [u8; 32] {
         let mut distance = [0u8; 32];
-        for i in 0..32 {
-            distance[i] = self.0[i] ^ other.0[i];
+        for (i, d) in distance.iter_mut().enumerate() {
+            *d = self.0[i] ^ other.0[i];
         }
         distance
     }
@@ -141,15 +141,9 @@ pub enum Route {
         fqdn: Option<String>,
     },
     /// Cloudflare Tunnel 経由
-    Tunnel {
-        tunnel_id: String,
-        hostname: String,
-    },
+    Tunnel { tunnel_id: String, hostname: String },
     /// WebSocket リレー（フォールバック）
-    Relay {
-        server_url: String,
-        room_id: String,
-    },
+    Relay { server_url: String, room_id: String },
 }
 
 /// 経路種別（簡易判別用）

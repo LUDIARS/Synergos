@@ -28,7 +28,7 @@ pub use error::{Result, SynergosNetError};
 pub use gossip::{GossipMessage, GossipNode};
 pub use identity::{peer_id_from_public_bytes, verify as verify_signature, Identity, IdentityError};
 pub use mesh::Mesh;
-pub use quic::{QuicManager, SpeedTestResult, CalibratedParams, ConnectionCalibrator};
+pub use quic::{CalibratedParams, ConnectionCalibrator, QuicManager, SpeedTestResult};
 pub use tunnel::{TunnelManager, TunnelState};
 pub use types::*;
 

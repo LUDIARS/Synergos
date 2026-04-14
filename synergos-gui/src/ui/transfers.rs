@@ -74,7 +74,11 @@ pub fn show(ui: &mut egui::Ui, connection: &CoreConnection, inputs: &mut UiInput
 
             for t in &transfers {
                 // 方向アイコン
-                let dir_icon = if t.direction == "upload" { "↑" } else { "↓" };
+                let dir_icon = if t.direction == "upload" {
+                    "↑"
+                } else {
+                    "↓"
+                };
                 ui.label(dir_icon);
 
                 ui.label(&t.file_name);
@@ -85,8 +89,8 @@ pub fn show(ui: &mut egui::Ui, connection: &CoreConnection, inputs: &mut UiInput
                 } else {
                     0.0
                 };
-                let bar = egui::ProgressBar::new(progress)
-                    .text(format!("{:.0}%", progress * 100.0));
+                let bar =
+                    egui::ProgressBar::new(progress).text(format!("{:.0}%", progress * 100.0));
                 ui.add_sized([120.0, 16.0], bar);
 
                 ui.label(format_speed(t.speed_bps));

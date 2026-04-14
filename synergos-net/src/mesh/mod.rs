@@ -280,12 +280,11 @@ impl Mesh {
 
     /// 期限切れの TURN セッションをクリーンアップ
     pub fn cleanup_expired_sessions(&self) {
-        self.turn_sessions.retain(|_, session| {
-            match session.expires_at {
+        self.turn_sessions
+            .retain(|_, session| match session.expires_at {
                 Some(exp) => Instant::now() < exp,
                 None => true,
-            }
-        });
+            });
     }
 
     /// アクティブな TURN セッション一覧を取得
@@ -308,10 +307,8 @@ impl Mesh {
         use hickory_resolver::config::{ResolverConfig, ResolverOpts};
         use hickory_resolver::TokioAsyncResolver;
 
-        let resolver = TokioAsyncResolver::tokio(
-            ResolverConfig::cloudflare_https(),
-            ResolverOpts::default(),
-        );
+        let resolver =
+            TokioAsyncResolver::tokio(ResolverConfig::cloudflare_https(), ResolverOpts::default());
 
         let response = resolver
             .ipv6_lookup(fqdn)
@@ -329,10 +326,8 @@ impl Mesh {
         use hickory_resolver::config::{ResolverConfig, ResolverOpts};
         use hickory_resolver::TokioAsyncResolver;
 
-        let resolver = TokioAsyncResolver::tokio(
-            ResolverConfig::default(),
-            ResolverOpts::default(),
-        );
+        let resolver =
+            TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default());
 
         let response = resolver
             .ipv6_lookup(fqdn)

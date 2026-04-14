@@ -44,13 +44,21 @@ impl ChainBlock {
                 hasher.update(patch.as_bytes());
                 hasher.update(&result_crc.to_le_bytes());
             }
-            ChainPayload::BinaryCid { cid, file_size, crc } => {
+            ChainPayload::BinaryCid {
+                cid,
+                file_size,
+                crc,
+            } => {
                 hasher.update(b"binary_cid");
                 hasher.update(cid.0.as_bytes());
                 hasher.update(&file_size.to_le_bytes());
                 hasher.update(&crc.to_le_bytes());
             }
-            ChainPayload::FullSnapshot { cid, file_size, crc } => {
+            ChainPayload::FullSnapshot {
+                cid,
+                file_size,
+                crc,
+            } => {
                 hasher.update(b"full_snapshot");
                 hasher.update(cid.0.as_bytes());
                 hasher.update(&file_size.to_le_bytes());
@@ -124,22 +132,11 @@ impl ChainBlock {
 #[derive(Debug, Clone)]
 pub enum ChainPayload {
     /// テキストファイルの差分（unified diff）
-    TextDiff {
-        patch: String,
-        result_crc: u32,
-    },
+    TextDiff { patch: String, result_crc: u32 },
     /// バイナリファイルの IPFS CID 参照
-    BinaryCid {
-        cid: Cid,
-        file_size: u64,
-        crc: u32,
-    },
+    BinaryCid { cid: Cid, file_size: u64, crc: u32 },
     /// フルスナップショット（初回 or 定期ベースライン）
-    FullSnapshot {
-        cid: Cid,
-        file_size: u64,
-        crc: u32,
-    },
+    FullSnapshot { cid: Cid, file_size: u64, crc: u32 },
 }
 
 /// ファイルごとの更新チェーン
@@ -223,12 +220,10 @@ impl FileChain {
     /// 2 つのチェーンの共通祖先を見つける
     pub fn find_common_ancestor(&self, remote_chain: &FileChain) -> Option<&ChainBlock> {
         // ローカルのブロックを逆順に走査し、リモートにも存在するものを探す
-        for local_block in self.blocks.iter().rev() {
-            if remote_chain.find_block(&local_block.hash).is_some() {
-                return Some(local_block);
-            }
-        }
-        None
+        self.blocks
+            .iter()
+            .rev()
+            .find(|local_block| remote_chain.find_block(&local_block.hash).is_some())
     }
 }
 

@@ -11,16 +11,27 @@ env:
   RUSTFLAGS: -D warnings
 
 jobs:
-  build:
-    runs-on: windows-latest
-    name: Build (Windows)
-
+  fmt:
+    runs-on: ubuntu-latest
+    name: Rustfmt
     steps:
       - uses: actions/checkout@v4
-
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Check formatting
+        run: cargo fmt --all -- --check
 
+  clippy:
+    runs-on: ubuntu-latest
+    name: Clippy
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
       - name: Cache cargo registry & build
         uses: actions/cache@v4
         with:
@@ -28,9 +39,34 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: windows-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: clippy-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            windows-cargo-
+            clippy-cargo-
+      - name: Run clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    name: Test (${{ matrix.os }})
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo registry & build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ matrix.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ matrix.os }}-cargo-
       - name: Build workspace
-        run: cargo build --workspace
+        run: cargo build --workspace --all-targets
+      - name: Run tests
+        run: cargo test --workspace --all-targets

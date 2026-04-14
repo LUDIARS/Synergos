@@ -131,10 +131,7 @@ impl IpcClient {
 
     /// イベントを受信する
     pub async fn recv_event(&mut self) -> Result<IpcEvent, IpcError> {
-        self.event_rx
-            .recv()
-            .await
-            .ok_or(IpcError::ConnectionClosed)
+        self.event_rx.recv().await.ok_or(IpcError::ConnectionClosed)
     }
 
     /// デーモンが稼働中かチェック
