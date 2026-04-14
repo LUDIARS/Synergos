@@ -80,7 +80,7 @@ impl GossipNode {
 
     /// Topic を購読（プロジェクト参加時）
     pub fn subscribe(&self, topic: TopicId) {
-        self.mesh.entry(topic).or_insert_with(Vec::new);
+        self.mesh.entry(topic).or_default();
     }
 
     /// Topic から退出

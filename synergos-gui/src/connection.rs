@@ -126,9 +126,7 @@ impl CoreConnection {
 
     /// 転送一覧をリフレッシュ
     pub fn refresh_transfers(&self) {
-        let resp = self.send_command(IpcCommand::TransferList {
-            project_id: None,
-        });
+        let resp = self.send_command(IpcCommand::TransferList { project_id: None });
         if let Some(synergos_ipc::IpcResponse::TransferList(transfers)) = resp {
             let mut cache = self.cache.lock().unwrap();
             cache.transfers = transfers;

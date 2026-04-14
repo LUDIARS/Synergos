@@ -147,9 +147,7 @@ async fn dispatch_command(command: IpcCommand, ctx: &ServiceContext) -> IpcRespo
             let transfers = ctx.exchange.list_transfers(None).await;
             let active_transfers = transfers
                 .iter()
-                .filter(|t| {
-                    t.state == TransferState::Running || t.state == TransferState::Queued
-                })
+                .filter(|t| t.state == TransferState::Running || t.state == TransferState::Queued)
                 .count();
 
             let peers = ctx.presence.list_nodes(None).await;
@@ -169,7 +167,6 @@ async fn dispatch_command(command: IpcCommand, ctx: &ServiceContext) -> IpcRespo
         }
 
         // ── プロジェクト管理 ──
-
         IpcCommand::ProjectOpen {
             project_id,
             root_path,
@@ -267,7 +264,6 @@ async fn dispatch_command(command: IpcCommand, ctx: &ServiceContext) -> IpcRespo
         },
 
         // ── ピア管理 ──
-
         IpcCommand::PeerList { project_id } => {
             let nodes = ctx.presence.list_nodes(Some(&project_id)).await;
             let peers: Vec<PeerInfo> = nodes
@@ -321,7 +317,6 @@ async fn dispatch_command(command: IpcCommand, ctx: &ServiceContext) -> IpcRespo
         }
 
         // ── ファイル転送 ──
-
         IpcCommand::TransferRequest {
             project_id,
             file_id,
@@ -364,11 +359,7 @@ async fn dispatch_command(command: IpcCommand, ctx: &ServiceContext) -> IpcRespo
         }
 
         IpcCommand::TransferCancel { transfer_id } => {
-            match ctx
-                .exchange
-                .cancel_transfer(&TransferId(transfer_id))
-                .await
-            {
+            match ctx.exchange.cancel_transfer(&TransferId(transfer_id)).await {
                 Ok(()) => IpcResponse::Ok,
                 Err(e) => IpcResponse::Error {
                     code: 3,
@@ -385,9 +376,7 @@ async fn dispatch_command(command: IpcCommand, ctx: &ServiceContext) -> IpcRespo
                 .iter()
                 .map(|path| {
                     let file_size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-                    let crc = crc32fast::hash(
-                        path.to_string_lossy().as_bytes(),
-                    );
+                    let crc = crc32fast::hash(path.to_string_lossy().as_bytes());
                     PublishNotification {
                         project_id: project_id.clone(),
                         file_id: FileId::new(path.to_string_lossy().to_string()),
@@ -408,7 +397,6 @@ async fn dispatch_command(command: IpcCommand, ctx: &ServiceContext) -> IpcRespo
         }
 
         // ── モニタリング ──
-
         IpcCommand::NetworkStatus => {
             let peers = ctx.presence.list_nodes(None).await;
             let connected_peers: Vec<_> = peers
@@ -420,15 +408,16 @@ async fn dispatch_command(command: IpcCommand, ctx: &ServiceContext) -> IpcRespo
             let avg_latency = if connected_peers.is_empty() {
                 0
             } else {
-                let total_rtt: u32 = connected_peers
-                    .iter()
-                    .filter_map(|p| p.rtt_ms)
-                    .sum();
+                let total_rtt: u32 = connected_peers.iter().filter_map(|p| p.rtt_ms).sum();
                 let count = connected_peers
                     .iter()
                     .filter(|p| p.rtt_ms.is_some())
                     .count() as u32;
-                if count > 0 { total_rtt / count } else { 0 }
+                if count > 0 {
+                    total_rtt / count
+                } else {
+                    0
+                }
             };
 
             let primary_route = connected_peers

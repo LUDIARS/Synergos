@@ -25,7 +25,7 @@ pub use dht::DhtNode;
 pub use error::{Result, SynergosNetError};
 pub use gossip::{GossipMessage, GossipNode};
 pub use mesh::Mesh;
-pub use quic::{QuicManager, SpeedTestResult, CalibratedParams, ConnectionCalibrator};
+pub use quic::{CalibratedParams, ConnectionCalibrator, QuicManager, SpeedTestResult};
 pub use tunnel::{TunnelManager, TunnelState};
 pub use types::*;
 

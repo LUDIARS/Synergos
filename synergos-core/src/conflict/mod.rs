@@ -132,19 +132,16 @@ impl ConflictManager {
         }
 
         // 分岐点を特定: remote_block の prev_hash がチェーン内に存在するか探す
-        let (ancestor_hash, ancestor_version) =
-            if let Some(prev) = &remote_block.prev_hash {
-                // ローカルチェーンの中から一致するブロックを探す
-                let found = local_chain
-                    .blocks_iter()
-                    .find(|b| &b.hash == prev);
-                match found {
-                    Some(b) => (Some(b.hash.clone()), b.version),
-                    None => (None, 0),
-                }
-            } else {
-                (None, 0)
-            };
+        let (ancestor_hash, ancestor_version) = if let Some(prev) = &remote_block.prev_hash {
+            // ローカルチェーンの中から一致するブロックを探す
+            let found = local_chain.blocks_iter().find(|b| &b.hash == prev);
+            match found {
+                Some(b) => (Some(b.hash.clone()), b.version),
+                None => (None, 0),
+            }
+        } else {
+            (None, 0)
+        };
 
         let local_version = local_chain
             .blocks_iter()
@@ -200,11 +197,7 @@ impl ConflictManager {
                 entry.state = ConflictState::Resolved { resolution };
                 let resolved = entry.clone();
 
-                tracing::info!(
-                    "Conflict resolved for file {}: {:?}",
-                    file_id,
-                    resolution
-                );
+                tracing::info!("Conflict resolved for file {}: {:?}", file_id, resolution);
 
                 Ok(resolved)
             }

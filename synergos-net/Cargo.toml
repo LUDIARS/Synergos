@@ -37,3 +37,9 @@ rcgen = "0.13"
 
 [build-dependencies]
 prost-build = "0.13"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }
+tempfile = "3"
+pretty_assertions = "1"
+assert_matches = "1"

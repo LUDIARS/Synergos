@@ -70,14 +70,12 @@ impl eframe::App for SynergosApp {
         });
 
         // メインコンテンツ
-        egui::CentralPanel::default().show(ctx, |ui| {
-            match self.active_tab {
-                Tab::Overview => ui::overview::show(ui, &self.connection),
-                Tab::Peers => ui::peers::show(ui, &self.connection),
-                Tab::Transfers => ui::transfers::show(ui, &self.connection),
-                Tab::Conflicts => ui::conflicts::show(ui, &self.connection),
-                Tab::Settings => ui::settings::show(ui, &self.connection),
-            }
+        egui::CentralPanel::default().show(ctx, |ui| match self.active_tab {
+            Tab::Overview => ui::overview::show(ui, &self.connection),
+            Tab::Peers => ui::peers::show(ui, &self.connection),
+            Tab::Transfers => ui::transfers::show(ui, &self.connection),
+            Tab::Conflicts => ui::conflicts::show(ui, &self.connection),
+            Tab::Settings => ui::settings::show(ui, &self.connection),
         });
 
         // 2秒ごとに再描画をリクエスト

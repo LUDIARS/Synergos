@@ -17,3 +17,10 @@ thiserror = "2"
 
 # Logging
 tracing = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["io-util", "net", "sync", "macros", "rt", "rt-multi-thread", "test-util", "time"] }
+tempfile = "3"
+pretty_assertions = "1"
+assert_matches = "1"
+serial_test = "3"

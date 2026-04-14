@@ -20,3 +20,8 @@ tracing = "0.1"
 
 # Error handling
 thiserror = "2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }
+pretty_assertions = "1"
+assert_matches = "1"
