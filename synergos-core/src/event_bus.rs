@@ -53,13 +53,10 @@ impl CoreEventBus {
     /// 初回購読時にチャンネルが自動作成される。
     pub fn subscribe<E: CoreEvent>(&self) -> broadcast::Receiver<E> {
         let type_id = TypeId::of::<E>();
-        let entry = self
-            .channels
-            .entry(type_id)
-            .or_insert_with(|| {
-                let (tx, _) = broadcast::channel::<E>(CHANNEL_CAPACITY);
-                Box::new(tx)
-            });
+        let entry = self.channels.entry(type_id).or_insert_with(|| {
+            let (tx, _) = broadcast::channel::<E>(CHANNEL_CAPACITY);
+            Box::new(tx)
+        });
         entry
             .downcast_ref::<broadcast::Sender<E>>()
             .expect("type mismatch in EventBus")
@@ -167,3 +164,107 @@ impl CoreEvent for NetworkStatusEvent {
 
 /// EventBus の共有参照型
 pub type SharedEventBus = Arc<CoreEventBus>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use assert_matches::assert_matches;
+    use pretty_assertions::assert_eq;
+    use tokio::sync::broadcast::error::TryRecvError;
+
+    // テスト用の独立したイベント型（他テストとの TypeId 衝突を避けるためここだけで定義）
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct AlphaEvent(u32);
+    impl CoreEvent for AlphaEvent {
+        fn event_name() -> &'static str {
+            "alpha"
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct BetaEvent(String);
+    impl CoreEvent for BetaEvent {
+        fn event_name() -> &'static str {
+            "beta"
+        }
+    }
+
+    /// T-EB-01: emit_without_subscriber_is_noop — 受信者ゼロでも emit がパニックしない
+    #[test]
+    fn emit_without_subscriber_is_noop() {
+        let bus = CoreEventBus::new();
+        // チャンネル未作成状態で emit → 何も起きない
+        bus.emit(AlphaEvent(1));
+        bus.emit(BetaEvent("x".into()));
+        // パニックしなければ OK
+    }
+
+    /// T-EB-02: subscribe_then_emit_delivers — 購読 → 発行 → 受信できる
+    #[tokio::test(flavor = "current_thread")]
+    async fn subscribe_then_emit_delivers() {
+        let bus = CoreEventBus::new();
+        let mut rx = bus.subscribe::<AlphaEvent>();
+
+        bus.emit(AlphaEvent(42));
+
+        let got = rx.recv().await.unwrap();
+        assert_eq!(got, AlphaEvent(42));
+    }
+
+    /// T-EB-03: multiple_subscribers_all_receive — 複数受信者にブロードキャストされる
+    #[tokio::test(flavor = "current_thread")]
+    async fn multiple_subscribers_all_receive() {
+        let bus = CoreEventBus::new();
+        let mut rx1 = bus.subscribe::<AlphaEvent>();
+        let mut rx2 = bus.subscribe::<AlphaEvent>();
+        let mut rx3 = bus.subscribe::<AlphaEvent>();
+
+        bus.emit(AlphaEvent(7));
+
+        assert_eq!(rx1.recv().await.unwrap(), AlphaEvent(7));
+        assert_eq!(rx2.recv().await.unwrap(), AlphaEvent(7));
+        assert_eq!(rx3.recv().await.unwrap(), AlphaEvent(7));
+    }
+
+    /// T-EB-04: type_isolation — 型が違うイベントは混線しない
+    #[tokio::test(flavor = "current_thread")]
+    async fn type_isolation() {
+        let bus = CoreEventBus::new();
+        let mut alpha_rx = bus.subscribe::<AlphaEvent>();
+        let mut beta_rx = bus.subscribe::<BetaEvent>();
+
+        bus.emit(AlphaEvent(100));
+        bus.emit(BetaEvent("hello".into()));
+
+        assert_eq!(alpha_rx.recv().await.unwrap(), AlphaEvent(100));
+        assert_eq!(beta_rx.recv().await.unwrap(), BetaEvent("hello".into()));
+
+        // 交差受信していないことを確認
+        assert_matches!(alpha_rx.try_recv(), Err(TryRecvError::Empty));
+        assert_matches!(beta_rx.try_recv(), Err(TryRecvError::Empty));
+    }
+
+    /// T-EB-05: late_subscriber_misses_old_events — 発行後に購読した受信者は過去分を受け取らない
+    #[tokio::test(flavor = "current_thread")]
+    async fn late_subscriber_misses_old_events() {
+        let bus = CoreEventBus::new();
+
+        // 早期購読者は受信できるが…
+        let mut early = bus.subscribe::<AlphaEvent>();
+        bus.emit(AlphaEvent(1));
+
+        // 後から購読した受信者は過去の 1 を受け取らない
+        let mut late = bus.subscribe::<AlphaEvent>();
+
+        // 新しい発行は両方受け取る
+        bus.emit(AlphaEvent(2));
+
+        assert_eq!(early.recv().await.unwrap(), AlphaEvent(1));
+        assert_eq!(early.recv().await.unwrap(), AlphaEvent(2));
+
+        assert_eq!(late.recv().await.unwrap(), AlphaEvent(2));
+        // late がもう受信できる値を持っていないことを確認
+        assert_matches!(late.try_recv(), Err(TryRecvError::Empty));
+    }
+}
