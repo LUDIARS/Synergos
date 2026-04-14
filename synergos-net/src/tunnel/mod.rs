@@ -18,14 +18,9 @@ pub enum TunnelState {
     /// 起動中
     Starting,
     /// 稼働中
-    Active {
-        tunnel_id: String,
-        uptime_secs: u64,
-    },
+    Active { tunnel_id: String, uptime_secs: u64 },
     /// エラー
-    Error {
-        message: String,
-    },
+    Error { message: String },
 }
 
 /// Tunnel ヘルスチェック結果
@@ -110,7 +105,11 @@ impl TunnelManager {
                     tunnel_id: tunnel_id.clone(),
                     uptime_secs: 0,
                 };
-                tracing::info!("Tunnel active: id={}, hostname={}", tunnel_id, self.hostname);
+                tracing::info!(
+                    "Tunnel active: id={}, hostname={}",
+                    tunnel_id,
+                    self.hostname
+                );
                 Ok(tunnel_id)
             }
             Err(e) => {
@@ -181,9 +180,7 @@ impl TunnelManager {
             .output()
             .await;
 
-        let cloudflared_available = which_result
-            .map(|o| o.status.success())
-            .unwrap_or(false);
+        let cloudflared_available = which_result.map(|o| o.status.success()).unwrap_or(false);
 
         if !cloudflared_available {
             // cloudflared が利用不可の場合、シミュレーションモードで動作
@@ -194,9 +191,7 @@ impl TunnelManager {
 
         // cloudflared tunnel run を起動
         let mut cmd = tokio::process::Command::new("cloudflared");
-        cmd.arg("tunnel")
-            .arg("--no-autoupdate")
-            .arg("run");
+        cmd.arg("tunnel").arg("--no-autoupdate").arg("run");
 
         if !self.config.hostname.is_empty() {
             cmd.arg("--hostname").arg(&self.config.hostname);

@@ -34,17 +34,15 @@ impl IpcClient {
     #[cfg(unix)]
     pub async fn connect() -> Result<Self, IpcError> {
         let path = crate::transport::socket_path();
-        let stream = tokio::net::UnixStream::connect(&path)
-            .await
-            .map_err(|e| {
-                if e.kind() == std::io::ErrorKind::ConnectionRefused
-                    || e.kind() == std::io::ErrorKind::NotFound
-                {
-                    IpcError::DaemonNotRunning
-                } else {
-                    IpcError::Io(e)
-                }
-            })?;
+        let stream = tokio::net::UnixStream::connect(&path).await.map_err(|e| {
+            if e.kind() == std::io::ErrorKind::ConnectionRefused
+                || e.kind() == std::io::ErrorKind::NotFound
+            {
+                IpcError::DaemonNotRunning
+            } else {
+                IpcError::Io(e)
+            }
+        })?;
 
         let (_event_tx, event_rx) = mpsc::unbounded_channel();
 
@@ -72,8 +70,7 @@ impl IpcClient {
             ClientState::Connected { stream } => {
                 let (mut reader, mut writer) = stream.split();
                 IpcTransport::write_message(&mut writer, &command).await?;
-                let response: IpcResponse =
-                    IpcTransport::read_message(&mut reader).await?;
+                let response: IpcResponse = IpcTransport::read_message(&mut reader).await?;
                 Ok(response)
             }
             _ => Err(IpcError::DaemonNotRunning),
@@ -82,10 +79,7 @@ impl IpcClient {
 
     /// イベントを受信する（購読中のみ）
     pub async fn recv_event(&mut self) -> Result<IpcEvent, IpcError> {
-        self.event_rx
-            .recv()
-            .await
-            .ok_or(IpcError::ConnectionClosed)
+        self.event_rx.recv().await.ok_or(IpcError::ConnectionClosed)
     }
 
     /// デーモンが稼働中かチェック

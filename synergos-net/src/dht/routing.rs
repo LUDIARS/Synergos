@@ -95,11 +95,8 @@ impl RoutingTable {
 
     /// 指定 NodeId に最も近い k 個のノードを返す
     pub fn closest(&self, target: &NodeId, count: usize) -> Vec<&BucketEntry> {
-        let mut all_entries: Vec<&BucketEntry> = self
-            .buckets
-            .iter()
-            .flat_map(|b| b.entries.iter())
-            .collect();
+        let mut all_entries: Vec<&BucketEntry> =
+            self.buckets.iter().flat_map(|b| b.entries.iter()).collect();
 
         all_entries.sort_by(|a, b| {
             let dist_a = target.xor_distance(&a.node_id);

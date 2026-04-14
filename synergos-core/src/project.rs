@@ -226,11 +226,7 @@ impl ProjectConfiguration for ProjectManager {
             return Err(ProjectError::AlreadyExists(project_id));
         }
 
-        tracing::info!(
-            "Opening project: {} at {}",
-            project_id,
-            root_path.display()
-        );
+        tracing::info!("Opening project: {} at {}", project_id, root_path.display());
 
         let settings = ProjectSettings {
             display_name: display_name.unwrap_or_else(|| project_id.clone()),
@@ -258,11 +254,12 @@ impl ProjectConfiguration for ProjectManager {
 
                 // EventBus にプロジェクトクローズを通知（Presence/Exchange が購読して処理）
                 for peer_id in &project.connected_peer_ids {
-                    self.event_bus.emit(crate::event_bus::PeerDisconnectedEvent {
-                        project_id: project_id.to_string(),
-                        peer_id: peer_id.clone(),
-                        reason: "project closed".to_string(),
-                    });
+                    self.event_bus
+                        .emit(crate::event_bus::PeerDisconnectedEvent {
+                            project_id: project_id.to_string(),
+                            peer_id: peer_id.clone(),
+                            reason: "project closed".to_string(),
+                        });
                 }
 
                 Ok(())
@@ -397,7 +394,8 @@ impl ProjectConfiguration for ProjectManager {
         );
 
         // リモートからのプロジェクト設定取得は Gossipsub 経由で非同期に行われる
-        self.open_project(project_id.clone(), root_path, None).await?;
+        self.open_project(project_id.clone(), root_path, None)
+            .await?;
 
         Ok(project_id)
     }

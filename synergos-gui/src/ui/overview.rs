@@ -27,7 +27,10 @@ pub fn show(ui: &mut egui::Ui, connection: &CoreConnection) {
                 ui.end_row();
 
                 ui.label("Active Peers:");
-                ui.label(format!("{}/{}", net.active_connections, net.max_connections));
+                ui.label(format!(
+                    "{}/{}",
+                    net.active_connections, net.max_connections
+                ));
                 ui.end_row();
 
                 ui.label("Bandwidth:");

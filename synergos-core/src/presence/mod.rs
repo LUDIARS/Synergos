@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use dashmap::DashMap;
 use synergos_net::dht::{DhtNode, PeerRecord};
-use synergos_net::gossip::{GossipMessage, GossipNode, PeerActivityStatus, ActivityState};
+use synergos_net::gossip::{ActivityState, GossipMessage, GossipNode, PeerActivityStatus};
 use synergos_net::types::{PeerId, Route, TopicId};
 
 use crate::event_bus::{PeerConnectedEvent, PeerDisconnectedEvent, SharedEventBus};

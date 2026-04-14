@@ -78,10 +78,7 @@ impl Daemon {
     ///
     /// IPC サーバーを起動し、シャットダウンシグナルまで常駐する。
     pub async fn run(self) -> anyhow::Result<()> {
-        tracing::info!(
-            "Synergos core daemon started (PID: {})",
-            std::process::id()
-        );
+        tracing::info!("Synergos core daemon started (PID: {})", std::process::id());
 
         let ipc_server = IpcServer::new(self.ctx.clone());
 
@@ -143,7 +140,11 @@ impl Daemon {
             if transfer.state == crate::exchange::TransferState::Running
                 || transfer.state == crate::exchange::TransferState::Queued
             {
-                let _ = self.ctx.exchange.cancel_transfer(&transfer.transfer_id).await;
+                let _ = self
+                    .ctx
+                    .exchange
+                    .cancel_transfer(&transfer.transfer_id)
+                    .await;
             }
         }
 
