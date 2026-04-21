@@ -583,7 +583,7 @@ fn filter_event(
 }
 
 /// コマンドをディスパッチしてレスポンスを生成
-async fn dispatch_command(command: IpcCommand, ctx: &ServiceContext) -> IpcResponse {
+pub async fn dispatch_command(command: IpcCommand, ctx: &ServiceContext) -> IpcResponse {
     match command {
         IpcCommand::Ping => IpcResponse::Pong,
 
