@@ -1,17 +1,57 @@
 //! 転送状況パネル
 
+use crate::app::UiInputs;
 use crate::connection::CoreConnection;
 
-pub fn show(ui: &mut egui::Ui, connection: &CoreConnection) {
+pub fn show(ui: &mut egui::Ui, connection: &CoreConnection, inputs: &mut UiInputs) {
     ui.heading("Transfers");
     ui.separator();
+
+    // 転送要求フォーム
+    egui::CollapsingHeader::new("Request new transfer")
+        .default_open(false)
+        .show(ui, |ui| {
+            egui::Grid::new("transfer_request_form")
+                .num_columns(2)
+                .spacing([12.0, 6.0])
+                .show(ui, |ui| {
+                    ui.label("Project ID:");
+                    ui.text_edit_singleline(&mut inputs.transfer_project);
+                    ui.end_row();
+
+                    ui.label("File ID:");
+                    ui.text_edit_singleline(&mut inputs.transfer_file_id);
+                    ui.end_row();
+
+                    ui.label("Peer ID:");
+                    ui.text_edit_singleline(&mut inputs.transfer_peer_id);
+                    ui.end_row();
+                });
+            if ui.button("Request").clicked() {
+                let pid = inputs.transfer_project.trim().to_string();
+                let fid = inputs.transfer_file_id.trim().to_string();
+                let peer = inputs.transfer_peer_id.trim().to_string();
+                if pid.is_empty() || fid.is_empty() || peer.is_empty() {
+                    inputs.set_err("project / file / peer are all required");
+                } else if connection.request_transfer(&pid, &fid, &peer) {
+                    inputs.set_ok("transfer queued");
+                } else {
+                    inputs.set_err("TransferRequest failed");
+                }
+            }
+        });
+
+    ui.add_space(8.0);
 
     // リフレッシュ
     connection.refresh_transfers();
 
-    let cache = connection.cache.lock().unwrap();
+    let transfers = {
+        let cache = connection.cache.lock().unwrap();
+        cache.transfers.clone()
+    };
 
-    if cache.transfers.is_empty() {
+    if transfers.is_empty() {
         ui.label("No active transfers.");
         ui.add_space(8.0);
         ui.label("File transfers will appear here when sharing or receiving files.");
@@ -19,7 +59,7 @@ pub fn show(ui: &mut egui::Ui, connection: &CoreConnection) {
     }
 
     egui::Grid::new("transfers_grid")
-        .num_columns(6)
+        .num_columns(7)
         .spacing([12.0, 6.0])
         .striped(true)
         .show(ui, |ui| {
@@ -29,20 +69,17 @@ pub fn show(ui: &mut egui::Ui, connection: &CoreConnection) {
             ui.strong("Progress");
             ui.strong("Speed");
             ui.strong("State");
+            ui.strong("Actions");
             ui.end_row();
 
-            for t in &cache.transfers {
+            for t in &transfers {
                 // 方向アイコン
                 let dir_icon = if t.direction == "upload" { "↑" } else { "↓" };
                 ui.label(dir_icon);
 
-                // ファイル名
                 ui.label(&t.file_name);
-
-                // サイズ
                 ui.label(format_size(t.file_size));
 
-                // プログレスバー
                 let progress = if t.file_size > 0 {
                     t.bytes_transferred as f32 / t.file_size as f32
                 } else {
@@ -52,12 +89,18 @@ pub fn show(ui: &mut egui::Ui, connection: &CoreConnection) {
                     .text(format!("{:.0}%", progress * 100.0));
                 ui.add_sized([120.0, 16.0], bar);
 
-                // 速度
                 ui.label(format_speed(t.speed_bps));
 
-                // 状態
                 let (color, text) = state_display(&t.state);
                 ui.colored_label(color, text);
+
+                if ui.button("Cancel").clicked() {
+                    if connection.cancel_transfer(&t.transfer_id) {
+                        inputs.set_ok("cancel requested");
+                    } else {
+                        inputs.set_err("cancel failed");
+                    }
+                }
                 ui.end_row();
             }
         });
