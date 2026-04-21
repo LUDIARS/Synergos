@@ -263,19 +263,22 @@ mod tests {
         assert_eq!(root.update_count, 0);
 
         // Record an update
+        let id = crate::identity::Identity::generate();
         let mut block = ChainBlock {
             hash: Blake3Hash([0; 32]),
             prev_hash: None,
             version: 1,
-            author: PeerId::new("author-a"),
+            author: PeerId::new("placeholder"),
+            author_public_key: [0u8; 32],
             timestamp: 1000,
             payload: ChainPayload::FullSnapshot {
                 cid: Cid("Qm...".into()),
                 file_size: 2048,
                 crc: 0x5678,
             },
+            signature: [0u8; 64],
         };
-        block.compute_hash();
+        block.sign(&id);
         mgr.record_update(&file_id, block).await.unwrap();
 
         let root = mgr.root_catalog().await;

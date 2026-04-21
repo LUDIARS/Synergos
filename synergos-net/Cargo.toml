@@ -20,6 +20,9 @@ serde = { version = "1", features = ["derive"] }
 
 # Crypto / Hash
 blake3 = "1"
+ed25519-dalek = { version = "2", features = ["std", "rand_core"] }
+rand = "0.8"
+hex = "0.4"
 
 # DNS
 hickory-resolver = { version = "0.24", features = ["dns-over-https-rustls"] }
