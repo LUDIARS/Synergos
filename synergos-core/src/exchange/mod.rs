@@ -179,24 +179,39 @@ pub struct Exchange {
 }
 
 impl Exchange {
+    /// 最小構成のコンストラクタ（テスト・後方互換用）
     pub fn new(event_bus: SharedEventBus) -> Self {
+        Self::with_network(event_bus, PeerId::new("local"), None)
+    }
+
+    /// ネットワーク依存を注入して構築する本番向けコンストラクタ
+    pub fn with_network(
+        event_bus: SharedEventBus,
+        local_peer_id: PeerId,
+        gossip: Option<Arc<GossipNode>>,
+    ) -> Self {
         Self {
             event_bus,
             transfers: DashMap::new(),
             ledger: Arc::new(TransferLedger::new()),
-            gossip: None,
-            local_peer_id: PeerId::new("local"),
+            gossip,
+            local_peer_id,
         }
     }
 
-    /// ローカルピアIDを設定
-    pub fn set_local_peer_id(&mut self, peer_id: PeerId) {
-        self.local_peer_id = peer_id;
-    }
-
-    /// Gossipsub ノードを設定
-    pub fn set_gossip(&mut self, gossip: Arc<GossipNode>) {
-        self.gossip = Some(gossip);
+    /// 完了済み/キャンセル済み転送をテーブルから除去
+    pub fn gc_finished_transfers(&self) -> usize {
+        let mut removed = 0;
+        self.transfers.retain(|_, t| match &t.state {
+            TransferState::Completed
+            | TransferState::Cancelled
+            | TransferState::Failed(_) => {
+                removed += 1;
+                false
+            }
+            _ => true,
+        });
+        removed
     }
 
     /// TransferLedger への参照を取得

@@ -120,24 +120,24 @@ pub struct PresenceService {
 }
 
 impl PresenceService {
+    /// 最小構成のコンストラクタ（テスト・後方互換用）
     pub fn new(event_bus: SharedEventBus) -> Self {
+        Self::with_network(event_bus, None, None)
+    }
+
+    /// ネットワーク依存を注入して構築する本番向けコンストラクタ
+    pub fn with_network(
+        event_bus: SharedEventBus,
+        dht: Option<Arc<DhtNode>>,
+        gossip: Option<Arc<GossipNode>>,
+    ) -> Self {
         Self {
             event_bus,
             nodes: DashMap::new(),
             local_node: tokio::sync::RwLock::new(None),
-            dht: None,
-            gossip: None,
+            dht,
+            gossip,
         }
-    }
-
-    /// DHT ノードを設定
-    pub fn set_dht(&mut self, dht: Arc<DhtNode>) {
-        self.dht = Some(dht);
-    }
-
-    /// Gossipsub ノードを設定
-    pub fn set_gossip(&mut self, gossip: Arc<GossipNode>) {
-        self.gossip = Some(gossip);
     }
 
     /// Gossipsub 経由でピアステータスをブロードキャスト

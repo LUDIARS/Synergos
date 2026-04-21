@@ -4,12 +4,15 @@
 //! ノード（ピア）はプロジェクトに紐づいて管理される。
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use dashmap::DashMap;
 
 use synergos_ipc::response::{ProjectDetail, ProjectInfo};
+use synergos_net::gossip::GossipNode;
+use synergos_net::types::TopicId;
 
 use crate::event_bus::SharedEventBus;
 
@@ -171,15 +174,35 @@ pub struct ProjectManager {
     /// 招待トークン → project_id のマッピング
     invites: DashMap<String, InviteToken>,
     event_bus: SharedEventBus,
+    /// Gossipsub（任意）: プロジェクト開閉時にトピック subscribe/unsubscribe を行う
+    gossip: Option<Arc<GossipNode>>,
 }
 
 impl ProjectManager {
+    /// 最小構成のコンストラクタ（テスト・後方互換用）
     pub fn new(event_bus: SharedEventBus) -> Self {
+        Self::with_gossip(event_bus, None)
+    }
+
+    /// Gossipsub 依存付きのコンストラクタ
+    pub fn with_gossip(event_bus: SharedEventBus, gossip: Option<Arc<GossipNode>>) -> Self {
         Self {
             projects: DashMap::new(),
             invites: DashMap::new(),
             event_bus,
+            gossip,
         }
+    }
+
+    /// 期限切れ招待トークンを除去
+    pub fn gc_expired_invites(&self) -> usize {
+        let now = now_epoch_secs();
+        let before = self.invites.len();
+        self.invites.retain(|_, inv| match inv.expires_at {
+            Some(exp) => exp > now,
+            None => true,
+        });
+        before - self.invites.len()
     }
 
     // 既存コードとの後方互換用ヘルパー
@@ -245,6 +268,11 @@ impl ProjectConfiguration for ProjectManager {
             connected_peer_ids: Vec::new(),
         };
 
+        // Gossipsub にプロジェクトトピックを subscribe
+        if let Some(gossip) = &self.gossip {
+            gossip.subscribe(TopicId::project(&project_id));
+        }
+
         self.projects.insert(project_id, project);
         Ok(())
     }
@@ -253,6 +281,10 @@ impl ProjectConfiguration for ProjectManager {
         match self.projects.remove(project_id) {
             Some((_, project)) => {
                 tracing::info!("Closing project: {}", project_id);
+                // Gossipsub からトピック購読解除
+                if let Some(gossip) = &self.gossip {
+                    gossip.unsubscribe(&TopicId::project(project_id));
+                }
                 // 関連する招待トークンも削除
                 self.invites.retain(|_, inv| inv.project_id != project_id);
 
@@ -353,10 +385,10 @@ impl ProjectConfiguration for ProjectManager {
             expires_at,
         };
 
+        // トークン本体はログに残さない（クレデンシャル扱い）
         tracing::info!(
-            "Created invite for project {}: token={}, expires_at={:?}",
+            "Created invite for project {} (expires_at={:?})",
             project_id,
-            token,
             expires_at
         );
 

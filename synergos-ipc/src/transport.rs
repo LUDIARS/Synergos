@@ -6,9 +6,12 @@
 //!
 //! プロトコル: 長さプレフィクス付きメッセージフレーム (4 byte LE length + MessagePack payload)
 
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::path::PathBuf;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+use crate::event::IpcEvent;
+use crate::response::IpcResponse;
 
 /// IPC エラー
 #[derive(Debug, thiserror::Error)]
@@ -32,8 +35,21 @@ pub enum IpcError {
     DaemonNotRunning,
 }
 
-/// 最大メッセージサイズ (16 MiB)
-const MAX_MESSAGE_SIZE: u32 = 16 * 1024 * 1024;
+/// 最大メッセージサイズ (1 MiB) — DoS 対策のため小さめに設定
+pub const MAX_MESSAGE_SIZE: u32 = 1 * 1024 * 1024;
+
+/// 1 回の read で確保するチャンクサイズ上限（ピーク確保量制限）
+const READ_CHUNK: usize = 64 * 1024;
+
+/// Core デーモン → クライアントへ送るメッセージの封筒
+///
+/// 同一の Unix Domain Socket 上で、コマンドに対する応答 (`Response`) と
+/// 非同期にプッシュされるイベント (`Event`) を多重化する。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ServerMessage {
+    Response(IpcResponse),
+    Event(IpcEvent),
+}
 
 /// IPC ソケットパスを取得（プラットフォーム依存）
 pub fn socket_path() -> PathBuf {
@@ -87,6 +103,9 @@ impl IpcTransport {
     }
 
     /// メッセージを読み取る（4 byte LE length + MessagePack payload）
+    ///
+    /// DoS 対策として、長さチェック後でも一度に確保するバッファは `READ_CHUNK`
+    /// 単位で段階的に拡張する。
     pub async fn read_message<R, T>(reader: &mut R) -> Result<T, IpcError>
     where
         R: AsyncReadExt + Unpin,
@@ -107,8 +126,22 @@ impl IpcTransport {
                 max: MAX_MESSAGE_SIZE,
             });
         }
-        let mut payload = vec![0u8; len as usize];
-        reader.read_exact(&mut payload).await?;
+
+        // 段階的に読み込み: 事前に一括アロケートしないことで、
+        // 攻撃者が len=MAX を繰り返し送って即座にメモリを確保させる経路を塞ぐ
+        let target = len as usize;
+        let mut payload = Vec::with_capacity(target.min(READ_CHUNK));
+        let mut remaining = target;
+        let mut chunk = vec![0u8; READ_CHUNK.min(target.max(1))];
+        while remaining > 0 {
+            let want = chunk.len().min(remaining);
+            let n = reader.read(&mut chunk[..want]).await?;
+            if n == 0 {
+                return Err(IpcError::ConnectionClosed);
+            }
+            payload.extend_from_slice(&chunk[..n]);
+            remaining -= n;
+        }
         let message = rmp_serde::from_slice(&payload)?;
         Ok(message)
     }
