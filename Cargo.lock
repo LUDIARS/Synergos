@@ -3844,6 +3844,7 @@ dependencies = [
  "clap",
  "crc32fast",
  "dashmap",
+ "libc",
  "serde",
  "synergos-ipc",
  "synergos-net",

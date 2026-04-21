@@ -8,17 +8,22 @@
 //! EventBus と連携してレスポンス・イベントプッシュを行う。
 
 use std::sync::Arc;
-use tokio::sync::broadcast;
+use std::time::Duration;
+use tokio::sync::{broadcast, Mutex};
 
 use synergos_ipc::command::IpcCommand;
+use synergos_ipc::event::{EventCategory, EventFilter, IpcEvent};
 use synergos_ipc::response::{
     DaemonStatus, IpcResponse, NetworkStatusInfo, PeerInfo, TransferInfo,
 };
-use synergos_ipc::transport::{IpcError, IpcTransport};
+use synergos_ipc::transport::{IpcError, IpcTransport, ServerMessage};
 use synergos_net::types::{FileId, PeerId, TransferId};
 
 use crate::conflict::ConflictManager;
-use crate::event_bus::SharedEventBus;
+use crate::event_bus::{
+    ConflictDetectedEvent, NetworkStatusEvent, PeerConnectedEvent, PeerDisconnectedEvent,
+    SharedEventBus, TransferCompletedEvent, TransferProgressEvent,
+};
 use crate::exchange::{
     Exchange, FetchRequest, FileSharing, PublishNotification, TransferDirection, TransferPriority,
     TransferState,
@@ -61,15 +66,37 @@ impl IpcServer {
         let _ = tokio::fs::remove_file(&path).await;
 
         let listener = tokio::net::UnixListener::bind(&path)?;
+
+        // ソケットを `chmod 0600`: uid_check と併せて多層防御。
+        // デーモンを起動した UID 以外の書込みを OS レベルで遮る。
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(0o600);
+            if let Err(e) = tokio::fs::set_permissions(&path, perms).await {
+                tracing::warn!("failed to chmod 0600 {}: {}", path.display(), e);
+            }
+        }
+
         tracing::info!("IPC server listening on {}", path.display());
 
         let mut shutdown_rx = self.ctx.shutdown_tx.subscribe();
+        // accept エラー時の指数バックオフ上限 (fd 枯渇時のタイトループ防止)
+        let mut backoff_ms = 0u64;
 
         loop {
             tokio::select! {
                 accept_result = listener.accept() => {
                     match accept_result {
                         Ok((stream, _addr)) => {
+                            backoff_ms = 0;
+
+                            // peer uid 検証: 起動ユーザ以外を拒絶。
+                            if let Err(reason) = verify_peer_uid(&stream) {
+                                tracing::warn!("rejecting client: {reason}");
+                                drop(stream);
+                                continue;
+                            }
+
                             let ctx = self.ctx.clone();
                             tokio::spawn(async move {
                                 if let Err(e) = handle_client(stream, ctx).await {
@@ -79,6 +106,9 @@ impl IpcServer {
                         }
                         Err(e) => {
                             tracing::error!("Accept error: {}", e);
+                            // 指数バックオフ (最大 1s)
+                            backoff_ms = (backoff_ms * 2).max(10).min(1000);
+                            tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
                         }
                     }
                 }
@@ -104,13 +134,54 @@ impl IpcServer {
     }
 }
 
+/// 接続中クライアントの writer。Response / Event を多重化するため Mutex でガードする。
+#[cfg(unix)]
+type SharedWriter = Arc<Mutex<tokio::net::unix::OwnedWriteHalf>>;
+
+/// 接続元 UID が自プロセス UID と一致するか確認する。
+///
+/// 非 Unix や UCred 非対応プラットフォームでは許容する (Windows は別経路)。
+#[cfg(unix)]
+fn verify_peer_uid(stream: &tokio::net::UnixStream) -> Result<(), String> {
+    use std::os::unix::io::AsRawFd;
+    // SAFETY: `stream` は生きている UnixStream。借用期間内でのみ fd を触る。
+    // std の UnixStream::peer_cred を借りるために unsafe FromRawFd + ManuallyDrop パターン。
+    let fd = stream.as_raw_fd();
+    let std_stream = unsafe {
+        use std::os::unix::io::FromRawFd;
+        std::mem::ManuallyDrop::new(std::os::unix::net::UnixStream::from_raw_fd(fd))
+    };
+    let cred = match std_stream.peer_cred() {
+        Ok(c) => c,
+        Err(e) => {
+            // peer_cred が取れない OS (macOS 等旧バージョン) は allow (ベストエフォート)
+            tracing::debug!("peer_cred unavailable, skipping uid check: {e}");
+            return Ok(());
+        }
+    };
+    let peer_uid = cred.uid();
+    // 自プロセス UID
+    // SAFETY: libc call with no side effects; always succeeds.
+    let self_uid = unsafe { libc::geteuid() };
+    if peer_uid != self_uid {
+        return Err(format!(
+            "peer uid {peer_uid} does not match daemon uid {self_uid}"
+        ));
+    }
+    Ok(())
+}
+
 /// クライアント接続のハンドリング
 #[cfg(unix)]
 async fn handle_client(
     stream: tokio::net::UnixStream,
     ctx: Arc<ServiceContext>,
 ) -> Result<(), IpcError> {
-    let (mut reader, mut writer) = stream.into_split();
+    let (mut reader, writer) = stream.into_split();
+    let writer: SharedWriter = Arc::new(Mutex::new(writer));
+
+    // Subscribe 起動時にここへタスクハンドルを保持。Unsubscribe / 切断時に abort。
+    let mut event_relay: Option<tokio::task::JoinHandle<()>> = None;
 
     loop {
         let command: IpcCommand = match IpcTransport::read_message(&mut reader).await {
@@ -119,17 +190,180 @@ async fn handle_client(
                 tracing::debug!("Client disconnected");
                 break;
             }
-            Err(e) => return Err(e),
+            Err(e) => {
+                if let Some(h) = event_relay.take() {
+                    h.abort();
+                }
+                return Err(e);
+            }
         };
 
         tracing::debug!("Received command: {:?}", command);
 
-        let response = dispatch_command(command, &ctx).await;
+        match command {
+            IpcCommand::Subscribe { filter } => {
+                // 既存リレーがあれば停止してから再起動
+                if let Some(h) = event_relay.take() {
+                    h.abort();
+                }
+                let subscription_id = uuid::Uuid::new_v4().to_string();
+                let resp = IpcResponse::Subscribed {
+                    subscription_id: subscription_id.clone(),
+                };
+                send_server_message(&writer, ServerMessage::Response(resp)).await?;
 
-        IpcTransport::write_message(&mut writer, &response).await?;
+                let writer_clone = writer.clone();
+                let ctx_clone = ctx.clone();
+                event_relay = Some(tokio::spawn(async move {
+                    relay_events(ctx_clone, writer_clone, filter).await;
+                }));
+            }
+            IpcCommand::Unsubscribe { .. } => {
+                if let Some(h) = event_relay.take() {
+                    h.abort();
+                }
+                send_server_message(&writer, ServerMessage::Response(IpcResponse::Ok)).await?;
+            }
+            other => {
+                let response = dispatch_command(other, &ctx).await;
+                send_server_message(&writer, ServerMessage::Response(response)).await?;
+            }
+        }
     }
 
+    if let Some(h) = event_relay.take() {
+        h.abort();
+    }
     Ok(())
+}
+
+#[cfg(unix)]
+async fn send_server_message(writer: &SharedWriter, msg: ServerMessage) -> Result<(), IpcError> {
+    let mut guard = writer.lock().await;
+    IpcTransport::write_message(&mut *guard, &msg).await
+}
+
+/// EventBus → クライアントへ IpcEvent を中継する per-client タスク。
+/// `filter` に合致しないイベントはスキップ。
+#[cfg(unix)]
+async fn relay_events(ctx: Arc<ServiceContext>, writer: SharedWriter, filter: EventFilter) {
+    let mut rx_peer_connected = ctx.event_bus.subscribe::<PeerConnectedEvent>();
+    let mut rx_peer_disconnected = ctx.event_bus.subscribe::<PeerDisconnectedEvent>();
+    let mut rx_transfer_progress = ctx.event_bus.subscribe::<TransferProgressEvent>();
+    let mut rx_transfer_completed = ctx.event_bus.subscribe::<TransferCompletedEvent>();
+    let mut rx_conflict = ctx.event_bus.subscribe::<ConflictDetectedEvent>();
+    let mut rx_network = ctx.event_bus.subscribe::<NetworkStatusEvent>();
+
+    loop {
+        let event: Option<IpcEvent> = tokio::select! {
+            r = rx_peer_connected.recv() => match r {
+                Ok(ev) => filter_event(
+                    &filter, EventCategory::Peer, Some(&ev.project_id),
+                    IpcEvent::PeerConnected {
+                        project_id: ev.project_id,
+                        peer_id: ev.peer_id,
+                        display_name: ev.display_name,
+                        route: ev.route,
+                        rtt_ms: ev.rtt_ms,
+                    },
+                ),
+                Err(_) => continue,
+            },
+            r = rx_peer_disconnected.recv() => match r {
+                Ok(ev) => filter_event(
+                    &filter, EventCategory::Peer, Some(&ev.project_id),
+                    IpcEvent::PeerDisconnected {
+                        project_id: ev.project_id,
+                        peer_id: ev.peer_id,
+                        reason: ev.reason,
+                    },
+                ),
+                Err(_) => continue,
+            },
+            r = rx_transfer_progress.recv() => match r {
+                Ok(ev) => filter_event(
+                    &filter, EventCategory::Transfer, None,
+                    IpcEvent::TransferProgress {
+                        transfer_id: ev.transfer_id,
+                        peer_id: String::new(),
+                        file_name: ev.file_name,
+                        bytes_transferred: ev.bytes_transferred,
+                        total_bytes: ev.total_bytes,
+                        speed_bps: ev.speed_bps,
+                    },
+                ),
+                Err(_) => continue,
+            },
+            r = rx_transfer_completed.recv() => match r {
+                Ok(ev) => filter_event(
+                    &filter, EventCategory::Transfer, None,
+                    IpcEvent::TransferCompleted {
+                        transfer_id: ev.transfer_id,
+                        peer_id: String::new(),
+                        file_name: ev.file_name,
+                        file_path: ev.file_path,
+                    },
+                ),
+                Err(_) => continue,
+            },
+            r = rx_conflict.recv() => match r {
+                Ok(ev) => filter_event(
+                    &filter, EventCategory::Conflict, Some(&ev.project_id),
+                    IpcEvent::ConflictDetected {
+                        project_id: ev.project_id,
+                        file_id: ev.file_id,
+                        file_path: ev.file_path,
+                        involved_peers: ev.involved_peers,
+                    },
+                ),
+                Err(_) => continue,
+            },
+            r = rx_network.recv() => match r {
+                Ok(ev) => filter_event(
+                    &filter, EventCategory::Network, None,
+                    IpcEvent::NetworkStatusUpdated {
+                        active_connections: ev.active_connections,
+                        total_bandwidth_bps: ev.total_bandwidth_bps,
+                        used_bandwidth_bps: ev.used_bandwidth_bps,
+                        avg_latency_ms: ev.avg_latency_ms,
+                    },
+                ),
+                Err(_) => continue,
+            },
+        };
+
+        let Some(ipc_event) = event else { continue };
+
+        if let Err(e) = send_server_message(&writer, ServerMessage::Event(ipc_event)).await {
+            tracing::debug!("event relay write failed (client likely gone): {e}");
+            break;
+        }
+    }
+}
+
+/// フィルタに一致しないイベントを落とす。一致すれば `Some(event)` を返す。
+fn filter_event(
+    filter: &EventFilter,
+    category: EventCategory,
+    project_id: Option<&str>,
+    event: IpcEvent,
+) -> Option<IpcEvent> {
+    match filter {
+        EventFilter::All => Some(event),
+        EventFilter::Project(target) => match project_id {
+            Some(p) if p == target => Some(event),
+            Some(_) => None,
+            // プロジェクト非依存イベント (Network / Transfer 等) は透過
+            None => Some(event),
+        },
+        EventFilter::Category(target) => {
+            if std::mem::discriminant(target) == std::mem::discriminant(&category) {
+                Some(event)
+            } else {
+                None
+            }
+        }
+    }
 }
 
 /// コマンドをディスパッチしてレスポンスを生成
@@ -334,7 +568,7 @@ async fn dispatch_command(command: IpcCommand, ctx: &ServiceContext) -> IpcRespo
                 priority: TransferPriority::Interactive,
             };
             match ctx.exchange.fetch_file(request).await {
-                Ok(tid) => IpcResponse::Ok,
+                Ok(_tid) => IpcResponse::Ok,
                 Err(e) => IpcResponse::Error {
                     code: 3,
                     message: e.to_string(),
@@ -404,7 +638,6 @@ async fn dispatch_command(command: IpcCommand, ctx: &ServiceContext) -> IpcRespo
 
             let mut notifications: Vec<PublishNotification> = Vec::with_capacity(file_paths.len());
             for path in &file_paths {
-                // 相対パスならルートからの相対として解釈。絶対パスはそのまま扱う。
                 let absolute = if path.is_absolute() {
                     path.clone()
                 } else {
@@ -429,10 +662,6 @@ async fn dispatch_command(command: IpcCommand, ctx: &ServiceContext) -> IpcRespo
                     };
                 }
 
-                // ファイルのメタデータ + 内容ハッシュを非同期で算出。
-                // crc には **ファイルパス文字列** ではなく **ファイル内容** の
-                // CRC32 を入れる。将来 Blake3 に置き換える前提の暫定値で、
-                // 少なくともパス変更だけで同一 CRC になるバグ (S5 予兆) を潰す。
                 let metadata = match tokio::fs::metadata(&canonical).await {
                     Ok(m) => m,
                     Err(e) => {
@@ -454,8 +683,6 @@ async fn dispatch_command(command: IpcCommand, ctx: &ServiceContext) -> IpcRespo
                 };
                 let crc = crc32fast::hash(&bytes);
 
-                // ルート相対パスを file_id に採用することでプロジェクト内で安定した
-                // 識別子になる (絶対パスは OS 依存で再現性が低い)。
                 let rel = canonical
                     .strip_prefix(&project_root)
                     .map(|r| r.to_path_buf())
@@ -519,13 +746,9 @@ async fn dispatch_command(command: IpcCommand, ctx: &ServiceContext) -> IpcRespo
             })
         }
 
-        IpcCommand::Subscribe { .. } => {
-            // イベント購読: subscription_id を返し、別途イベントプッシュで通知
-            IpcResponse::Subscribed {
-                subscription_id: uuid::Uuid::new_v4().to_string(),
-            }
-        }
-
+        // Subscribe / Unsubscribe は handle_client 側で per-client タスクとして
+        // 処理するため、ここに届くことはない。保険として Ok を返す。
+        IpcCommand::Subscribe { .. } => IpcResponse::Ok,
         IpcCommand::Unsubscribe { .. } => IpcResponse::Ok,
     }
 }
