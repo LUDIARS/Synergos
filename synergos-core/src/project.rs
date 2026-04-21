@@ -91,6 +91,7 @@ pub struct InviteToken {
 
 /// プロジェクト管理エラー
 #[derive(Debug, thiserror::Error)]
+#[allow(dead_code)]
 pub enum ProjectError {
     #[error("project not found: {0}")]
     NotFound(String),
@@ -100,6 +101,7 @@ pub enum ProjectError {
     InvalidInvite,
     #[error("invite token expired")]
     InviteExpired,
+    /// max_peers 検査が実装された時に使用される (現状未使用)。
     #[error("max peers reached for project: {0}")]
     MaxPeersReached(String),
 }
@@ -183,6 +185,7 @@ pub struct ProjectManager {
 
 impl ProjectManager {
     /// 最小構成のコンストラクタ（テスト・後方互換用）
+    #[allow(dead_code)]
     pub fn new(event_bus: SharedEventBus) -> Self {
         Self::with_gossip(event_bus, None)
     }
@@ -208,15 +211,7 @@ impl ProjectManager {
         before - self.invites.len()
     }
 
-    // 既存コードとの後方互換用ヘルパー
-    pub async fn open(&self, project_id: String, root_path: PathBuf) {
-        let _ = self.open_project(project_id, root_path, None).await;
-    }
-
-    pub async fn close(&self, project_id: &str) {
-        let _ = self.close_project(project_id).await;
-    }
-
+    /// 管理中の全プロジェクトを閉じる (Daemon shutdown から呼ばれる)。
     pub async fn close_all(&self) {
         let ids: Vec<String> = self
             .projects
@@ -226,10 +221,6 @@ impl ProjectManager {
         for id in ids {
             let _ = self.close_project(&id).await;
         }
-    }
-
-    pub fn list(&self) -> Vec<ProjectInfo> {
-        self.list_projects()
     }
 
     /// 指定プロジェクトのルートディレクトリを返す。未登録なら `None`。

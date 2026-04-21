@@ -33,6 +33,7 @@ impl PeerRecord {
 const DHT_STORE_MAX: usize = 10_000;
 
 /// DHT ノード（Kademlia ベース）
+#[allow(dead_code)]
 pub struct DhtNode {
     /// 自身のピアID
     pub local_peer_id: PeerId,

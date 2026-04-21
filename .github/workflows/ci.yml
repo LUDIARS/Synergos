@@ -70,3 +70,16 @@ jobs:
         run: cargo build --workspace --all-targets
       - name: Run tests
         run: cargo test --workspace --all-targets
+
+  audit:
+    runs-on: ubuntu-latest
+    name: Security audit
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-audit
+        run: cargo install --locked cargo-audit
+      - name: Run cargo audit
+        # --deny warnings は将来の方針。まずは unmaintained 警告を容認する。
+        run: cargo audit --deny unsound --deny yanked

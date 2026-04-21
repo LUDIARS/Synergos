@@ -3,7 +3,7 @@
 //! cloudflared プロセスの起動・停止・ヘルスチェックを管理する。
 //! QUIC トランスポート経由でピア接続を中継する。
 
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use tokio::sync::RwLock;
 

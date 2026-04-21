@@ -1,4 +1,3 @@
-#![allow(dead_code, unused_imports, unused_variables)]
 //! synergos-core: Synergos 常駐デーモン
 //!
 //! クロスプラットフォーム対応のバックグラウンドデーモン。

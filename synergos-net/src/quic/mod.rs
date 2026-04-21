@@ -3,7 +3,6 @@
 //! quinn を使った QUIC 接続の確立・管理・ストリーム制御を提供する。
 //! サーバー（リスナー）とクライアント（コネクタ）の両方の役割を担う。
 
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -178,7 +177,7 @@ impl QuicManager {
             .as_ref()
             .ok_or_else(|| SynergosNetError::Quic("Endpoint not initialized".into()))?;
 
-        tracing::info!("Connecting to peer {} at {}", peer_id, addr);
+        tracing::info!("Connecting to peer {} at {}", peer_id.short(), addr);
 
         let connection = endpoint
             .connect(addr, server_name)
@@ -212,7 +211,7 @@ impl QuicManager {
         }
         self.connections.remove(peer_id);
         self.bandwidth_estimates.remove(peer_id);
-        tracing::info!("Disconnected from peer {}: {}", peer_id, reason);
+        tracing::info!("Disconnected from peer {}: {}", peer_id.short(), reason);
     }
 
     /// 指定ピアとの双方向ストリームを開く

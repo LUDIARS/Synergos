@@ -21,6 +21,7 @@ use crate::project::ProjectManager;
 
 /// デーモン設定
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct DaemonConfig {
     /// ネットワーク設定ファイルパス
     pub config_path: Option<PathBuf>,

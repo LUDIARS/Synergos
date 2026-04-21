@@ -87,6 +87,7 @@ impl KBucket {
 }
 
 /// Kademlia ルーティングテーブル
+#[allow(dead_code)]
 pub struct RoutingTable {
     /// 自身のノードID
     local_id: NodeId,

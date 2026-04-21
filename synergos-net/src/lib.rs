@@ -1,4 +1,3 @@
-#![allow(dead_code, unused_imports, unused_variables)]
 //! synergos-net: P2P network foundation
 //!
 //! Ars に依存しない汎用ネットワークライブラリ。
@@ -49,7 +48,10 @@ pub trait NetEventHandler: Send + Sync + 'static {
     fn on_route_changed(&self, peer_id: &PeerId, old: &RouteKind, new: &RouteKind);
 }
 
-/// Network Foundation Layer のエントリポイント
+/// Network Foundation Layer のエントリポイント。
+/// `Daemon` は個別コンポーネントを直接配線するためこの集約 struct は
+/// 現状インスタンス化されない (将来の組込みホスト向け便宜)。
+#[allow(dead_code)]
 pub struct SynergosNet {
     pub config: NetConfig,
     pub dht: DhtNode,

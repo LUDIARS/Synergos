@@ -53,6 +53,7 @@ impl MessageCache {
 }
 
 /// Gossipsub ノード
+#[allow(dead_code)]
 pub struct GossipNode {
     /// ローカルピアID
     local_peer_id: PeerId,
