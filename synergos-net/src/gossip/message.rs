@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{Result, SynergosNetError};
 use crate::identity::{self, Identity};
-use crate::types::{ChunkId, FileId, MessageId, PeerId};
+use crate::types::{Blake3Hash, ChunkId, FileId, MessageId, PeerId};
 
 /// 署名付き Gossip メッセージ (S3 対策: FileOffer.sender / PeerStatus.origin が
 /// 無証明だった問題を解消する)。全ての GossipMessage は本封筒に包んで送出され、
@@ -139,6 +139,7 @@ fn signing_bytes(msg: &GossipMessage) -> Vec<u8> {
             version,
             size,
             crc,
+            content_hash,
         } => {
             out.extend_from_slice(b"file_offer");
             out.extend_from_slice(sender.0.as_bytes());
@@ -146,6 +147,7 @@ fn signing_bytes(msg: &GossipMessage) -> Vec<u8> {
             out.extend_from_slice(&version.to_le_bytes());
             out.extend_from_slice(&size.to_le_bytes());
             out.extend_from_slice(&crc.to_le_bytes());
+            out.extend_from_slice(&content_hash.0);
         }
         GossipMessage::ConflictAlert {
             file_id,
@@ -192,12 +194,18 @@ pub enum GossipMessage {
         version: u64,
     },
     /// ファイル送信通知（送信側が「送りたい」と宣言）
+    ///
+    /// `crc` は低コスト比較キャッシュ用。整合性検証は `content_hash`
+    /// (Blake3 で衝突耐性を持つ) を使うこと。古いピアが content_hash を
+    /// ゼロのまま送ってきた場合は受信側でフォールバック判断する。
     FileOffer {
         sender: PeerId,
         file_id: FileId,
         version: u64,
         size: u64,
         crc: u32,
+        #[serde(default)]
+        content_hash: Blake3Hash,
     },
     /// コンフリクト通知
     ConflictAlert {

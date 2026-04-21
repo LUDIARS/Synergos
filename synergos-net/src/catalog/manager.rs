@@ -47,6 +47,9 @@ impl CatalogManager {
             file_id: file_id.clone(),
             path: path.to_string(),
             crc,
+            // 低コスト API のため content_hash の実値は呼び出し側 (PublishUpdate
+            // ハンドラ等で Blake3 を算出) から `record_update` で差し込む。
+            content_hash: Default::default(),
             state: FileState::Synced,
             size,
         };
@@ -191,6 +194,7 @@ impl CatalogManager {
         root.chunks.push(ChunkIndex {
             chunk_id: id.clone(),
             crc: 0,
+            content_hash: Default::default(),
             last_updated: now_ms(),
         });
 

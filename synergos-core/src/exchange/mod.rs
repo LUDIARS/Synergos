@@ -246,6 +246,10 @@ impl Exchange {
                     version,
                     size: file_size,
                     crc,
+                    // TODO(S5): Exchange の呼び出し元から Blake3 を渡せるよう
+                    // broadcast_offer のシグネチャを拡張する。現状は CRC だけ
+                    // 流して content_hash はゼロ (受信側は CRC フォールバック)。
+                    content_hash: Default::default(),
                 },
             );
         }
