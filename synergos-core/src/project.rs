@@ -37,13 +37,20 @@ impl SyncMode {
             Self::Selective { .. } => "selective",
         }
     }
+}
 
-    pub fn from_str(s: &str) -> Self {
-        match s {
+/// `"manual".parse::<SyncMode>()` などの標準イディオムを使えるよう
+/// `std::str::FromStr` を実装する。未知の入力は `Full` にフォールバック
+/// (既定動作互換)。エラーは返さないので `Infallible`。
+impl std::str::FromStr for SyncMode {
+    type Err = std::convert::Infallible;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s {
             "manual" => Self::Manual,
             "selective" => Self::Selective { patterns: vec![] },
             _ => Self::Full,
-        }
+        })
     }
 }
 
@@ -338,7 +345,7 @@ impl ProjectConfiguration for ProjectManager {
                     settings.description = desc;
                 }
                 if let Some(mode) = patch.sync_mode {
-                    settings.sync_mode = SyncMode::from_str(&mode);
+                    settings.sync_mode = mode.parse().unwrap();
                 }
                 if let Some(max) = patch.max_peers {
                     settings.max_peers = max;

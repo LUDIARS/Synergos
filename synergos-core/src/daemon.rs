@@ -61,6 +61,9 @@ impl Daemon {
     pub async fn new(config: DaemonConfig) -> anyhow::Result<Self> {
         // ── 設定ファイルの読み込み（任意） ──
         let net_config = load_net_config(config.config_path.as_deref())?;
+        net_config
+            .validate()
+            .map_err(|e| anyhow::anyhow!("invalid net config: {e}"))?;
         let net_config = Arc::new(net_config);
 
         // ── ローカル識別子（永続化は別途：TODO） ──

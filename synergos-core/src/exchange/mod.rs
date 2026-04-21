@@ -9,7 +9,6 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use dashmap::DashMap;
@@ -166,12 +165,7 @@ pub trait FileSharing: Send + Sync {
 
 // ── 実装 ──
 
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
-}
+use synergos_net::types::now_ms;
 
 /// ファイル転送制御サービス
 pub struct Exchange {

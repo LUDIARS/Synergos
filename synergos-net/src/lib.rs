@@ -75,7 +75,11 @@ impl SynergosNet {
     ) -> Self {
         let dht = DhtNode::new(local_peer_id.clone(), config.dht.clone());
         let gossip = GossipNode::new(local_peer_id, config.gossipsub.clone());
-        let catalog = CatalogManager::new(project_id, 256, 10);
+        let catalog = CatalogManager::new(
+            project_id,
+            config.catalog.chunk_max_files,
+            config.catalog.chain_max_depth,
+        );
         let ledger = TransferLedger::new();
         let quic = Arc::new(QuicManager::new(config.quic.clone()));
         let tunnel = Arc::new(TunnelManager::new(&config.tunnel));

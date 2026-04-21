@@ -12,6 +12,28 @@ pub struct NetConfig {
     pub speed_test: SpeedTestConfig,
     pub peer_selection: PeerSelectionConfig,
     pub monitor: MonitorConfig,
+    /// CatalogManager のチューニング (マジックナンバー解消、後方互換のため
+    /// `#[serde(default)]` で旧 config からも読める)。
+    #[serde(default)]
+    pub catalog: CatalogConfig,
+}
+
+/// CatalogManager のチューニングパラメータ。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CatalogConfig {
+    /// 1 チャンクあたりの最大ファイル数 (default: 256)
+    pub chunk_max_files: usize,
+    /// FileChain の最大保持深度 (default: 10)
+    pub chain_max_depth: usize,
+}
+
+impl Default for CatalogConfig {
+    fn default() -> Self {
+        Self {
+            chunk_max_files: 256,
+            chain_max_depth: 10,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -102,6 +124,21 @@ pub struct StreamAllocationConfig {
     pub small_ratio: u8,
 }
 
+impl StreamAllocationConfig {
+    /// 3 つの比率の合計が 100 になっているかを検証する。
+    /// 合計が 100 でないと帯域配分計算が壊れる。
+    pub fn validate(&self) -> Result<(), String> {
+        let sum = self.large_ratio as u16 + self.medium_ratio as u16 + self.small_ratio as u16;
+        if sum != 100 {
+            return Err(format!(
+                "stream_allocation ratios must sum to 100 (got {sum}: large={}, medium={}, small={})",
+                self.large_ratio, self.medium_ratio, self.small_ratio
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpeedTestConfig {
     /// スピードテストを有効にするか
@@ -187,6 +224,16 @@ impl Default for NetConfig {
                 history_size: 3600,
                 graph_sample_interval_secs: 1,
             },
+            catalog: CatalogConfig::default(),
         }
+    }
+}
+
+impl NetConfig {
+    /// 設定全体の妥当性を検証する。Daemon 起動時に呼ばれる。
+    /// 個別の知識は各サブ struct の `validate()` に委譲する。
+    pub fn validate(&self) -> Result<(), String> {
+        self.stream_allocation.validate()?;
+        Ok(())
     }
 }
