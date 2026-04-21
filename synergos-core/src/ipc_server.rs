@@ -201,28 +201,24 @@ type SharedWriter = Arc<Mutex<tokio::net::unix::OwnedWriteHalf>>;
 
 /// 接続元 UID が自プロセス UID と一致するか確認する。
 ///
-/// 非 Unix や UCred 非対応プラットフォームでは許容する (Windows は別経路)。
+/// `std::os::unix::net::UCred::uid()` は現在 nightly 限定の unstable API
+/// なので libc 直接呼び出しで実装する:
+/// - Linux: `getsockopt(SO_PEERCRED)` → `struct ucred { pid, uid, gid }`
+/// - macOS / iOS / FreeBSD: `getpeereid(fd, &uid, &gid)`
+/// - それ以外の Unix は uid 取得を諦めて許容 (ベストエフォート)。
 #[cfg(unix)]
 fn verify_peer_uid(stream: &tokio::net::UnixStream) -> Result<(), String> {
     use std::os::unix::io::AsRawFd;
-    // SAFETY: `stream` は生きている UnixStream。借用期間内でのみ fd を触る。
-    // std の UnixStream::peer_cred を借りるために unsafe FromRawFd + ManuallyDrop パターン。
     let fd = stream.as_raw_fd();
-    let std_stream = unsafe {
-        use std::os::unix::io::FromRawFd;
-        std::mem::ManuallyDrop::new(std::os::unix::net::UnixStream::from_raw_fd(fd))
-    };
-    let cred = match std_stream.peer_cred() {
-        Ok(c) => c,
+
+    let peer_uid = match peer_uid_of_fd(fd) {
+        Ok(u) => u,
         Err(e) => {
-            // peer_cred が取れない OS (macOS 等旧バージョン) は allow (ベストエフォート)
             tracing::debug!("peer_cred unavailable, skipping uid check: {e}");
             return Ok(());
         }
     };
-    let peer_uid = cred.uid();
-    // 自プロセス UID
-    // SAFETY: libc call with no side effects; always succeeds.
+    // SAFETY: libc::geteuid is side-effect-free and always succeeds.
     let self_uid = unsafe { libc::geteuid() };
     if peer_uid != self_uid {
         return Err(format!(
@@ -230,6 +226,63 @@ fn verify_peer_uid(stream: &tokio::net::UnixStream) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn peer_uid_of_fd(fd: std::os::unix::io::RawFd) -> std::io::Result<libc::uid_t> {
+    // SAFETY: libc::ucred は POD。getsockopt が成功した場合のみ書き込まれる。
+    unsafe {
+        let mut cred: libc::ucred = std::mem::zeroed();
+        let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+        let ret = libc::getsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            &mut cred as *mut _ as *mut libc::c_void,
+            &mut len,
+        );
+        if ret != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(cred.uid)
+    }
+}
+
+#[cfg(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd",
+))]
+fn peer_uid_of_fd(fd: std::os::unix::io::RawFd) -> std::io::Result<libc::uid_t> {
+    // SAFETY: getpeereid fills uid/gid when the call succeeds.
+    unsafe {
+        let mut uid: libc::uid_t = 0;
+        let mut gid: libc::gid_t = 0;
+        let ret = libc::getpeereid(fd, &mut uid, &mut gid);
+        if ret != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(uid)
+    }
+}
+
+#[cfg(all(
+    unix,
+    not(any(
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd",
+    ))
+))]
+fn peer_uid_of_fd(_fd: std::os::unix::io::RawFd) -> std::io::Result<libc::uid_t> {
+    // illumos / solaris / hermit など未対応 Unix はベストエフォートで自プロセス UID を返す。
+    // SAFETY: geteuid is side-effect-free.
+    unsafe { Ok(libc::geteuid()) }
 }
 
 /// Windows Named Pipe 接続のハンドリング。Unix 版と共通の dispatch/relay
