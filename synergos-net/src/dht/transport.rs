@@ -72,21 +72,17 @@ impl DhtTransport for QuicDhtTransport {
     }
 }
 
-/// 1 本の DHT ストリームを処理する: ヘッダ読み込み → リクエスト復号 →
-/// `DhtNode::handle_request` → 応答送信。エラーはログ化。
+/// 1 本の DHT ストリームを処理する: 長さ付きリクエスト読込 →
+/// `DhtNode::handle_request` → 応答送信。
+///
+/// 呼び出し側 (ストリームディスパッチャ) が magic (`DHT1`) を既に消費済みの
+/// 前提で入る。`send.write_all(DHT_STREAM_MAGIC)` で応答側の magic は
+/// このハンドラが付与する。
 pub async fn handle_dht_stream(
     dht: Arc<DhtNode>,
     mut send: quinn::SendStream,
     mut recv: quinn::RecvStream,
 ) -> Result<()> {
-    let mut magic = [0u8; 4];
-    recv.read_exact(&mut magic).await.map_err(to_err)?;
-    if &magic != DHT_STREAM_MAGIC {
-        return Err(SynergosNetError::Serialization(
-            "DHT request magic mismatch".into(),
-        ));
-    }
-
     let mut len_buf = [0u8; 4];
     recv.read_exact(&mut len_buf).await.map_err(to_err)?;
     let len = u32::from_be_bytes(len_buf) as usize;

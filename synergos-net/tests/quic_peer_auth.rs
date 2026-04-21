@@ -65,6 +65,48 @@ async fn connect_succeeds_with_matching_peer_id() {
 }
 
 #[tokio::test]
+async fn disconnect_removes_connection_entry() {
+    let server_id = Arc::new(Identity::generate());
+    let client_id = Arc::new(Identity::generate());
+
+    let (server, server_addr) = bind_server(server_id.clone()).await;
+    let client = build_client(client_id).await;
+
+    let server_task = {
+        let server = server.clone();
+        tokio::spawn(async move {
+            let _ = server.accept().await;
+        })
+    };
+
+    client
+        .connect(server_id.peer_id().clone(), server_addr, "synergos")
+        .await
+        .unwrap();
+
+    assert!(client.get_connection(server_id.peer_id()).is_some());
+    client.disconnect(server_id.peer_id(), "test").await;
+    assert!(client.get_connection(server_id.peer_id()).is_none());
+    assert_eq!(client.list_connections().len(), 0);
+
+    tokio::time::timeout(Duration::from_millis(200), server_task)
+        .await
+        .ok();
+}
+
+#[tokio::test]
+async fn open_stream_on_unknown_peer_errors() {
+    let id = Arc::new(Identity::generate());
+    let client = build_client(id).await;
+    use synergos_net::quic::StreamType;
+    use synergos_net::types::PeerId;
+    let result = client
+        .open_stream(&PeerId::new("unknown"), StreamType::Control)
+        .await;
+    assert!(result.is_err());
+}
+
+#[tokio::test]
 async fn connect_rejects_mismatched_peer_id() {
     let server_id = Arc::new(Identity::generate());
     let wrong_id = Identity::generate();
