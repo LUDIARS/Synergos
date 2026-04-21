@@ -109,9 +109,7 @@ impl ChainBlock {
         let mut clone = self.clone();
         clone.compute_hash();
         if clone.hash != self.hash {
-            return Err(SynergosNetError::Gossip(
-                "ChainBlock hash mismatch".into(),
-            ));
+            return Err(SynergosNetError::Gossip("ChainBlock hash mismatch".into()));
         }
         identity::verify(
             &self.author_public_key,

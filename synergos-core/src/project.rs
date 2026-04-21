@@ -448,10 +448,7 @@ impl ProjectConfiguration for ProjectManager {
             return Ok(project_id);
         }
 
-        tracing::info!(
-            "Joining project {} via invite (path redacted)",
-            project_id
-        );
+        tracing::info!("Joining project {} via invite (path redacted)", project_id);
 
         // リモートからのプロジェクト設定取得は Gossipsub 経由で非同期に行われる
         self.open_project(project_id.clone(), root_path, None)

@@ -238,8 +238,8 @@ fn is_valid_hostname(s: &str) -> bool {
         return false;
     }
     // 連続したドットや先頭/末尾の `.` / `-` を弾く
-    if bytes.first().map_or(true, |&b| !b.is_ascii_alphanumeric())
-        || bytes.last().map_or(true, |&b| !b.is_ascii_alphanumeric())
+    if bytes.first().is_none_or(|&b| !b.is_ascii_alphanumeric())
+        || bytes.last().is_none_or(|&b| !b.is_ascii_alphanumeric())
     {
         return false;
     }

@@ -107,7 +107,7 @@ impl IpcServer {
                         Err(e) => {
                             tracing::error!("Accept error: {}", e);
                             // 指数バックオフ (最大 1s)
-                            backoff_ms = (backoff_ms * 2).max(10).min(1000);
+                            backoff_ms = (backoff_ms * 2).clamp(10, 1000);
                             tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
                         }
                     }
@@ -170,7 +170,7 @@ impl IpcServer {
                         Ok(n) => n,
                         Err(e) => {
                             tracing::error!("failed to create next pipe instance: {e}");
-                            backoff_ms = (backoff_ms * 2).max(10).min(1000);
+                            backoff_ms = (backoff_ms * 2).clamp(10, 1000);
                             tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
                             continue;
                         }
@@ -187,7 +187,7 @@ impl IpcServer {
                 }
                 Err(e) => {
                     tracing::error!("Named pipe accept error: {e}");
-                    backoff_ms = (backoff_ms * 2).max(10).min(1000);
+                    backoff_ms = (backoff_ms * 2).clamp(10, 1000);
                     tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
                 }
             }
@@ -268,7 +268,6 @@ where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
     W: tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-
     // Subscribe 起動時にここへタスクハンドルを保持。Unsubscribe / 切断時に abort。
     let mut event_relay: Option<tokio::task::JoinHandle<()>> = None;
 
@@ -333,10 +332,7 @@ where
     Ok(())
 }
 
-async fn send_server_message<W>(
-    writer: &Arc<Mutex<W>>,
-    msg: ServerMessage,
-) -> Result<(), IpcError>
+async fn send_server_message<W>(writer: &Arc<Mutex<W>>, msg: ServerMessage) -> Result<(), IpcError>
 where
     W: tokio::io::AsyncWrite + Unpin,
 {
@@ -346,11 +342,8 @@ where
 
 /// EventBus → クライアントへ IpcEvent を中継する per-client タスク。
 /// `filter` に合致しないイベントはスキップ。
-async fn relay_events<W>(
-    ctx: Arc<ServiceContext>,
-    writer: Arc<Mutex<W>>,
-    filters: Vec<EventFilter>,
-) where
+async fn relay_events<W>(ctx: Arc<ServiceContext>, writer: Arc<Mutex<W>>, filters: Vec<EventFilter>)
+where
     W: tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
     // `filter_event` に渡す際に参照渡しにしたいので slice で借用する形に。

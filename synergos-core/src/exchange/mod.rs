@@ -211,9 +211,7 @@ impl Exchange {
     pub fn gc_finished_transfers(&self) -> usize {
         let mut removed = 0;
         self.transfers.retain(|_, t| match &t.state {
-            TransferState::Completed
-            | TransferState::Cancelled
-            | TransferState::Failed(_) => {
+            TransferState::Completed | TransferState::Cancelled | TransferState::Failed(_) => {
                 removed += 1;
                 false
             }
@@ -301,11 +299,8 @@ impl Exchange {
             });
 
             // TransferLedger で fulfilled をマーク
-            self.ledger.mark_fulfilled(
-                &transfer.file_id,
-                transfer.version,
-                &transfer.peer_id,
-            );
+            self.ledger
+                .mark_fulfilled(&transfer.file_id, transfer.version, &transfer.peer_id);
         }
     }
 

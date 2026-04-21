@@ -132,20 +132,19 @@ impl Identity {
                 return PathBuf::from(state).join("synergos").join("identity.key");
             }
             if let Ok(home) = std::env::var("HOME") {
-                return PathBuf::from(home)
-                    .join(".local/state/synergos/identity.key");
+                return PathBuf::from(home).join(".local/state/synergos/identity.key");
             }
-            return PathBuf::from("/tmp/synergos-identity.key");
+            PathBuf::from("/tmp/synergos-identity.key")
         }
 
         #[cfg(target_os = "macos")]
         {
             let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-            return PathBuf::from(home)
+            PathBuf::from(home)
                 .join("Library")
                 .join("Application Support")
                 .join("Synergos")
-                .join("identity.key");
+                .join("identity.key")
         }
 
         #[cfg(target_os = "windows")]
@@ -154,7 +153,7 @@ impl Identity {
                 .ok()
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("."));
-            return base.join("Synergos").join("identity.key");
+            base.join("Synergos").join("identity.key")
         }
     }
 }
@@ -179,10 +178,10 @@ pub fn verify(
     message: &[u8],
     signature: &[u8; 64],
 ) -> Result<(), IdentityError> {
-    let vk = VerifyingKey::from_bytes(public_key)
-        .map_err(|_| IdentityError::VerifyFailed)?;
+    let vk = VerifyingKey::from_bytes(public_key).map_err(|_| IdentityError::VerifyFailed)?;
     let sig = Signature::from_bytes(signature);
-    vk.verify(message, &sig).map_err(|_| IdentityError::VerifyFailed)
+    vk.verify(message, &sig)
+        .map_err(|_| IdentityError::VerifyFailed)
 }
 
 #[cfg(test)]
@@ -206,10 +205,7 @@ mod tests {
 
     #[test]
     fn load_or_generate_persists_same_peer_id() {
-        let tmp = std::env::temp_dir().join(format!(
-            "synergos-id-{}.key",
-            uuid::Uuid::new_v4()
-        ));
+        let tmp = std::env::temp_dir().join(format!("synergos-id-{}.key", uuid::Uuid::new_v4()));
         let a = Identity::load_or_generate(&tmp).unwrap();
         let pid_a = a.peer_id().clone();
         drop(a);

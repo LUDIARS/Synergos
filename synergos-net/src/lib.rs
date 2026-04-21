@@ -26,7 +26,9 @@ pub use config::NetConfig;
 pub use dht::DhtNode;
 pub use error::{Result, SynergosNetError};
 pub use gossip::{GossipMessage, GossipNode};
-pub use identity::{peer_id_from_public_bytes, verify as verify_signature, Identity, IdentityError};
+pub use identity::{
+    peer_id_from_public_bytes, verify as verify_signature, Identity, IdentityError,
+};
 pub use mesh::Mesh;
 pub use quic::{CalibratedParams, ConnectionCalibrator, QuicManager, SpeedTestResult};
 pub use tunnel::{TunnelManager, TunnelState};

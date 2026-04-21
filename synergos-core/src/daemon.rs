@@ -8,14 +8,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::broadcast;
 
 use synergos_net::{
-    config::NetConfig,
-    conduit::Conduit,
-    dht::DhtNode,
-    gossip::GossipNode,
-    mesh::Mesh,
-    quic::QuicManager,
-    tunnel::TunnelManager,
-    types::PeerId,
+    conduit::Conduit, config::NetConfig, dht::DhtNode, gossip::GossipNode, mesh::Mesh,
+    quic::QuicManager, tunnel::TunnelManager, types::PeerId,
 };
 
 use crate::conflict::ConflictManager;
@@ -72,10 +66,7 @@ impl Daemon {
         let local_peer_id = PeerId::generate();
 
         // ── ネットワーク基盤コンポーネント ──
-        let dht = Arc::new(DhtNode::new(
-            local_peer_id.clone(),
-            net_config.dht.clone(),
-        ));
+        let dht = Arc::new(DhtNode::new(local_peer_id.clone(), net_config.dht.clone()));
         let gossip = Arc::new(GossipNode::new(
             local_peer_id.clone(),
             net_config.gossipsub.clone(),
@@ -103,8 +94,10 @@ impl Daemon {
 
         // ── サービスレイヤ ──
         let event_bus: SharedEventBus = Arc::new(CoreEventBus::new());
-        let project_manager =
-            Arc::new(ProjectManager::with_gossip(event_bus.clone(), Some(gossip.clone())));
+        let project_manager = Arc::new(ProjectManager::with_gossip(
+            event_bus.clone(),
+            Some(gossip.clone()),
+        ));
         let exchange = Arc::new(Exchange::with_network(
             event_bus.clone(),
             local_peer_id.clone(),
@@ -226,10 +219,7 @@ fn load_net_config(path: Option<&std::path::Path>) -> anyhow::Result<NetConfig> 
             Ok(cfg)
         }
         Some(p) => {
-            tracing::warn!(
-                "Config file not found at {}; using defaults",
-                p.display()
-            );
+            tracing::warn!("Config file not found at {}; using defaults", p.display());
             Ok(NetConfig::default())
         }
         None => Ok(NetConfig::default()),

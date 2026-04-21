@@ -28,7 +28,10 @@ pub fn show(ui: &mut egui::Ui, connection: &CoreConnection, inputs: &mut UiInput
                     ui.end_row();
 
                     ui.label("Active Peers:");
-                    ui.label(format!("{}/{}", net.active_connections, net.max_connections));
+                    ui.label(format!(
+                        "{}/{}",
+                        net.active_connections, net.max_connections
+                    ));
                     ui.end_row();
 
                     ui.label("Bandwidth:");
@@ -122,22 +125,16 @@ pub fn show(ui: &mut egui::Ui, connection: &CoreConnection, inputs: &mut UiInput
                     ui.horizontal(|ui| {
                         if ui.button("Invite").clicked() {
                             inputs.selected_project_id = p.project_id.clone();
-                            let expires =
-                                inputs.invite_expires_secs.trim().parse::<u64>().ok();
+                            let expires = inputs.invite_expires_secs.trim().parse::<u64>().ok();
                             match connection.create_invite(&p.project_id, expires) {
                                 Some((token, _exp)) => {
                                     inputs.last_invite_token = Some(token);
                                     inputs.invite_error = None;
-                                    inputs.set_ok(format!(
-                                        "invite created for {}",
-                                        p.project_id
-                                    ));
+                                    inputs.set_ok(format!("invite created for {}", p.project_id));
                                 }
                                 None => {
-                                    inputs.invite_error = Some(format!(
-                                        "invite failed for {}",
-                                        p.project_id
-                                    ));
+                                    inputs.invite_error =
+                                        Some(format!("invite failed for {}", p.project_id));
                                     inputs.set_err("invite failed");
                                 }
                             }

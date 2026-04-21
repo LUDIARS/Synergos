@@ -36,7 +36,7 @@ pub enum IpcError {
 }
 
 /// 最大メッセージサイズ (1 MiB) — DoS 対策のため小さめに設定
-pub const MAX_MESSAGE_SIZE: u32 = 1 * 1024 * 1024;
+pub const MAX_MESSAGE_SIZE: u32 = 1024 * 1024;
 
 /// 1 回の read で確保するチャンクサイズ上限（ピーク確保量制限）
 const READ_CHUNK: usize = 64 * 1024;

@@ -4,8 +4,8 @@ use std::time::Instant;
 use dashmap::DashMap;
 use tokio::sync::broadcast;
 
-use super::message::*;
 use super::message::canonical_bytes;
+use super::message::*;
 use crate::config::GossipsubConfig;
 use crate::identity::Identity;
 use crate::types::{MessageId, PeerId, TopicId};
