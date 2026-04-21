@@ -17,6 +17,7 @@ rustls = { version = "0.23", features = ["ring"] }
 prost = "0.13"
 prost-types = "0.13"
 serde = { version = "1", features = ["derive"] }
+rmp-serde = "1"
 
 # Crypto / Hash
 blake3 = "1"

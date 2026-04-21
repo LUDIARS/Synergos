@@ -264,6 +264,18 @@ fn spawn_periodic_cleanup(
 
                     // TURN セッション GC
                     net.mesh.cleanup_expired_sessions();
+
+                    // QUIC → Presence の RTT / 帯域情報を転記 (#14 対策)。
+                    // quinn の RTT 推定は connection レベルでしか取れないので、
+                    // QuicManager が保持しているスナップショットを 60s ごとに
+                    // PresenceService に流す。
+                    for info in net.quic.list_connections() {
+                        ctx.presence.update_rtt(&info.peer_id, info.rtt_ms);
+                        let bw = net.quic.get_bandwidth_estimate(&info.peer_id);
+                        if bw > 0 {
+                            ctx.presence.update_bandwidth(&info.peer_id, bw);
+                        }
+                    }
                 }
                 _ = shutdown_rx.recv() => {
                     break;
