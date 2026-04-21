@@ -84,6 +84,9 @@ pub struct InviteToken {
     pub project_id: String,
     /// 有効期限（Unix epoch 秒）。None = 無期限
     pub expires_at: Option<u64>,
+    /// 残り使用回数。0 になった時点でマップから除去される (S10 対策)。
+    /// 既定値 1 (one-shot)。呼び出し側が多数参加を想定する場合だけ 2 以上を指定する。
+    pub uses_remaining: u32,
 }
 
 /// プロジェクト管理エラー
@@ -391,6 +394,7 @@ impl ProjectConfiguration for ProjectManager {
             token: token.clone(),
             project_id: project_id.to_string(),
             expires_at,
+            uses_remaining: 1,
         };
 
         // トークン本体はログに残さない（クレデンシャル扱い）
@@ -409,21 +413,38 @@ impl ProjectConfiguration for ProjectManager {
         invite_token: &str,
         root_path: PathBuf,
     ) -> Result<String, ProjectError> {
-        let invite = self
-            .invites
-            .get(invite_token)
-            .map(|e| e.value().clone())
-            .ok_or(ProjectError::InvalidInvite)?;
+        // 使用回数デクリメント + 期限チェックをアトミックに (S10)。
+        // DashMap の entry API で `get_mut` → mutate → (必要なら) remove を
+        // 1 ホルダ内で行い、他 accept と競合しない。
+        let project_id = {
+            let mut entry = self
+                .invites
+                .get_mut(invite_token)
+                .ok_or(ProjectError::InvalidInvite)?;
+            let invite = entry.value_mut();
 
-        // 有効期限チェック
-        if let Some(expires_at) = invite.expires_at {
-            if now_epoch_secs() > expires_at {
-                self.invites.remove(invite_token);
-                return Err(ProjectError::InviteExpired);
+            if let Some(expires_at) = invite.expires_at {
+                if now_epoch_secs() > expires_at {
+                    drop(entry);
+                    self.invites.remove(invite_token);
+                    return Err(ProjectError::InviteExpired);
+                }
             }
-        }
-
-        let project_id = invite.project_id.clone();
+            if invite.uses_remaining == 0 {
+                drop(entry);
+                self.invites.remove(invite_token);
+                return Err(ProjectError::InvalidInvite);
+            }
+            invite.uses_remaining -= 1;
+            let pid = invite.project_id.clone();
+            let exhausted = invite.uses_remaining == 0;
+            drop(entry);
+            if exhausted {
+                // 使い切ったトークンは即時削除 (リプレイ攻撃防止)
+                self.invites.remove(invite_token);
+            }
+            pid
+        };
 
         // 既に参加中ならそのまま返す
         if self.projects.contains_key(&project_id) {
@@ -431,9 +452,8 @@ impl ProjectConfiguration for ProjectManager {
         }
 
         tracing::info!(
-            "Joining project {} via invite at {}",
-            project_id,
-            root_path.display()
+            "Joining project {} via invite (path redacted)",
+            project_id
         );
 
         // リモートからのプロジェクト設定取得は Gossipsub 経由で非同期に行われる

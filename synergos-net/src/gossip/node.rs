@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Instant;
 
 use dashmap::DashMap;
@@ -6,6 +7,7 @@ use tokio::sync::broadcast;
 use super::message::*;
 use super::message::canonical_bytes;
 use crate::config::GossipsubConfig;
+use crate::identity::Identity;
 use crate::types::{MessageId, PeerId, TopicId};
 
 /// メッセージキャッシュ（重複排除）
@@ -64,6 +66,12 @@ pub struct GossipNode {
     tx: broadcast::Sender<(TopicId, GossipMessage)>,
     /// パラメータ
     params: GossipsubConfig,
+    /// 自ノードの ed25519 identity。`with_identity` で設定された時のみ
+    /// publish 時に SignedGossipMessage に包む (S3 対策)。
+    identity: Option<Arc<Identity>>,
+    /// 受信検証を厳密化するフラグ。`true` の場合、署名が通らない
+    /// メッセージは receive path から脱落する。段階移行のため既定 `false`。
+    require_signature: bool,
 }
 
 impl GossipNode {
@@ -76,7 +84,37 @@ impl GossipNode {
             message_cache: MessageCache::new(params.message_cache_size),
             tx,
             params,
+            identity: None,
+            require_signature: false,
         }
+    }
+
+    /// 署名付き送信 + 検証に使う Identity を差し込む。
+    pub fn set_identity(&mut self, identity: Arc<Identity>) {
+        self.identity = Some(identity);
+    }
+
+    /// 受信時に署名検証を必須にするか切り替える。
+    pub fn set_require_signature(&mut self, require: bool) {
+        self.require_signature = require;
+    }
+
+    /// 署名付き送信用に現在のメッセージを封筒化する。
+    /// Identity が未設定の場合は `None` を返し、呼び出し側は送信をスキップする。
+    pub fn envelope(&self, message: GossipMessage) -> Option<SignedGossipMessage> {
+        self.identity
+            .as_ref()
+            .map(|id| SignedGossipMessage::sign(message, id))
+    }
+
+    /// 受信した SignedGossipMessage を検証し、内側の GossipMessage を取り出す。
+    /// 検証失敗 / 未署名は `None`。
+    pub fn verify_envelope(&self, signed: SignedGossipMessage) -> Option<GossipMessage> {
+        if let Err(e) = signed.verify() {
+            tracing::warn!("dropped gossip message: {e}");
+            return None;
+        }
+        Some(signed.message)
     }
 
     /// Topic を購読（プロジェクト参加時）
@@ -111,22 +149,41 @@ impl GossipNode {
             .unwrap_or_default()
     }
 
-    /// 受信メッセージを処理
+    /// 署名付き受信メッセージの処理。検証成功時はキャッシュチェック + 配信する。
+    pub fn on_signed_message_received(
+        &self,
+        topic: &TopicId,
+        signed: SignedGossipMessage,
+        _from: &PeerId,
+    ) -> bool {
+        match self.verify_envelope(signed) {
+            Some(msg) => self.deliver(topic, msg),
+            None => false,
+        }
+    }
+
+    /// 受信メッセージを処理 (無署名経路)。
+    /// `require_signature=true` の場合は即 drop。
     pub fn on_message_received(
         &self,
         topic: &TopicId,
         message: GossipMessage,
         _from: &PeerId,
     ) -> bool {
+        if self.require_signature {
+            tracing::debug!("dropping unsigned gossip message (require_signature=true)");
+            return false;
+        }
+        self.deliver(topic, message)
+    }
+
+    /// MessageCache 重複チェック + broadcast 配信の共通処理。
+    fn deliver(&self, topic: &TopicId, message: GossipMessage) -> bool {
         let msg_bytes = canonical_bytes(&message);
         let msg_id = MessageId::from_content(&msg_bytes);
-
-        // 重複チェック
         if self.message_cache.check_and_insert(&msg_id) {
             return false; // duplicate
         }
-
-        // broadcast channel に通知
         let _ = self.tx.send((topic.clone(), message));
         true
     }
