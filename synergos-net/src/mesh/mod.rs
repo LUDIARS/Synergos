@@ -300,23 +300,50 @@ impl Mesh {
 
     // ── 内部ヘルパー ──
 
-    /// DNS-over-HTTPS で AAAA レコードを解決
+    /// DNS-over-HTTPS で AAAA レコードを解決 (複数プロバイダ + DNSSEC 検証)
+    ///
+    /// Cloudflare → Google の順で試行し、いずれか応答が得られればそれを返す。
+    /// DNSSEC 検証を常時 ON にすることで、中間者による偽 AAAA 注入を防ぐ (S23)。
     async fn resolve_doh(&self, fqdn: &str) -> Result<Vec<Ipv6Addr>> {
         use hickory_resolver::config::{ResolverConfig, ResolverOpts};
         use hickory_resolver::TokioAsyncResolver;
 
-        let resolver =
-            TokioAsyncResolver::tokio(ResolverConfig::cloudflare_https(), ResolverOpts::default());
+        let providers: Vec<(&str, ResolverConfig)> = vec![
+            ("cloudflare_https", ResolverConfig::cloudflare_https()),
+            ("google_https", ResolverConfig::google_https()),
+        ];
 
-        let response = resolver
-            .ipv6_lookup(fqdn)
-            .await
-            .map_err(|e| SynergosNetError::DnsResolution(format!("DoH lookup failed: {}", e)))?;
+        let mut last_err: Option<String> = None;
+        for (name, cfg) in providers {
+            let mut opts = ResolverOpts::default();
+            opts.validate = true; // DNSSEC 検証を要求
+            opts.timeout = Duration::from_secs(5);
 
-        let addrs: Vec<Ipv6Addr> = response.iter().map(|aaaa| aaaa.0).collect();
+            let resolver = TokioAsyncResolver::tokio(cfg, opts);
+            match resolver.ipv6_lookup(fqdn).await {
+                Ok(response) => {
+                    let addrs: Vec<Ipv6Addr> = response.iter().map(|aaaa| aaaa.0).collect();
+                    if !addrs.is_empty() {
+                        tracing::debug!(
+                            "DoH ({}) resolved {} → {} addresses",
+                            name,
+                            fqdn,
+                            addrs.len()
+                        );
+                        return Ok(addrs);
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!("DoH ({}) lookup for {} failed: {e}", name, fqdn);
+                    last_err = Some(format!("{name}: {e}"));
+                }
+            }
+        }
 
-        tracing::debug!("DoH resolved {} → {} addresses", fqdn, addrs.len());
-        Ok(addrs)
+        Err(SynergosNetError::DnsResolution(format!(
+            "DoH lookup failed across all providers: {}",
+            last_err.unwrap_or_else(|| "no response".into())
+        )))
     }
 
     /// 通常の DNS で AAAA レコードを解決

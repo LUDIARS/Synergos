@@ -78,6 +78,27 @@ pub enum IpcCommand {
         file_paths: Vec<PathBuf>,
     },
 
+    // ── コンフリクト管理 ──
+    /// プロジェクトのアクティブなコンフリクト一覧
+    ConflictList { project_id: Option<String> },
+    /// コンフリクトを解決する
+    ConflictResolve {
+        file_id: String,
+        /// "keep_local" | "accept_remote" | "manual_merge"
+        resolution: String,
+    },
+
+    // ── 設定変更 ──
+    /// NetConfig の部分更新 (受け取れる主要フィールドだけ)
+    ConfigUpdate {
+        /// gossipsub.mesh_n
+        mesh_n: Option<u16>,
+        /// quic.max_concurrent_streams
+        max_concurrent_streams: Option<u32>,
+        /// tunnel.hostname
+        tunnel_hostname: Option<String>,
+    },
+
     // ── モニタリング ──
     /// ネットワーク状態取得
     NetworkStatus,
@@ -170,6 +191,24 @@ impl IpcCommand {
 
             Self::Subscribe { .. } => Ok(()),
             Self::Unsubscribe { subscription_id } => check_id("subscription_id", subscription_id),
+
+            Self::ConflictList { project_id } => {
+                if let Some(p) = project_id {
+                    check_id("project_id", p)?;
+                }
+                Ok(())
+            }
+            Self::ConflictResolve {
+                file_id,
+                resolution,
+            } => {
+                check_id("file_id", file_id)?;
+                match resolution.as_str() {
+                    "keep_local" | "accept_remote" | "manual_merge" => Ok(()),
+                    other => Err(format!("invalid resolution: {other}")),
+                }
+            }
+            Self::ConfigUpdate { .. } => Ok(()),
         }
     }
 }

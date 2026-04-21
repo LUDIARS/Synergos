@@ -13,6 +13,7 @@
 
 use std::path::{Path, PathBuf};
 
+use ed25519_dalek::pkcs8::{DecodePrivateKey, EncodePrivateKey};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey, SECRET_KEY_LENGTH};
 
 use crate::types::PeerId;
@@ -119,6 +120,33 @@ impl Identity {
     /// 任意のバイト列に対する署名 (64 bytes)
     pub fn sign(&self, message: &[u8]) -> [u8; 64] {
         self.signing.sign(message).to_bytes()
+    }
+
+    /// 秘密鍵を PKCS#8 v2 DER で出力する (rcgen / rustls 取り込み用)。
+    pub fn to_pkcs8_der(&self) -> Result<Vec<u8>, IdentityError> {
+        self.signing
+            .to_pkcs8_der()
+            .map(|doc| doc.as_bytes().to_vec())
+            .map_err(|e| IdentityError::InvalidKeyFile {
+                reason: format!("pkcs8 export failed: {e}"),
+            })
+    }
+
+    /// PKCS#8 DER で受け取った ed25519 秘密鍵から Identity を組み立てる。
+    /// テスト用にしか使わない想定だが、`identity.key` が PKCS#8 形式で
+    /// 供給された場合の読み込みにも使える。
+    pub fn from_pkcs8_der(der: &[u8]) -> Result<Self, IdentityError> {
+        let signing =
+            SigningKey::from_pkcs8_der(der).map_err(|e| IdentityError::InvalidKeyFile {
+                reason: format!("pkcs8 import failed: {e}"),
+            })?;
+        let verifying = signing.verifying_key();
+        let peer_id = peer_id_from_verifying(&verifying);
+        Ok(Self {
+            signing,
+            verifying,
+            peer_id,
+        })
     }
 
     /// 既定のアイデンティティ格納パス。プロセス内で一度だけ解決する想定。

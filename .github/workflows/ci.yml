@@ -71,6 +71,38 @@ jobs:
       - name: Run tests
         run: cargo test --workspace --all-targets
 
+  coverage:
+    runs-on: ubuntu-latest
+    name: Coverage (llvm-cov)
+    # cargo-llvm-cov は Linux でしか手軽に動かないので ubuntu-only。
+    # CI ブロックはしないが、PR レビューで目安になる。
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - name: Install cargo-llvm-cov
+        run: cargo install --locked cargo-llvm-cov
+      - name: Cache cargo registry & build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: coverage-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            coverage-cargo-
+      - name: Generate lcov report
+        run: cargo llvm-cov --workspace --lcov --output-path lcov.info
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-lcov
+          path: lcov.info
+
   audit:
     runs-on: ubuntu-latest
     name: Security audit

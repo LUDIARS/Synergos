@@ -216,6 +216,28 @@ impl FileSizeClass {
     }
 }
 
+/// PeerId をログ用に短縮する。`PeerId::short` と同じだが、参照を `&PeerId`
+/// として受け取れるので `tracing::info!("{}", truncate_peer_id(&pid))` と書ける。
+pub fn truncate_peer_id(pid: &PeerId) -> String {
+    pid.short()
+}
+
+/// プロジェクト相対にパスを縮める。パスがプロジェクトルート配下なら相対化、
+/// 外にはみ出していれば file_name のみ、それも取れなければ "<redacted>"。
+///
+/// S20 対策として `IpcResponse::Error.message` や tracing ログに載せる path を
+/// すべてこのヘルパを経由させることで、絶対パス (ユーザのホームディレクトリ等)
+/// の漏洩を抑える。
+pub fn redact_path(project_root: &std::path::Path, path: &std::path::Path) -> String {
+    if let Ok(rel) = path.strip_prefix(project_root) {
+        return rel.display().to_string();
+    }
+    match path.file_name() {
+        Some(name) => name.to_string_lossy().into_owned(),
+        None => "<redacted>".to_string(),
+    }
+}
+
 /// UNIX epoch からの経過時間を milliseconds で返す共通ユーティリティ。
 /// `conflict` / `exchange` / `catalog` で個別定義されていた重複を解消する。
 ///
@@ -225,4 +247,30 @@ pub fn now_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests_redact {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn redact_keeps_relative_within_root() {
+        let root = PathBuf::from("/home/user/project");
+        let inside = root.join("src/main.rs");
+        assert_eq!(redact_path(&root, &inside), "src/main.rs");
+    }
+
+    #[test]
+    fn redact_outside_root_returns_file_name_only() {
+        let root = PathBuf::from("/home/user/project");
+        let outside = PathBuf::from("/etc/passwd");
+        assert_eq!(redact_path(&root, &outside), "passwd");
+    }
+
+    #[test]
+    fn truncate_peer_id_short() {
+        let p = PeerId::new("abcdefghijklmno");
+        assert!(truncate_peer_id(&p).ends_with('…'));
+    }
 }

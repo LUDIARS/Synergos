@@ -102,21 +102,23 @@ impl ChainBlock {
     pub fn verify(&self) -> Result<()> {
         let derived = identity::peer_id_from_public_bytes(&self.author_public_key);
         if derived != self.author {
-            return Err(SynergosNetError::Gossip(
+            return Err(SynergosNetError::Identity(
                 "ChainBlock author does not match public key".into(),
             ));
         }
         let mut clone = self.clone();
         clone.compute_hash();
         if clone.hash != self.hash {
-            return Err(SynergosNetError::Gossip("ChainBlock hash mismatch".into()));
+            return Err(SynergosNetError::Identity(
+                "ChainBlock hash mismatch".into(),
+            ));
         }
         identity::verify(
             &self.author_public_key,
             &self.signing_message(),
             &self.signature,
         )
-        .map_err(|_| SynergosNetError::Gossip("ChainBlock signature invalid".into()))?;
+        .map_err(|_| SynergosNetError::Identity("ChainBlock signature invalid".into()))?;
         Ok(())
     }
 

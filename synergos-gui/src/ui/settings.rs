@@ -70,6 +70,61 @@ pub fn show(ui: &mut egui::Ui, connection: &CoreConnection) {
 
     ui.add_space(8.0);
 
+    // ── ネットワーク設定 編集 (#13) ──
+    ui.collapsing("Network Tuning", |ui| {
+        let id = ui.make_persistent_id("synergos_net_tuning");
+        let (mut mesh_n, mut max_streams, mut hostname, mut feedback) = ui.memory_mut(|m| {
+            m.data
+                .get_persisted::<(String, String, String, String)>(id)
+                .unwrap_or_default()
+        });
+
+        egui::Grid::new("network_tuning_form")
+            .num_columns(2)
+            .spacing([12.0, 6.0])
+            .show(ui, |ui| {
+                ui.label("gossipsub.mesh_n:");
+                ui.text_edit_singleline(&mut mesh_n);
+                ui.end_row();
+
+                ui.label("quic.max_concurrent_streams:");
+                ui.text_edit_singleline(&mut max_streams);
+                ui.end_row();
+
+                ui.label("tunnel.hostname:");
+                ui.text_edit_singleline(&mut hostname);
+                ui.end_row();
+            });
+
+        if ui.button("Apply").clicked() {
+            let parsed_mesh = mesh_n.trim().parse::<u16>().ok();
+            let parsed_max = max_streams.trim().parse::<u32>().ok();
+            let parsed_host = if hostname.trim().is_empty() {
+                None
+            } else {
+                Some(hostname.trim().to_string())
+            };
+            let ok = connection.update_config(parsed_mesh, parsed_max, parsed_host);
+            feedback = if ok {
+                "Applied (restart daemon for full effect)".into()
+            } else {
+                "Update rejected".into()
+            };
+        }
+
+        ui.memory_mut(|m| {
+            m.data
+                .insert_persisted(id, (mesh_n, max_streams, hostname, feedback.clone()))
+        });
+
+        if !feedback.is_empty() {
+            ui.add_space(4.0);
+            ui.colored_label(egui::Color32::from_rgb(120, 120, 180), &feedback);
+        }
+    });
+
+    ui.add_space(8.0);
+
     // 転送設定（説明のみ）
     ui.collapsing("Transfer Policy", |ui| {
         egui::Grid::new("transfer_settings")

@@ -48,7 +48,8 @@ pub struct ChunkFrame {
     pub index: u64,
     /// 当該チャンク単体の Blake3 ハッシュ
     pub hash: Blake3Hash,
-    /// 生データ
+    /// 生データ (msgpack の bin として直列化するため serde_bytes を使う)
+    #[serde(with = "serde_bytes")]
     pub data: Vec<u8>,
 }
 
@@ -178,6 +179,34 @@ where
             }
         }
     }
+}
+
+/// QUIC ストリーム上の転送セッションを示すマジックバイト列。
+/// Daemon のストリーム受信ディスパッチャはこの 4 byte を先読みして
+/// DHT / Transfer / その他を振り分ける。
+pub const TRANSFER_STREAM_MAGIC: &[u8; 4] = b"TXFR";
+
+/// 送信ラッパ: QUIC bidi send half の先頭に `TXFR` を書き、続けて send_stream 本体。
+/// 受信側はディスパッチャで magic を消費した後の recv half を `receive_stream` に
+/// そのまま流す。
+pub async fn send_over_quic<R>(
+    mut send: quinn::SendStream,
+    reader: R,
+    header: TransferHeader,
+) -> Result<()>
+where
+    R: AsyncRead + Unpin,
+{
+    send.write_all(TRANSFER_STREAM_MAGIC)
+        .await
+        .map_err(|e| SynergosNetError::Quic(format!("write magic: {e}")))?;
+    send_stream(reader, send, header).await
+}
+
+/// 受信ラッパ: magic は呼び出し側で既に消費済みの前提。QUIC recv half を
+/// そのまま `receive_stream` に渡す。
+pub async fn receive_over_quic(recv: quinn::RecvStream, out_path: &Path) -> Result<TransferHeader> {
+    receive_stream(recv, out_path).await
 }
 
 /// ディスク上のファイルの全体 Blake3 ハッシュとサイズ + チャンク数を計算する。

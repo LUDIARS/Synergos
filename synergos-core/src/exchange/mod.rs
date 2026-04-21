@@ -14,9 +14,71 @@ use async_trait::async_trait;
 use dashmap::DashMap;
 use synergos_net::chain::{LedgerAction, LedgerEntryState, OfferEntry, TransferLedger, WantEntry};
 use synergos_net::gossip::{GossipMessage, GossipNode};
+use synergos_net::quic::{QuicManager, StreamType};
+use synergos_net::transfer::{receive_over_quic, send_over_quic, TransferHeader};
 use synergos_net::types::{Blake3Hash, FileId, PeerId, TopicId, TransferId};
 
 use crate::event_bus::{SharedEventBus, TransferCompletedEvent, TransferProgressEvent};
+
+/// 受信側で転送の保存先を解決するためのレゾルバ。`(project_id, file_id)` から
+/// 最終的な書き込み先 `PathBuf` を返す。通常は ProjectManager 経由で
+/// プロジェクトルート + 相対パスを組み立てる想定。
+pub type OutPathResolver = Arc<dyn Fn(&str, &FileId) -> Option<PathBuf> + Send + Sync + 'static>;
+
+/// QUIC 送信を進行しつつ 128KiB ごとに読み込んだ累積バイトを
+/// `tokio::sync::mpsc` で投げ出す `AsyncRead` ラッパ。
+///
+/// 送信側の進捗イベントは「source から何 byte 読んだか」で近似する。
+/// QUIC 層の ACK は quinn からは直接取れないので read-side 近似で
+/// 十分 (受信完了は相手のストリームが EOF を返すので区別可能)。
+struct ProgressReader<R> {
+    inner: R,
+    emitted: u64,
+    next_emit_at: u64,
+    tx: tokio::sync::mpsc::Sender<u64>,
+}
+
+impl<R> ProgressReader<R>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    fn wrap(inner: R) -> (Self, tokio::sync::mpsc::Receiver<u64>) {
+        let (tx, rx) = tokio::sync::mpsc::channel(16);
+        (
+            Self {
+                inner,
+                emitted: 0,
+                next_emit_at: 128 * 1024,
+                tx,
+            },
+            rx,
+        )
+    }
+}
+
+impl<R> tokio::io::AsyncRead for ProgressReader<R>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let before = buf.filled().len();
+        let poll = std::pin::Pin::new(&mut self.inner).poll_read(cx, buf);
+        let after = buf.filled().len();
+        let delta = (after - before) as u64;
+        if delta > 0 {
+            self.emitted += delta;
+            if self.emitted >= self.next_emit_at {
+                let _ = self.tx.try_send(self.emitted);
+                self.next_emit_at += 128 * 1024;
+            }
+        }
+        poll
+    }
+}
 
 // ── 型定義 ──
 
@@ -167,6 +229,17 @@ pub trait FileSharing: Send + Sync {
 
 use synergos_net::types::now_ms;
 
+/// ローカルが「送信可能 (Offer 済)」として保持するファイルの記録。
+/// FileWant を受けたときに即座に送信を起動するのに必要な項目。
+#[derive(Debug, Clone)]
+pub struct SharedFileRecord {
+    pub project_id: String,
+    pub file_path: PathBuf,
+    pub file_size: u64,
+    pub crc: u32,
+    pub version: u64,
+}
+
 /// ファイル転送制御サービス
 pub struct Exchange {
     event_bus: SharedEventBus,
@@ -176,6 +249,13 @@ pub struct Exchange {
     ledger: Arc<TransferLedger>,
     /// Gossipsub ノード（オプション: ネットワーク初期化後にセット）
     gossip: Option<Arc<GossipNode>>,
+    /// QUIC ハンドル (注入済みなら share_file で実転送を起動する)
+    quic: Option<Arc<QuicManager>>,
+    /// 受信時に保存先パスを解決するレゾルバ
+    out_path_resolver: Option<OutPathResolver>,
+    /// ローカルが share_file / publish_updates で登録したファイル
+    /// (FileWant 受信時に send_and_share を起動する材料にする)
+    shared_files: DashMap<FileId, SharedFileRecord>,
     /// ローカルピアID
     local_peer_id: PeerId,
 }
@@ -197,8 +277,18 @@ impl Exchange {
             transfers: DashMap::new(),
             ledger: Arc::new(TransferLedger::new()),
             gossip,
+            quic: None,
+            out_path_resolver: None,
+            shared_files: DashMap::new(),
             local_peer_id,
         }
+    }
+
+    /// QUIC 送受を行うためのハンドルと、受信先解決用リゾルバを注入する。
+    /// `with_network` の後に呼んで有効化する。
+    pub fn attach_quic(&mut self, quic: Arc<QuicManager>, resolver: OutPathResolver) {
+        self.quic = Some(quic);
+        self.out_path_resolver = Some(resolver);
     }
 
     /// 完了済み/キャンセル済み転送をテーブルから除去
@@ -278,6 +368,230 @@ impl Exchange {
         }
     }
 
+    /// 実ファイル転送を起動する (送信側)。QUIC + 指定ピアが揃っている前提。
+    /// `reader` は非同期ファイルハンドル。`header.total_hash` は呼び出し元で
+    /// `transfer::hash_file` 等により事前計算する。
+    ///
+    /// 進捗は 128KiB ごとに `TransferProgressEvent` を emit する。完了時に
+    /// `complete_transfer` を呼ぶ。失敗時は ActiveTransfer を Failed へ遷移。
+    pub async fn execute_send(
+        self: &Arc<Self>,
+        transfer_id: TransferId,
+        target_peer: PeerId,
+        source_path: PathBuf,
+        header: TransferHeader,
+    ) -> Result<(), FileSharingError> {
+        let quic = self
+            .quic
+            .as_ref()
+            .ok_or_else(|| FileSharingError::NetworkError("QUIC not attached".into()))?
+            .clone();
+
+        // bidi ストリームを開く
+        let (send, _recv) = quic
+            .open_stream(
+                &target_peer,
+                StreamType::Data {
+                    transfer_id: transfer_id.clone(),
+                },
+            )
+            .await
+            .map_err(|e| FileSharingError::NetworkError(format!("open_stream: {e}")))?;
+
+        // 進捗報告用ラッパ reader
+        let file = tokio::fs::File::open(&source_path).await?;
+        let total_size = header.total_size;
+        let (reader, mut progress_rx) = ProgressReader::wrap(file);
+
+        let exchange = self.clone();
+        let xfer_id_for_progress = transfer_id.clone();
+        let progress_task = tokio::spawn(async move {
+            let start = std::time::Instant::now();
+            while let Some(bytes) = progress_rx.recv().await {
+                let elapsed_ms = start.elapsed().as_millis().max(1) as u64;
+                let speed = (bytes * 1000) / elapsed_ms;
+                exchange.update_progress(&xfer_id_for_progress, bytes, speed);
+                if bytes >= total_size {
+                    break;
+                }
+            }
+        });
+
+        let result = send_over_quic(send, reader, header).await;
+        progress_task.abort();
+
+        match result {
+            Ok(()) => {
+                self.complete_transfer(&transfer_id);
+                Ok(())
+            }
+            Err(e) => {
+                self.fail_transfer(&transfer_id, format!("{e}"));
+                Err(FileSharingError::NetworkError(format!("{e}")))
+            }
+        }
+    }
+
+    /// 実ファイル転送を起動する (受信側)。Daemon のストリームディスパッチャが
+    /// マジック `TXFR` を確認した後の `recv` を渡す。
+    /// `out_path_resolver` が解決した絶対パスへ書き込み、完了時に
+    /// `complete_transfer` を呼ぶ。
+    pub async fn handle_incoming_transfer(
+        self: &Arc<Self>,
+        recv: quinn::RecvStream,
+        sender: PeerId,
+    ) -> Result<(), FileSharingError> {
+        let resolver = self.out_path_resolver.clone().ok_or_else(|| {
+            FileSharingError::NetworkError("out_path_resolver not attached".into())
+        })?;
+
+        // 先にヘッダを覗き見するため、一時バッファに受信せず receive_over_quic を
+        // 呼んで Header → Body → Footer を完結させる。保存先はヘッダから決める。
+        // 保存先を決めるために「ヘッダだけ先読み」したいが、receive_stream が
+        // 内部で一気通貫するので、tmp ファイルに書いたあと移動する。
+        let tmp_path =
+            std::env::temp_dir().join(format!("synergos-incoming-{}", uuid::Uuid::new_v4()));
+        let header = receive_over_quic(recv, &tmp_path)
+            .await
+            .map_err(|e| FileSharingError::NetworkError(format!("{e}")))?;
+
+        let file_id = FileId(header.file_id.clone());
+        let final_path = resolver(&header.project_id, &file_id)
+            .ok_or_else(|| FileSharingError::FileNotFound(header.file_id.clone()))?;
+        if let Some(parent) = final_path.parent() {
+            tokio::fs::create_dir_all(parent).await.ok();
+        }
+        tokio::fs::rename(&tmp_path, &final_path).await?;
+
+        // この転送に対応する ActiveTransfer を作り直して complete_transfer する
+        let transfer_id = TransferId(header.transfer_id.clone());
+        let transfer = ActiveTransfer {
+            transfer_id: transfer_id.clone(),
+            project_id: header.project_id.clone(),
+            file_id,
+            file_name: final_path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| header.file_id.clone()),
+            file_size: header.total_size,
+            bytes_transferred: header.total_size,
+            speed_bps: 0,
+            direction: TransferDirection::Receive,
+            peer_id: sender,
+            state: TransferState::Running,
+            priority: TransferPriority::Interactive,
+            version: 1,
+        };
+        self.transfers.insert(transfer_id.clone(), transfer);
+        self.complete_transfer(&transfer_id);
+        Ok(())
+    }
+
+    /// Gossip で `FileWant` を受信したときのハンドラ。
+    /// 自ノードが該当ファイルを `share_file` / `publish_updates` 経由で
+    /// 登録済 (= `shared_files` にある) 場合、要求ピアに対して QUIC で
+    /// 実データをプッシュする (Synergos 既存の共有ルート経由)。
+    ///
+    /// 既に該当 peer へ同じバージョンを送ったことがあれば ledger の
+    /// `mark_fulfilled` でスキップされる想定。
+    pub fn handle_file_want(self: &Arc<Self>, requester: PeerId, file_id: FileId, version: u64) {
+        if requester == self.local_peer_id {
+            return; // 自分の Want は無視
+        }
+        let record = match self.shared_files.get(&file_id) {
+            Some(r) => r.value().clone(),
+            None => {
+                tracing::debug!(
+                    "handle_file_want: no local offer for {} (requester={})",
+                    file_id,
+                    requester.short()
+                );
+                return;
+            }
+        };
+        // 要求バージョン 0 = 任意の最新、それ以外は一致するバージョンのみ
+        if version != 0 && version != record.version {
+            tracing::debug!(
+                "handle_file_want: version mismatch (want v{version}, have v{})",
+                record.version
+            );
+            return;
+        }
+        if self.quic.is_none() {
+            tracing::debug!("handle_file_want: QUIC not attached, cannot auto-send");
+            return;
+        }
+
+        let ex = self.clone();
+        let req = ShareRequest {
+            project_id: record.project_id.clone(),
+            file_id: file_id.clone(),
+            file_path: record.file_path.clone(),
+            file_size: record.file_size,
+            checksum: synergos_net::types::Blake3Hash::default(),
+            priority: TransferPriority::Interactive,
+            target_peer: Some(requester.clone()),
+            version: record.version,
+        };
+        tokio::spawn(async move {
+            tracing::info!(
+                "auto-sending {} v{} to {} via FileWant",
+                file_id,
+                record.version,
+                requester.short()
+            );
+            if let Err(e) = share_and_send(ex, req).await {
+                tracing::warn!("auto-send via FileWant failed: {e}");
+            }
+        });
+    }
+
+    /// Gossip で `FileOffer` を受信したときのハンドラ。
+    /// リモートの Offer を TransferLedger に登録し、自分の保留 Want と
+    /// マッチしたらログを出す (実受信は相手側が開く QUIC ストリームを
+    /// Daemon のディスパッチャが handle_incoming_transfer に流すので
+    /// ここで別途 fetch を起動する必要はない)。
+    pub fn handle_file_offer(
+        &self,
+        sender: PeerId,
+        file_id: FileId,
+        version: u64,
+        file_size: u64,
+        crc: u32,
+    ) {
+        if sender == self.local_peer_id {
+            return;
+        }
+        let offer = OfferEntry {
+            sender: sender.clone(),
+            file_id: file_id.clone(),
+            version,
+            file_size,
+            crc,
+            offered_at: now_ms(),
+            state: LedgerEntryState::Pending,
+        };
+        let actions = self.ledger.register_offer(offer);
+        for action in actions {
+            if let LedgerAction::Match { sender, file_size } = action {
+                tracing::info!(
+                    "FileOffer matched a pending Want: sender={}, size={}",
+                    sender.short(),
+                    file_size
+                );
+                // 相手 (sender) が我々の FileWant を受けて QUIC push する。
+                // こちら側は Daemon の accept ループが自動で受信する。
+            }
+        }
+    }
+
+    /// 転送を失敗状態に遷移
+    fn fail_transfer(&self, transfer_id: &TransferId, reason: String) {
+        if let Some(mut entry) = self.transfers.get_mut(transfer_id) {
+            entry.state = TransferState::Failed(reason);
+        }
+    }
+
     /// 転送完了を処理
     pub fn complete_transfer(&self, transfer_id: &TransferId) {
         if let Some(mut entry) = self.transfers.get_mut(transfer_id) {
@@ -323,6 +637,72 @@ impl Exchange {
                 speed_bps,
             });
         }
+    }
+}
+
+/// share_file + 実転送を一括で実行する `Arc<Exchange>` 用ヘルパ。
+/// 通常の FileSharing trait 経由ではなく、ここを経由することで
+/// QUIC 経由の実データ転送まで起動する。
+pub async fn share_and_send(
+    exchange: Arc<Exchange>,
+    request: ShareRequest,
+) -> Result<TransferId, FileSharingError> {
+    let transfer_id = exchange.share_file(request.clone()).await?;
+    let ex = exchange.clone();
+    let req = request.clone();
+    let tid = transfer_id.clone();
+    tokio::spawn(async move {
+        spawn_send_after_share(ex, req, tid).await;
+    });
+    Ok(transfer_id)
+}
+
+/// share_file 実行時に QUIC 経由でバックグラウンド送信するためのエントリポイント。
+/// `Arc<Exchange>` 経由でしか呼べないので、ラッパメソッドとして分離。
+pub async fn spawn_send_after_share(
+    exchange: Arc<Exchange>,
+    request: ShareRequest,
+    transfer_id: TransferId,
+) {
+    let target = match &request.target_peer {
+        Some(p) => p.clone(),
+        None => return, // target_peer が None の場合はブロードキャスト offer のみで終了
+    };
+    if exchange.quic.is_none() {
+        return;
+    }
+
+    let path = request.file_path.clone();
+    let project_id = request.project_id.clone();
+    let file_id = request.file_id.clone();
+    let version = request.version;
+
+    // 全体ハッシュを事前計算
+    let (total_hash, total_size, chunk_count) = match synergos_net::transfer::hash_file(&path).await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!("hash_file failed for {}: {e}", path.display());
+            exchange.fail_transfer(&transfer_id, format!("hash_file: {e}"));
+            return;
+        }
+    };
+
+    let header = TransferHeader {
+        transfer_id: transfer_id.0.clone(),
+        project_id,
+        file_id: file_id.0.clone(),
+        total_size,
+        chunk_count,
+        total_hash,
+    };
+    let _ = version; // 既存の ActiveTransfer.version に既に載っている
+
+    if let Err(e) = exchange
+        .execute_send(transfer_id, target, path, header)
+        .await
+    {
+        tracing::warn!("execute_send failed: {e}");
     }
 }
 
@@ -377,6 +757,18 @@ impl FileSharing for Exchange {
         };
         let actions = self.ledger.register_offer(offer);
         tracing::debug!("Ledger offer registered, actions: {}", actions.len());
+
+        // FileWant 到着時に即転送起動できるよう、path とメタを保存
+        self.shared_files.insert(
+            request.file_id.clone(),
+            SharedFileRecord {
+                project_id: request.project_id.clone(),
+                file_path: request.file_path.clone(),
+                file_size: request.file_size,
+                crc: crc32fast::hash(&request.checksum.0),
+                version: request.version,
+            },
+        );
 
         // Gossipsub で FileOffer をブロードキャスト
         self.broadcast_offer(
@@ -475,7 +867,7 @@ impl FileSharing for Exchange {
                 notif.version
             );
 
-            // TransferLedger に各ファ��ルの Offer を登録
+            // TransferLedger に各ファイルの Offer を登録
             let offer = OfferEntry {
                 sender: self.local_peer_id.clone(),
                 file_id: notif.file_id.clone(),
@@ -486,6 +878,18 @@ impl FileSharing for Exchange {
                 state: LedgerEntryState::Pending,
             };
             self.ledger.register_offer(offer);
+
+            // 受信した FileWant に自動応答するため shared_files にも登録
+            self.shared_files.insert(
+                notif.file_id.clone(),
+                SharedFileRecord {
+                    project_id: notif.project_id.clone(),
+                    file_path: notif.file_path.clone(),
+                    file_size: notif.file_size,
+                    crc: notif.crc,
+                    version: notif.version,
+                },
+            );
 
             // Gossipsub で FileOffer をブロードキャスト
             self.broadcast_offer(
