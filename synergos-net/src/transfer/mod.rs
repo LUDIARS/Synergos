@@ -63,11 +63,7 @@ pub struct TransferFooter {
 ///
 /// ヘッダの `total_hash` / `total_size` / `chunk_count` は呼び出し側が
 /// 事前に計算して渡す。(ローカルで `hash_file` を事前実行する想定)
-pub async fn send_stream<R, W>(
-    mut reader: R,
-    mut writer: W,
-    header: TransferHeader,
-) -> Result<()>
+pub async fn send_stream<R, W>(mut reader: R, mut writer: W, header: TransferHeader) -> Result<()>
 where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
@@ -112,10 +108,7 @@ where
 
 /// 受信側: `reader` (QUIC bidi の recv side) から読み、検証しながら `out_path`
 /// へ書く。完了時にヘッダと一致する全体ハッシュを返す。
-pub async fn receive_stream<R>(
-    mut reader: R,
-    out_path: &Path,
-) -> Result<TransferHeader>
+pub async fn receive_stream<R>(mut reader: R, out_path: &Path) -> Result<TransferHeader>
 where
     R: AsyncRead + Unpin,
 {
@@ -181,9 +174,7 @@ where
                 return Ok(header);
             }
             FrameKind::Header(_) => {
-                return Err(SynergosNetError::Transfer(
-                    "duplicate header frame".into(),
-                ));
+                return Err(SynergosNetError::Transfer("duplicate header frame".into()));
             }
         }
     }
@@ -207,9 +198,13 @@ pub async fn hash_file(path: &Path) -> Result<(Blake3Hash, u64, u64)> {
     let chunk_count = if total == 0 {
         0
     } else {
-        (total + CHUNK_SIZE as u64 - 1) / CHUNK_SIZE as u64
+        total.div_ceil(CHUNK_SIZE as u64)
     };
-    Ok((Blake3Hash(*hasher.finalize().as_bytes()), total, chunk_count))
+    Ok((
+        Blake3Hash(*hasher.finalize().as_bytes()),
+        total,
+        chunk_count,
+    ))
 }
 
 // ---- 内部 I/O ----
@@ -256,8 +251,10 @@ mod tests {
     #[tokio::test]
     async fn roundtrip_small_file() {
         // 10 KiB のランダムデータをメモリ上の双方向パイプで送受信する。
-        let tmp_src = std::env::temp_dir().join(format!("synergos-tx-src-{}", uuid::Uuid::new_v4()));
-        let tmp_dst = std::env::temp_dir().join(format!("synergos-tx-dst-{}", uuid::Uuid::new_v4()));
+        let tmp_src =
+            std::env::temp_dir().join(format!("synergos-tx-src-{}", uuid::Uuid::new_v4()));
+        let tmp_dst =
+            std::env::temp_dir().join(format!("synergos-tx-dst-{}", uuid::Uuid::new_v4()));
         let data = vec![42u8; 10 * 1024];
         tokio::fs::write(&tmp_src, &data).await.unwrap();
 
@@ -276,9 +273,8 @@ mod tests {
 
         let (tx, rx) = duplex(64 * 1024);
         let src_reader = tokio::fs::File::open(&tmp_src).await.unwrap();
-        let send_task = tokio::spawn(async move {
-            send_stream(src_reader, tx, header.clone()).await
-        });
+        let send_task =
+            tokio::spawn(async move { send_stream(src_reader, tx, header.clone()).await });
         let dst_path = tmp_dst.clone();
         let recv_task = tokio::spawn(async move { receive_stream(rx, &dst_path).await });
 
@@ -314,7 +310,9 @@ mod tests {
             chunk_count: 1,
             total_hash: Blake3Hash(*blake3::hash(b"hello").as_bytes()),
         };
-        write_frame(&mut tx, &FrameKind::Header(header)).await.unwrap();
+        write_frame(&mut tx, &FrameKind::Header(header))
+            .await
+            .unwrap();
 
         // データは "hello" だが hash は "WORLD" 版にすり替える (改竄)。
         let bad = ChunkFrame {

@@ -62,8 +62,10 @@ impl CatalogManager {
         }
 
         // チェーンを初期化
-        self.chains
-            .insert(file_id.clone(), FileChain::new(file_id.clone(), self.chain_max_depth));
+        self.chains.insert(
+            file_id.clone(),
+            FileChain::new(file_id.clone(), self.chain_max_depth),
+        );
         self.file_to_chunk.insert(file_id.clone(), chunk_id.clone());
 
         // カタログ CRC を更新
@@ -76,10 +78,9 @@ impl CatalogManager {
     /// ファイル更新をチェーンに記録 + カタログ CRC 更新
     pub async fn record_update(&self, file_id: &FileId, block: ChainBlock) -> Result<()> {
         // 1. FileChain にブロック追加
-        let mut chain = self
-            .chains
-            .get_mut(file_id)
-            .ok_or_else(|| SynergosNetError::PeerNotFound(format!("File not found: {}", file_id)))?;
+        let mut chain = self.chains.get_mut(file_id).ok_or_else(|| {
+            SynergosNetError::PeerNotFound(format!("File not found: {}", file_id))
+        })?;
         chain.append(block)?;
 
         // 2. FileEntry の CRC を更新
@@ -167,7 +168,10 @@ impl CatalogManager {
     }
 
     /// ファイルのチェーンを取得
-    pub fn get_chain(&self, file_id: &FileId) -> Option<dashmap::mapref::one::Ref<'_, FileId, FileChain>> {
+    pub fn get_chain(
+        &self,
+        file_id: &FileId,
+    ) -> Option<dashmap::mapref::one::Ref<'_, FileId, FileChain>> {
         self.chains.get(file_id)
     }
 

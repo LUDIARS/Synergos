@@ -236,11 +236,7 @@ impl QuicManager {
             .await
             .map_err(|e| SynergosNetError::Quic(format!("Failed to open stream: {}", e)))?;
 
-        tracing::debug!(
-            "Opened {:?} stream to peer {}",
-            stream_type,
-            peer_id
-        );
+        tracing::debug!("Opened {:?} stream to peer {}", stream_type, peer_id);
 
         // ストリーム数を更新
         drop(entry);
@@ -267,13 +263,15 @@ impl QuicManager {
 
     /// コネクション情報を取得
     pub fn get_connection(&self, peer_id: &PeerId) -> Option<QuicConnectionInfo> {
-        self.connections.get(peer_id).map(|entry| QuicConnectionInfo {
-            peer_id: entry.peer_id.clone(),
-            remote_addr: entry.remote_addr,
-            active_streams: entry.active_streams,
-            state: entry.state.clone(),
-            rtt_ms: entry.rtt_ms,
-        })
+        self.connections
+            .get(peer_id)
+            .map(|entry| QuicConnectionInfo {
+                peer_id: entry.peer_id.clone(),
+                remote_addr: entry.remote_addr,
+                active_streams: entry.active_streams,
+                state: entry.state.clone(),
+                rtt_ms: entry.rtt_ms,
+            })
     }
 
     /// 全接続の情報を取得
@@ -362,10 +360,8 @@ impl QuicManager {
                 _server_name: &rustls::pki_types::ServerName<'_>,
                 _ocsp: &[u8],
                 _now: rustls::pki_types::UnixTime,
-            ) -> std::result::Result<
-                rustls::client::danger::ServerCertVerified,
-                rustls::Error,
-            > {
+            ) -> std::result::Result<rustls::client::danger::ServerCertVerified, rustls::Error>
+            {
                 Ok(rustls::client::danger::ServerCertVerified::assertion())
             }
             fn verify_tls12_signature(
@@ -373,10 +369,8 @@ impl QuicManager {
                 _message: &[u8],
                 _cert: &rustls::pki_types::CertificateDer<'_>,
                 _dss: &rustls::DigitallySignedStruct,
-            ) -> std::result::Result<
-                rustls::client::danger::HandshakeSignatureValid,
-                rustls::Error,
-            > {
+            ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error>
+            {
                 Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
             }
             fn verify_tls13_signature(
@@ -384,10 +378,8 @@ impl QuicManager {
                 _message: &[u8],
                 _cert: &rustls::pki_types::CertificateDer<'_>,
                 _dss: &rustls::DigitallySignedStruct,
-            ) -> std::result::Result<
-                rustls::client::danger::HandshakeSignatureValid,
-                rustls::Error,
-            > {
+            ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error>
+            {
                 Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
             }
             fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
@@ -440,11 +432,10 @@ impl QuicManager {
                 .unwrap_or_else(|_| quinn::IdleTimeout::from(quinn::VarInt::from_u32(30_000))),
         ));
 
-        let mut server_config =
-            quinn::ServerConfig::with_crypto(Arc::new(
-                quinn::crypto::rustls::QuicServerConfig::try_from(server_crypto)
-                    .map_err(|e| SynergosNetError::Quic(format!("QUIC config error: {}", e)))?,
-            ));
+        let mut server_config = quinn::ServerConfig::with_crypto(Arc::new(
+            quinn::crypto::rustls::QuicServerConfig::try_from(server_crypto)
+                .map_err(|e| SynergosNetError::Quic(format!("QUIC config error: {}", e)))?,
+        ));
         server_config.transport_config(Arc::new(transport));
 
         Ok(server_config)

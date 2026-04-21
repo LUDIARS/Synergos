@@ -13,11 +13,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use dashmap::DashMap;
-use synergos_net::chain::{LedgerEntryState, OfferEntry, TransferLedger, WantEntry, LedgerAction};
+use synergos_net::chain::{LedgerAction, LedgerEntryState, OfferEntry, TransferLedger, WantEntry};
 use synergos_net::gossip::{GossipMessage, GossipNode};
 use synergos_net::types::{Blake3Hash, FileId, PeerId, TopicId, TransferId};
 
-use crate::event_bus::{SharedEventBus, TransferProgressEvent, TransferCompletedEvent};
+use crate::event_bus::{SharedEventBus, TransferCompletedEvent, TransferProgressEvent};
 
 // ── 型定義 ──
 
@@ -211,9 +211,7 @@ impl Exchange {
     pub fn gc_finished_transfers(&self) -> usize {
         let mut removed = 0;
         self.transfers.retain(|_, t| match &t.state {
-            TransferState::Completed
-            | TransferState::Cancelled
-            | TransferState::Failed(_) => {
+            TransferState::Completed | TransferState::Cancelled | TransferState::Failed(_) => {
                 removed += 1;
                 false
             }
@@ -271,12 +269,7 @@ impl Exchange {
     }
 
     /// Gossipsub 経由で CatalogUpdate をブロードキャスト
-    fn broadcast_catalog_update(
-        &self,
-        project_id: &str,
-        root_crc: u32,
-        update_count: u64,
-    ) {
+    fn broadcast_catalog_update(&self, project_id: &str, root_crc: u32, update_count: u64) {
         if let Some(gossip) = &self.gossip {
             let topic = TopicId::project(project_id);
             gossip.publish(
@@ -306,11 +299,8 @@ impl Exchange {
             });
 
             // TransferLedger で fulfilled をマーク
-            self.ledger.mark_fulfilled(
-                &transfer.file_id,
-                transfer.version,
-                &transfer.peer_id,
-            );
+            self.ledger
+                .mark_fulfilled(&transfer.file_id, transfer.version, &transfer.peer_id);
         }
     }
 
@@ -517,11 +507,7 @@ impl FileSharing for Exchange {
 
         // Gossipsub で CatalogUpdate をブロードキャスト
         if let Some(first) = notifications.first() {
-            self.broadcast_catalog_update(
-                &first.project_id,
-                total_crc,
-                notifications.len() as u64,
-            );
+            self.broadcast_catalog_update(&first.project_id, total_crc, notifications.len() as u64);
         }
 
         Ok(())
@@ -553,11 +539,8 @@ impl FileSharing for Exchange {
 
                 // TransferLedger で Want をキャンセル
                 if transfer.direction == TransferDirection::Receive {
-                    self.ledger.cancel_want(
-                        &transfer.file_id,
-                        0,
-                        &self.local_peer_id,
-                    );
+                    self.ledger
+                        .cancel_want(&transfer.file_id, 0, &self.local_peer_id);
                 }
 
                 Ok(())

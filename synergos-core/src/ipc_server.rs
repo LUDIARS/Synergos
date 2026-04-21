@@ -107,7 +107,7 @@ impl IpcServer {
                         Err(e) => {
                             tracing::error!("Accept error: {}", e);
                             // 指数バックオフ (最大 1s)
-                            backoff_ms = (backoff_ms * 2).max(10).min(1000);
+                            backoff_ms = (backoff_ms * 2).clamp(10, 1000);
                             tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
                         }
                     }
@@ -170,7 +170,7 @@ impl IpcServer {
                         Ok(n) => n,
                         Err(e) => {
                             tracing::error!("failed to create next pipe instance: {e}");
-                            backoff_ms = (backoff_ms * 2).max(10).min(1000);
+                            backoff_ms = (backoff_ms * 2).clamp(10, 1000);
                             tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
                             continue;
                         }
@@ -187,7 +187,7 @@ impl IpcServer {
                 }
                 Err(e) => {
                     tracing::error!("Named pipe accept error: {e}");
-                    backoff_ms = (backoff_ms * 2).max(10).min(1000);
+                    backoff_ms = (backoff_ms * 2).clamp(10, 1000);
                     tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
                 }
             }
@@ -201,28 +201,24 @@ type SharedWriter = Arc<Mutex<tokio::net::unix::OwnedWriteHalf>>;
 
 /// 接続元 UID が自プロセス UID と一致するか確認する。
 ///
-/// 非 Unix や UCred 非対応プラットフォームでは許容する (Windows は別経路)。
+/// `std::os::unix::net::UCred::uid()` は現在 nightly 限定の unstable API
+/// なので libc 直接呼び出しで実装する:
+/// - Linux: `getsockopt(SO_PEERCRED)` → `struct ucred { pid, uid, gid }`
+/// - macOS / iOS / FreeBSD: `getpeereid(fd, &uid, &gid)`
+/// - それ以外の Unix は uid 取得を諦めて許容 (ベストエフォート)。
 #[cfg(unix)]
 fn verify_peer_uid(stream: &tokio::net::UnixStream) -> Result<(), String> {
     use std::os::unix::io::AsRawFd;
-    // SAFETY: `stream` は生きている UnixStream。借用期間内でのみ fd を触る。
-    // std の UnixStream::peer_cred を借りるために unsafe FromRawFd + ManuallyDrop パターン。
     let fd = stream.as_raw_fd();
-    let std_stream = unsafe {
-        use std::os::unix::io::FromRawFd;
-        std::mem::ManuallyDrop::new(std::os::unix::net::UnixStream::from_raw_fd(fd))
-    };
-    let cred = match std_stream.peer_cred() {
-        Ok(c) => c,
+
+    let peer_uid = match peer_uid_of_fd(fd) {
+        Ok(u) => u,
         Err(e) => {
-            // peer_cred が取れない OS (macOS 等旧バージョン) は allow (ベストエフォート)
             tracing::debug!("peer_cred unavailable, skipping uid check: {e}");
             return Ok(());
         }
     };
-    let peer_uid = cred.uid();
-    // 自プロセス UID
-    // SAFETY: libc call with no side effects; always succeeds.
+    // SAFETY: libc::geteuid is side-effect-free and always succeeds.
     let self_uid = unsafe { libc::geteuid() };
     if peer_uid != self_uid {
         return Err(format!(
@@ -230,6 +226,63 @@ fn verify_peer_uid(stream: &tokio::net::UnixStream) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn peer_uid_of_fd(fd: std::os::unix::io::RawFd) -> std::io::Result<libc::uid_t> {
+    // SAFETY: libc::ucred は POD。getsockopt が成功した場合のみ書き込まれる。
+    unsafe {
+        let mut cred: libc::ucred = std::mem::zeroed();
+        let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+        let ret = libc::getsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            &mut cred as *mut _ as *mut libc::c_void,
+            &mut len,
+        );
+        if ret != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(cred.uid)
+    }
+}
+
+#[cfg(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd",
+))]
+fn peer_uid_of_fd(fd: std::os::unix::io::RawFd) -> std::io::Result<libc::uid_t> {
+    // SAFETY: getpeereid fills uid/gid when the call succeeds.
+    unsafe {
+        let mut uid: libc::uid_t = 0;
+        let mut gid: libc::gid_t = 0;
+        let ret = libc::getpeereid(fd, &mut uid, &mut gid);
+        if ret != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(uid)
+    }
+}
+
+#[cfg(all(
+    unix,
+    not(any(
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd",
+    ))
+))]
+fn peer_uid_of_fd(_fd: std::os::unix::io::RawFd) -> std::io::Result<libc::uid_t> {
+    // illumos / solaris / hermit など未対応 Unix はベストエフォートで自プロセス UID を返す。
+    // SAFETY: geteuid is side-effect-free.
+    unsafe { Ok(libc::geteuid()) }
 }
 
 /// Windows Named Pipe 接続のハンドリング。Unix 版と共通の dispatch/relay
@@ -268,7 +321,6 @@ where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
     W: tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-
     // Subscribe 起動時にここへタスクハンドルを保持。Unsubscribe / 切断時に abort。
     let mut event_relay: Option<tokio::task::JoinHandle<()>> = None;
 
@@ -333,10 +385,7 @@ where
     Ok(())
 }
 
-async fn send_server_message<W>(
-    writer: &Arc<Mutex<W>>,
-    msg: ServerMessage,
-) -> Result<(), IpcError>
+async fn send_server_message<W>(writer: &Arc<Mutex<W>>, msg: ServerMessage) -> Result<(), IpcError>
 where
     W: tokio::io::AsyncWrite + Unpin,
 {
@@ -346,11 +395,8 @@ where
 
 /// EventBus → クライアントへ IpcEvent を中継する per-client タスク。
 /// `filter` に合致しないイベントはスキップ。
-async fn relay_events<W>(
-    ctx: Arc<ServiceContext>,
-    writer: Arc<Mutex<W>>,
-    filters: Vec<EventFilter>,
-) where
+async fn relay_events<W>(ctx: Arc<ServiceContext>, writer: Arc<Mutex<W>>, filters: Vec<EventFilter>)
+where
     W: tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
     // `filter_event` に渡す際に参照渡しにしたいので slice で借用する形に。
@@ -539,9 +585,7 @@ async fn dispatch_command(command: IpcCommand, ctx: &ServiceContext) -> IpcRespo
             let transfers = ctx.exchange.list_transfers(None).await;
             let active_transfers = transfers
                 .iter()
-                .filter(|t| {
-                    t.state == TransferState::Running || t.state == TransferState::Queued
-                })
+                .filter(|t| t.state == TransferState::Running || t.state == TransferState::Queued)
                 .count();
 
             let peers = ctx.presence.list_nodes(None).await;
@@ -561,7 +605,6 @@ async fn dispatch_command(command: IpcCommand, ctx: &ServiceContext) -> IpcRespo
         }
 
         // ── プロジェクト管理 ──
-
         IpcCommand::ProjectOpen {
             project_id,
             root_path,
@@ -659,7 +702,6 @@ async fn dispatch_command(command: IpcCommand, ctx: &ServiceContext) -> IpcRespo
         },
 
         // ── ピア管理 ──
-
         IpcCommand::PeerList { project_id } => {
             let nodes = ctx.presence.list_nodes(Some(&project_id)).await;
             let peers: Vec<PeerInfo> = nodes
@@ -713,7 +755,6 @@ async fn dispatch_command(command: IpcCommand, ctx: &ServiceContext) -> IpcRespo
         }
 
         // ── ファイル転送 ──
-
         IpcCommand::TransferRequest {
             project_id,
             file_id,
@@ -759,11 +800,7 @@ async fn dispatch_command(command: IpcCommand, ctx: &ServiceContext) -> IpcRespo
         }
 
         IpcCommand::TransferCancel { transfer_id } => {
-            match ctx
-                .exchange
-                .cancel_transfer(&TransferId(transfer_id))
-                .await
-            {
+            match ctx.exchange.cancel_transfer(&TransferId(transfer_id)).await {
                 Ok(()) => IpcResponse::Ok,
                 Err(e) => IpcResponse::Error {
                     code: 3,
@@ -868,7 +905,6 @@ async fn dispatch_command(command: IpcCommand, ctx: &ServiceContext) -> IpcRespo
         }
 
         // ── モニタリング ──
-
         IpcCommand::NetworkStatus => {
             let peers = ctx.presence.list_nodes(None).await;
             let connected_peers: Vec<_> = peers
@@ -880,15 +916,12 @@ async fn dispatch_command(command: IpcCommand, ctx: &ServiceContext) -> IpcRespo
             let avg_latency = if connected_peers.is_empty() {
                 0
             } else {
-                let total_rtt: u32 = connected_peers
-                    .iter()
-                    .filter_map(|p| p.rtt_ms)
-                    .sum();
+                let total_rtt: u32 = connected_peers.iter().filter_map(|p| p.rtt_ms).sum();
                 let count = connected_peers
                     .iter()
                     .filter(|p| p.rtt_ms.is_some())
                     .count() as u32;
-                if count > 0 { total_rtt / count } else { 0 }
+                total_rtt.checked_div(count).unwrap_or(0)
             };
 
             let primary_route = connected_peers

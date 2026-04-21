@@ -4,8 +4,8 @@ use std::time::Instant;
 use dashmap::DashMap;
 use tokio::sync::broadcast;
 
-use super::message::*;
 use super::message::canonical_bytes;
+use super::message::*;
 use crate::config::GossipsubConfig;
 use crate::identity::Identity;
 use crate::types::{MessageId, PeerId, TopicId};
@@ -119,7 +119,7 @@ impl GossipNode {
 
     /// Topic を購読（プロジェクト参加時）
     pub fn subscribe(&self, topic: TopicId) {
-        self.mesh.entry(topic).or_insert_with(Vec::new);
+        self.mesh.entry(topic).or_default();
     }
 
     /// Topic から退出

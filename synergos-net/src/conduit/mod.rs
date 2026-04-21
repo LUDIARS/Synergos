@@ -13,7 +13,7 @@ use crate::error::{Result, SynergosNetError};
 use crate::mesh::{Mesh, ProbeResult};
 use crate::quic::{QuicConnectionInfo, QuicManager};
 use crate::tunnel::{TunnelManager, TunnelState};
-use crate::types::{ConnectionState, PeerId, PeerEndpoint, Route, RouteKind};
+use crate::types::{ConnectionState, PeerEndpoint, PeerId, Route, RouteKind};
 
 /// 経路検出結果
 #[derive(Debug, Clone)]
@@ -203,9 +203,7 @@ impl Conduit {
 
     /// 指定ピアの接続状態を取得
     pub fn get_peer_state(&self, peer_id: &PeerId) -> Option<ConnectionState> {
-        self.peers
-            .get(peer_id)
-            .map(|entry| entry.state.clone())
+        self.peers.get(peer_id).map(|entry| entry.state.clone())
     }
 
     /// Route Migration: より高優先度の経路が利用可能になった場合に切り替え
@@ -296,9 +294,9 @@ impl Conduit {
         let (ipv6, tunnel) = tokio::join!(ipv6_probe, tunnel_probe);
 
         let recommended = match (ipv6.reachable, tunnel.available) {
-            (true, _) => RouteKind::Direct,   // IPv6 最優先
+            (true, _) => RouteKind::Direct,     // IPv6 最優先
             (false, true) => RouteKind::Tunnel, // Tunnel フォールバック
-            (false, false) => RouteKind::Relay,  // WebSocket リレー
+            (false, false) => RouteKind::Relay, // WebSocket リレー
         };
 
         DetectionResult {
@@ -334,20 +332,18 @@ impl Conduit {
     }
 
     /// 経路の優先度順に接続を試行
-    async fn try_connect_routes(
-        &self,
-        peer_id: &PeerId,
-        routes: &[Route],
-    ) -> Result<RouteKind> {
+    async fn try_connect_routes(&self, peer_id: &PeerId, routes: &[Route]) -> Result<RouteKind> {
         // 1. IPv6 Direct を試行
         for route in routes {
             if let Route::Direct { addr, fqdn } = route {
-                let server_name = fqdn
-                    .as_deref()
-                    .unwrap_or("synergos");
+                let server_name = fqdn.as_deref().unwrap_or("synergos");
                 match self
                     .quic
-                    .connect(peer_id.clone(), std::net::SocketAddr::V6(*addr), server_name)
+                    .connect(
+                        peer_id.clone(),
+                        std::net::SocketAddr::V6(*addr),
+                        server_name,
+                    )
                     .await
                 {
                     Ok(()) => return Ok(RouteKind::Direct),

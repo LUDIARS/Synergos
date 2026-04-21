@@ -41,3 +41,11 @@ anyhow = "1"
 # Unix peer credential check (SO_PEERCRED via libc::geteuid)
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }
+tempfile = "3"
+pretty_assertions = "1"
+assert_matches = "1"
+serial_test = "3"
+tracing-test = "0.2"

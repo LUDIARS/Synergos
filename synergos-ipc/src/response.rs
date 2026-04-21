@@ -11,10 +11,7 @@ pub enum IpcResponse {
     Ok,
 
     /// エラー
-    Error {
-        code: u32,
-        message: String,
-    },
+    Error { code: u32, message: String },
 
     /// Ping 応答
     Pong,
@@ -44,9 +41,7 @@ pub enum IpcResponse {
     NetworkStatus(NetworkStatusInfo),
 
     /// イベント購読完了
-    Subscribed {
-        subscription_id: String,
-    },
+    Subscribed { subscription_id: String },
 }
 
 /// デーモン状態
