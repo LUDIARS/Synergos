@@ -173,7 +173,7 @@ pub fn show(ui: &mut egui::Ui, connection: &CoreConnection, inputs: &mut UiInput
                         .font(egui::TextStyle::Monospace),
                 );
                 if ui.button("Copy").clicked() {
-                    ui.output_mut(|o| o.copied_text = token.clone());
+                    ui.ctx().copy_text(token.clone());
                     inputs.set_ok("copied to clipboard");
                 }
             } else if let Some(err) = inputs.invite_error.clone() {
