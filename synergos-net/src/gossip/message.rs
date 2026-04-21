@@ -83,9 +83,14 @@ impl SignedGossipMessage {
     }
 }
 
-/// Gossip メッセージの正規バイト列化 (署名対象)。
-/// 実運用の長期互換性のためには msgpack / proto / CBOR 等の正規形式が望ましい。
-/// ここでは暫定として bincode を使わず、自前の固定タグ方式で決定的にする。
+/// Gossip メッセージの正規バイト列化。
+/// 署名対象 + MessageCache キー (S21 対策: `format!("{:?}", msg)` の不安定性
+/// を排除) の両方で使う。実運用の長期互換性のためには msgpack / proto /
+/// CBOR 等の正規形式が望ましいが、暫定として自前の固定タグ方式で決定的にする。
+pub fn canonical_bytes(msg: &GossipMessage) -> Vec<u8> {
+    signing_bytes(msg)
+}
+
 fn signing_bytes(msg: &GossipMessage) -> Vec<u8> {
     let mut out = Vec::with_capacity(128);
     match msg {

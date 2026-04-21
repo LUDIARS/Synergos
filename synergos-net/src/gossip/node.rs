@@ -4,6 +4,7 @@ use dashmap::DashMap;
 use tokio::sync::broadcast;
 
 use super::message::*;
+use super::message::canonical_bytes;
 use crate::config::GossipsubConfig;
 use crate::types::{MessageId, PeerId, TopicId};
 
@@ -91,9 +92,9 @@ impl GossipNode {
 
     /// メッセージをメッシュに配信
     pub fn publish(&self, topic: &TopicId, message: GossipMessage) -> Vec<PeerId> {
-        // メッセージID を生成
-        let msg_bytes = format!("{:?}", message);
-        let msg_id = MessageId::from_content(msg_bytes.as_bytes());
+        // MessageId を正規バイト列から派生 (S21 対策: Debug 出力依存をやめる)
+        let msg_bytes = canonical_bytes(&message);
+        let msg_id = MessageId::from_content(&msg_bytes);
 
         // 重複チェック
         if self.message_cache.check_and_insert(&msg_id) {
@@ -117,8 +118,8 @@ impl GossipNode {
         message: GossipMessage,
         _from: &PeerId,
     ) -> bool {
-        let msg_bytes = format!("{:?}", message);
-        let msg_id = MessageId::from_content(msg_bytes.as_bytes());
+        let msg_bytes = canonical_bytes(&message);
+        let msg_id = MessageId::from_content(&msg_bytes);
 
         // 重複チェック
         if self.message_cache.check_and_insert(&msg_id) {
