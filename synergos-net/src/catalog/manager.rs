@@ -1,5 +1,3 @@
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use dashmap::DashMap;
 use tokio::sync::RwLock;
 
@@ -247,12 +245,7 @@ impl CatalogManager {
     }
 }
 
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
-}
+use crate::types::now_ms;
 
 #[cfg(test)]
 mod tests {

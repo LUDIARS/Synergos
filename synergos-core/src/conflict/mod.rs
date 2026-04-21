@@ -5,8 +5,6 @@
 //!
 //! 旧 ars-plugin-synergos から synergos-core に移植。Ars 依存を除去。
 
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use dashmap::DashMap;
 use synergos_net::chain::{ChainBlock, FileChain};
 use synergos_net::types::{Blake3Hash, FileId, PeerId};
@@ -80,12 +78,7 @@ pub enum ConflictError {
 
 // ── 実装 ──
 
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
-}
+use synergos_net::types::now_ms;
 
 /// コンフリクト管理サービス
 pub struct ConflictManager {

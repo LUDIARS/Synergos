@@ -215,3 +215,14 @@ impl FileSizeClass {
         }
     }
 }
+
+/// UNIX epoch からの経過時間を milliseconds で返す共通ユーティリティ。
+/// `conflict` / `exchange` / `catalog` で個別定義されていた重複を解消する。
+///
+/// 時計が epoch より前に設定されている等の異常状態では 0 を返す。
+pub fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
