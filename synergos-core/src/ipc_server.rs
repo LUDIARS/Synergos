@@ -566,6 +566,9 @@ async fn dispatch_command(command: IpcCommand, ctx: &ServiceContext) -> IpcRespo
                 file_id: FileId::new(file_id),
                 source_peer: Some(PeerId::new(peer_id)),
                 priority: TransferPriority::Interactive,
+                // IPC 経由の要求は「任意の最新」として 0 を渡す。
+                // 呼出側が具体バージョンを指定したい場合は IpcCommand を拡張する。
+                version: 0,
             };
             match ctx.exchange.fetch_file(request).await {
                 Ok(_tid) => IpcResponse::Ok,

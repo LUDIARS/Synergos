@@ -67,6 +67,9 @@ pub struct ShareRequest {
     pub priority: TransferPriority,
     /// 送信先ピア（None の場合は Gossipsub で全ピアにブロードキャスト）
     pub target_peer: Option<PeerId>,
+    /// このバージョンを TransferLedger / Gossip へ伝播する。
+    /// 呼び出し側（PublishUpdate 経由）が把握していない場合は 1 を使う。
+    pub version: u64,
 }
 
 /// ファイル取得リクエスト
@@ -77,6 +80,8 @@ pub struct FetchRequest {
     /// 取得元ピア（None の場合は Gossipsub で Want をブロードキャスト）
     pub source_peer: Option<PeerId>,
     pub priority: TransferPriority,
+    /// 欲しいバージョン。0 は「任意の最新」を意味する。
+    pub version: u64,
 }
 
 /// アクティブ転送の情報
@@ -93,6 +98,9 @@ pub struct ActiveTransfer {
     pub peer_id: PeerId,
     pub state: TransferState,
     pub priority: TransferPriority,
+    /// このアクティブ転送が担当するファイルバージョン。
+    /// 転送完了時に TransferLedger へ反映される。
+    pub version: u64,
 }
 
 /// ファイル公開通知（ローカル変更をネットワークに公開）
@@ -296,7 +304,7 @@ impl Exchange {
             // TransferLedger で fulfilled をマーク
             self.ledger.mark_fulfilled(
                 &transfer.file_id,
-                0, // version は簡易的に 0
+                transfer.version,
                 &transfer.peer_id,
             );
         }
@@ -364,6 +372,7 @@ impl FileSharing for Exchange {
             peer_id,
             state: TransferState::Queued,
             priority: request.priority,
+            version: request.version,
         };
 
         self.transfers.insert(transfer_id.clone(), transfer);
@@ -372,7 +381,7 @@ impl FileSharing for Exchange {
         let offer = OfferEntry {
             sender: self.local_peer_id.clone(),
             file_id: request.file_id.clone(),
-            version: 0,
+            version: request.version,
             file_size: request.file_size,
             crc: crc32fast::hash(&request.checksum.0),
             offered_at: now_ms(),
@@ -385,7 +394,7 @@ impl FileSharing for Exchange {
         self.broadcast_offer(
             &request.project_id,
             &request.file_id,
-            0,
+            request.version,
             request.file_size,
             crc32fast::hash(&request.checksum.0),
         );
@@ -419,6 +428,7 @@ impl FileSharing for Exchange {
             peer_id,
             state: TransferState::Queued,
             priority: request.priority,
+            version: request.version,
         };
 
         self.transfers.insert(transfer_id.clone(), transfer);
@@ -427,7 +437,7 @@ impl FileSharing for Exchange {
         let want = WantEntry {
             requester: self.local_peer_id.clone(),
             file_id: request.file_id.clone(),
-            version: 0,
+            version: request.version,
             requested_at: now_ms(),
             state: LedgerEntryState::Pending,
         };
