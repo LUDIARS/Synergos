@@ -124,13 +124,74 @@ impl IpcServer {
         Ok(())
     }
 
-    /// Windows 用の IPC サーバー（スタブ）
+    /// Windows 用の IPC サーバー（Named Pipe）。
+    ///
+    /// `tokio::net::windows::named_pipe::NamedPipeServer` を 1 インスタンス
+    /// ずつ create → wait_for_client → 切り離して次インスタンスを create、
+    /// という標準パターン。`FIRST_PIPE_INSTANCE` でパイプ名を占有して
+    /// なりすましインスタンスの作成を拒む。
     #[cfg(windows)]
     pub async fn run(&self) -> Result<(), IpcError> {
-        tracing::warn!("Windows Named Pipe server not yet implemented");
+        use std::time::Duration;
+        use tokio::net::windows::named_pipe::{PipeMode, ServerOptions};
+
+        let path = synergos_ipc::transport::socket_path();
+        let pipe_name = path.to_string_lossy().to_string();
+
         let mut shutdown_rx = self.ctx.shutdown_tx.subscribe();
-        let _ = shutdown_rx.recv().await;
-        Ok(())
+
+        // 初回インスタンスだけ first_pipe_instance(true) で作成してパイプ名を予約する。
+        let mut server = ServerOptions::new()
+            .first_pipe_instance(true)
+            .pipe_mode(PipeMode::Byte)
+            .create(&pipe_name)
+            .map_err(IpcError::Io)?;
+        tracing::info!("IPC named pipe listening on {pipe_name}");
+
+        // accept エラー時の指数バックオフ上限 (fd 枯渇時のタイトループ防止に相当)
+        let mut backoff_ms = 0u64;
+
+        loop {
+            let connect_result = tokio::select! {
+                r = server.connect() => r,
+                _ = shutdown_rx.recv() => {
+                    tracing::info!("IPC server shutting down");
+                    return Ok(());
+                }
+            };
+
+            match connect_result {
+                Ok(()) => {
+                    backoff_ms = 0;
+                    let next = ServerOptions::new()
+                        .pipe_mode(PipeMode::Byte)
+                        .create(&pipe_name);
+                    let next = match next {
+                        Ok(n) => n,
+                        Err(e) => {
+                            tracing::error!("failed to create next pipe instance: {e}");
+                            backoff_ms = (backoff_ms * 2).max(10).min(1000);
+                            tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                            continue;
+                        }
+                    };
+                    // `server.connect()` の借用は既に resolved。mem::replace で
+                    // 現インスタンスを取り出し、次インスタンスを server にセット。
+                    let connected = std::mem::replace(&mut server, next);
+                    let ctx = self.ctx.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = handle_client_windows(connected, ctx).await {
+                            tracing::warn!("Client connection error: {}", e);
+                        }
+                    });
+                }
+                Err(e) => {
+                    tracing::error!("Named pipe accept error: {e}");
+                    backoff_ms = (backoff_ms * 2).max(10).min(1000);
+                    tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                }
+            }
+        }
     }
 }
 
@@ -171,14 +232,42 @@ fn verify_peer_uid(stream: &tokio::net::UnixStream) -> Result<(), String> {
     Ok(())
 }
 
+/// Windows Named Pipe 接続のハンドリング。Unix 版と共通の dispatch/relay
+/// ロジックをトレイト越しに呼び出すラッパ。
+#[cfg(windows)]
+async fn handle_client_windows(
+    pipe: tokio::net::windows::named_pipe::NamedPipeServer,
+    ctx: Arc<ServiceContext>,
+) -> Result<(), IpcError> {
+    use tokio::io::{AsyncRead, AsyncWrite};
+
+    let (reader, writer) = tokio::io::split(pipe);
+    let writer: Arc<Mutex<tokio::io::WriteHalf<tokio::net::windows::named_pipe::NamedPipeServer>>> =
+        Arc::new(Mutex::new(writer));
+    handle_client_generic(reader, writer, ctx).await
+}
+
 /// クライアント接続のハンドリング
 #[cfg(unix)]
 async fn handle_client(
     stream: tokio::net::UnixStream,
     ctx: Arc<ServiceContext>,
 ) -> Result<(), IpcError> {
-    let (mut reader, writer) = stream.into_split();
+    let (reader, writer) = stream.into_split();
     let writer: SharedWriter = Arc::new(Mutex::new(writer));
+    handle_client_generic(reader, writer, ctx).await
+}
+
+/// Unix / Windows 共通のクライアント処理。
+async fn handle_client_generic<R, W>(
+    mut reader: R,
+    writer: Arc<Mutex<W>>,
+    ctx: Arc<ServiceContext>,
+) -> Result<(), IpcError>
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+    W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
 
     // Subscribe 起動時にここへタスクハンドルを保持。Unsubscribe / 切断時に abort。
     let mut event_relay: Option<tokio::task::JoinHandle<()>> = None;
@@ -201,7 +290,7 @@ async fn handle_client(
         tracing::debug!("Received command: {:?}", command);
 
         match command {
-            IpcCommand::Subscribe { filter } => {
+            IpcCommand::Subscribe { events } => {
                 // 既存リレーがあれば停止してから再起動
                 if let Some(h) = event_relay.take() {
                     h.abort();
@@ -214,8 +303,15 @@ async fn handle_client(
 
                 let writer_clone = writer.clone();
                 let ctx_clone = ctx.clone();
+                // 複数フィルタが来た場合はいずれかに match すれば配信する OR 合成。
+                // None (Vec が空) の場合は All とみなす。
+                let filters = if events.is_empty() {
+                    vec![EventFilter::All]
+                } else {
+                    events
+                };
                 event_relay = Some(tokio::spawn(async move {
-                    relay_events(ctx_clone, writer_clone, filter).await;
+                    relay_events(ctx_clone, writer_clone, filters).await;
                 }));
             }
             IpcCommand::Unsubscribe { .. } => {
@@ -237,16 +333,30 @@ async fn handle_client(
     Ok(())
 }
 
-#[cfg(unix)]
-async fn send_server_message(writer: &SharedWriter, msg: ServerMessage) -> Result<(), IpcError> {
+async fn send_server_message<W>(
+    writer: &Arc<Mutex<W>>,
+    msg: ServerMessage,
+) -> Result<(), IpcError>
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
     let mut guard = writer.lock().await;
     IpcTransport::write_message(&mut *guard, &msg).await
 }
 
 /// EventBus → クライアントへ IpcEvent を中継する per-client タスク。
 /// `filter` に合致しないイベントはスキップ。
-#[cfg(unix)]
-async fn relay_events(ctx: Arc<ServiceContext>, writer: SharedWriter, filter: EventFilter) {
+async fn relay_events<W>(
+    ctx: Arc<ServiceContext>,
+    writer: Arc<Mutex<W>>,
+    filters: Vec<EventFilter>,
+) where
+    W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    // `filter_event` に渡す際に参照渡しにしたいので slice で借用する形に。
+    let filters_ref = filters.as_slice();
+    // 可変参照渡しを避けるため各マッチで filters_ref をそのまま使う。
+    // NB: filter_event は下で Vec<EventFilter> を受け取るよう定義を併せて変更。
     let mut rx_peer_connected = ctx.event_bus.subscribe::<PeerConnectedEvent>();
     let mut rx_peer_disconnected = ctx.event_bus.subscribe::<PeerDisconnectedEvent>();
     let mut rx_transfer_progress = ctx.event_bus.subscribe::<TransferProgressEvent>();
@@ -257,32 +367,38 @@ async fn relay_events(ctx: Arc<ServiceContext>, writer: SharedWriter, filter: Ev
     loop {
         let event: Option<IpcEvent> = tokio::select! {
             r = rx_peer_connected.recv() => match r {
-                Ok(ev) => filter_event(
-                    &filter, EventCategory::Peer, Some(&ev.project_id),
-                    IpcEvent::PeerConnected {
-                        project_id: ev.project_id,
-                        peer_id: ev.peer_id,
-                        display_name: ev.display_name,
-                        route: ev.route,
-                        rtt_ms: ev.rtt_ms,
-                    },
-                ),
+                Ok(ev) => {
+                    let pid = ev.project_id.clone();
+                    filter_events(
+                        filters_ref, EventCategory::Peer, Some(&pid),
+                        IpcEvent::PeerConnected {
+                            project_id: ev.project_id,
+                            peer_id: ev.peer_id,
+                            display_name: ev.display_name,
+                            route: ev.route,
+                            rtt_ms: ev.rtt_ms,
+                        },
+                    )
+                }
                 Err(_) => continue,
             },
             r = rx_peer_disconnected.recv() => match r {
-                Ok(ev) => filter_event(
-                    &filter, EventCategory::Peer, Some(&ev.project_id),
-                    IpcEvent::PeerDisconnected {
-                        project_id: ev.project_id,
-                        peer_id: ev.peer_id,
-                        reason: ev.reason,
-                    },
-                ),
+                Ok(ev) => {
+                    let pid = ev.project_id.clone();
+                    filter_events(
+                        filters_ref, EventCategory::Peer, Some(&pid),
+                        IpcEvent::PeerDisconnected {
+                            project_id: ev.project_id,
+                            peer_id: ev.peer_id,
+                            reason: ev.reason,
+                        },
+                    )
+                }
                 Err(_) => continue,
             },
             r = rx_transfer_progress.recv() => match r {
-                Ok(ev) => filter_event(
-                    &filter, EventCategory::Transfer, None,
+                Ok(ev) => filter_events(
+                    filters_ref, EventCategory::Transfer, None,
                     IpcEvent::TransferProgress {
                         transfer_id: ev.transfer_id,
                         peer_id: String::new(),
@@ -295,8 +411,8 @@ async fn relay_events(ctx: Arc<ServiceContext>, writer: SharedWriter, filter: Ev
                 Err(_) => continue,
             },
             r = rx_transfer_completed.recv() => match r {
-                Ok(ev) => filter_event(
-                    &filter, EventCategory::Transfer, None,
+                Ok(ev) => filter_events(
+                    filters_ref, EventCategory::Transfer, None,
                     IpcEvent::TransferCompleted {
                         transfer_id: ev.transfer_id,
                         peer_id: String::new(),
@@ -307,20 +423,23 @@ async fn relay_events(ctx: Arc<ServiceContext>, writer: SharedWriter, filter: Ev
                 Err(_) => continue,
             },
             r = rx_conflict.recv() => match r {
-                Ok(ev) => filter_event(
-                    &filter, EventCategory::Conflict, Some(&ev.project_id),
-                    IpcEvent::ConflictDetected {
-                        project_id: ev.project_id,
-                        file_id: ev.file_id,
-                        file_path: ev.file_path,
-                        involved_peers: ev.involved_peers,
-                    },
-                ),
+                Ok(ev) => {
+                    let pid = ev.project_id.clone();
+                    filter_events(
+                        filters_ref, EventCategory::Conflict, Some(&pid),
+                        IpcEvent::ConflictDetected {
+                            project_id: ev.project_id,
+                            file_id: ev.file_id,
+                            file_path: ev.file_path,
+                            involved_peers: ev.involved_peers,
+                        },
+                    )
+                }
                 Err(_) => continue,
             },
             r = rx_network.recv() => match r {
-                Ok(ev) => filter_event(
-                    &filter, EventCategory::Network, None,
+                Ok(ev) => filter_events(
+                    filters_ref, EventCategory::Network, None,
                     IpcEvent::NetworkStatusUpdated {
                         active_connections: ev.active_connections,
                         total_bandwidth_bps: ev.total_bandwidth_bps,
@@ -341,7 +460,46 @@ async fn relay_events(ctx: Arc<ServiceContext>, writer: SharedWriter, filter: Ev
     }
 }
 
-/// フィルタに一致しないイベントを落とす。一致すれば `Some(event)` を返す。
+/// 複数 filter の OR 合成。いずれかが受け入れるなら `Some(event)`。
+fn filter_events(
+    filters: &[EventFilter],
+    category: EventCategory,
+    project_id: Option<&str>,
+    event: IpcEvent,
+) -> Option<IpcEvent> {
+    for f in filters {
+        if filter_event_one(f, &category, project_id).is_some() {
+            return Some(event);
+        }
+    }
+    None
+}
+
+/// 1 本の filter で判定。`Some(())` なら受理。
+fn filter_event_one(
+    filter: &EventFilter,
+    category: &EventCategory,
+    project_id: Option<&str>,
+) -> Option<()> {
+    match filter {
+        EventFilter::All => Some(()),
+        EventFilter::Project(target) => match project_id {
+            Some(p) if p == target => Some(()),
+            Some(_) => None,
+            None => Some(()),
+        },
+        EventFilter::Category(target) => {
+            if std::mem::discriminant(target) == std::mem::discriminant(category) {
+                Some(())
+            } else {
+                None
+            }
+        }
+    }
+}
+
+/// (旧シグネチャ、互換のため残置) フィルタ 1 件で判定して event を返す。
+#[allow(dead_code)]
 fn filter_event(
     filter: &EventFilter,
     category: EventCategory,

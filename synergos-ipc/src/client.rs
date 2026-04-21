@@ -5,13 +5,21 @@
 //!
 //! 接続後、背後のバックグラウンドタスクが ServerMessage を連続的に読み取り、
 //! コマンドへの応答は `send()` の oneshot へ、イベントは内部 mpsc へ振り分ける。
+//!
+//! プラットフォーム:
+//! - Unix (Linux / macOS): Unix Domain Socket
+//! - Windows: Named Pipe (`\\.\pipe\synergos`)
 
 use crate::command::IpcCommand;
 use crate::event::IpcEvent;
 use crate::response::IpcResponse;
 use crate::transport::{IpcError, IpcTransport, ServerMessage};
 use std::sync::Arc;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{mpsc, oneshot, Mutex};
+
+#[cfg(windows)]
+use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient};
 
 /// IPC クライアント
 ///
@@ -22,32 +30,27 @@ pub struct IpcClient {
     event_rx: mpsc::UnboundedReceiver<IpcEvent>,
 }
 
+#[cfg(unix)]
+type WriterHalf = tokio::net::unix::OwnedWriteHalf;
+#[cfg(unix)]
+type ReaderHalf = tokio::net::unix::OwnedReadHalf;
+
+#[cfg(windows)]
+type WriterHalf = tokio::io::WriteHalf<NamedPipeClient>;
+#[cfg(windows)]
+type ReaderHalf = tokio::io::ReadHalf<NamedPipeClient>;
+
 struct ClientInner {
     /// 送信側ストリーム（書き込みは排他）
-    #[cfg(unix)]
-    writer: Mutex<tokio::net::unix::OwnedWriteHalf>,
+    writer: Mutex<WriterHalf>,
     /// 応答待ちキュー（FIFO）
     pending: Mutex<std::collections::VecDeque<oneshot::Sender<IpcResponse>>>,
 }
 
 impl IpcClient {
     /// synergos-core デーモンに接続する
-    #[cfg(unix)]
     pub async fn connect() -> Result<Self, IpcError> {
-        let path = crate::transport::socket_path();
-        let stream = tokio::net::UnixStream::connect(&path)
-            .await
-            .map_err(|e| {
-                if e.kind() == std::io::ErrorKind::ConnectionRefused
-                    || e.kind() == std::io::ErrorKind::NotFound
-                {
-                    IpcError::DaemonNotRunning
-                } else {
-                    IpcError::Io(e)
-                }
-            })?;
-
-        let (reader, writer) = stream.into_split();
+        let (reader, writer) = Self::open_stream().await?;
         let (event_tx, event_rx) = mpsc::unbounded_channel();
 
         let inner = Arc::new(ClientInner {
@@ -64,14 +67,42 @@ impl IpcClient {
         })
     }
 
-    /// Windows 用の接続（未実装）
+    #[cfg(unix)]
+    async fn open_stream() -> Result<(ReaderHalf, WriterHalf), IpcError> {
+        let path = crate::transport::socket_path();
+        let stream = tokio::net::UnixStream::connect(&path).await.map_err(|e| {
+            if e.kind() == std::io::ErrorKind::ConnectionRefused
+                || e.kind() == std::io::ErrorKind::NotFound
+            {
+                IpcError::DaemonNotRunning
+            } else {
+                IpcError::Io(e)
+            }
+        })?;
+        Ok(stream.into_split())
+    }
+
     #[cfg(windows)]
-    pub async fn connect() -> Result<Self, IpcError> {
-        let (_event_tx, event_rx) = mpsc::unbounded_channel();
-        Ok(Self {
-            inner: None,
-            event_rx,
-        })
+    async fn open_stream() -> Result<(ReaderHalf, WriterHalf), IpcError> {
+        let path = crate::transport::socket_path();
+        let path_str = path.to_string_lossy().to_string();
+        // Named Pipe サーバが busy / 未起動の場合は DaemonNotRunning に丸める。
+        let client = ClientOptions::new().open(&path_str).map_err(|e| {
+            use std::io::ErrorKind;
+            match e.kind() {
+                ErrorKind::NotFound => IpcError::DaemonNotRunning,
+                _ => {
+                    // Named Pipe 特有の "pipe is busy" (ERROR_PIPE_BUSY=231)
+                    // もデーモン未起動と同じ扱いにする。
+                    if e.raw_os_error() == Some(231) {
+                        IpcError::DaemonNotRunning
+                    } else {
+                        IpcError::Io(e)
+                    }
+                }
+            }
+        })?;
+        Ok(tokio::io::split(client))
     }
 
     /// コマンドを送信し、レスポンスを受信する
@@ -85,22 +116,14 @@ impl IpcClient {
         // 応答の待ち口を pending に積む
         let (resp_tx, resp_rx) = oneshot::channel();
 
-        #[cfg(unix)]
+        // 書き込みは排他ロックで順序保証。pending への push は書き込みと同時にアトミックに行う
+        let mut writer = inner.writer.lock().await;
         {
-            // 書き込みは排他ロックで順序保証。pending への push は書き込みと同時にアトミックに行う
-            let mut writer = inner.writer.lock().await;
-            {
-                let mut pending = inner.pending.lock().await;
-                pending.push_back(resp_tx);
-            }
-            IpcTransport::write_message(&mut *writer, &command).await?;
+            let mut pending = inner.pending.lock().await;
+            pending.push_back(resp_tx);
         }
-        #[cfg(not(unix))]
-        {
-            let _ = &inner;
-            let _ = resp_tx;
-            return Err(IpcError::DaemonNotRunning);
-        }
+        IpcTransport::write_message(&mut *writer, &command).await?;
+        drop(writer);
 
         // reader タスクから応答が来るのを待つ（接続切断で drop されうる）
         resp_rx.await.map_err(|_| IpcError::ConnectionClosed)
@@ -116,25 +139,17 @@ impl IpcClient {
 
     /// デーモンが稼働中かチェック
     pub async fn is_daemon_running() -> bool {
-        let path = crate::transport::socket_path();
-        #[cfg(unix)]
-        {
-            tokio::net::UnixStream::connect(&path).await.is_ok()
-        }
-        #[cfg(windows)]
-        {
-            let _ = path;
-            false
-        }
+        Self::open_stream().await.is_ok()
     }
 }
 
-#[cfg(unix)]
-async fn reader_task(
-    mut reader: tokio::net::unix::OwnedReadHalf,
+async fn reader_task<R>(
+    mut reader: R,
     inner: Arc<ClientInner>,
     event_tx: mpsc::UnboundedSender<IpcEvent>,
-) {
+) where
+    R: AsyncRead + Unpin,
+{
     loop {
         let msg: ServerMessage = match IpcTransport::read_message(&mut reader).await {
             Ok(m) => m,
@@ -167,4 +182,12 @@ async fn reader_task(
     // 接続切断時は保留中の send をすべて失敗にする
     let mut pending = inner.pending.lock().await;
     pending.clear();
+}
+
+// AsyncWrite bound は WriterHalf の型エイリアスに既に含まれる。
+// (明示制約は不要だが可読性のため inline で残す)
+#[allow(dead_code)]
+fn _assert_write_bounds() {
+    fn _is_write<W: AsyncWrite + Unpin>() {}
+    _is_write::<WriterHalf>();
 }
