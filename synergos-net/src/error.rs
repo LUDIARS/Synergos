@@ -36,6 +36,12 @@ pub enum SynergosNetError {
 
     #[error("Serialization error: {0}")]
     Serialization(String),
+
+    #[error("Gossip protocol error: {0}")]
+    Gossip(String),
+
+    #[error("Identity / signature error: {0}")]
+    Identity(String),
 }
 
 pub type Result<T> = std::result::Result<T, SynergosNetError>;

@@ -37,3 +37,7 @@ uuid = { version = "1", features = ["v4"] }
 crc32fast = "1"
 thiserror = "2"
 anyhow = "1"
+
+# Unix peer credential check (SO_PEERCRED via libc::geteuid)
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

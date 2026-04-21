@@ -134,4 +134,76 @@ impl CoreConnection {
             cache.transfers = transfers;
         }
     }
+
+    // ── ユーザ操作ヘルパ (#13: GUI 操作 UI) ──
+
+    /// プロジェクトを新規に開く (ローカル root を指定)。成功時 true。
+    pub fn open_project(&self, project_id: &str, root: &std::path::Path) -> bool {
+        let resp = self.send_command(IpcCommand::ProjectOpen {
+            project_id: project_id.into(),
+            root_path: root.to_path_buf(),
+            display_name: None,
+        });
+        matches!(resp, Some(synergos_ipc::IpcResponse::Ok))
+    }
+
+    /// プロジェクトを閉じる。成功時 true。
+    pub fn close_project(&self, project_id: &str) -> bool {
+        let resp = self.send_command(IpcCommand::ProjectClose {
+            project_id: project_id.into(),
+        });
+        matches!(resp, Some(synergos_ipc::IpcResponse::Ok))
+    }
+
+    /// 招待トークンを生成。成功時 Some((token, expires_at))。
+    pub fn create_invite(
+        &self,
+        project_id: &str,
+        expires_in_secs: Option<u64>,
+    ) -> Option<(String, Option<u64>)> {
+        let resp = self.send_command(IpcCommand::ProjectCreateInvite {
+            project_id: project_id.into(),
+            expires_in_secs,
+        });
+        if let Some(synergos_ipc::IpcResponse::InviteToken { token, expires_at }) = resp {
+            Some((token, expires_at))
+        } else {
+            None
+        }
+    }
+
+    /// ピアに接続する。成功時 true。
+    pub fn peer_connect(&self, project_id: &str, peer_id: &str) -> bool {
+        let resp = self.send_command(IpcCommand::PeerConnect {
+            project_id: project_id.into(),
+            peer_id: peer_id.into(),
+        });
+        matches!(resp, Some(synergos_ipc::IpcResponse::Ok))
+    }
+
+    /// ピアを切断する。成功時 true。
+    pub fn peer_disconnect(&self, peer_id: &str) -> bool {
+        let resp = self.send_command(IpcCommand::PeerDisconnect {
+            peer_id: peer_id.into(),
+        });
+        matches!(resp, Some(synergos_ipc::IpcResponse::Ok))
+    }
+
+    /// 転送をキャンセルする。成功時 true。
+    pub fn cancel_transfer(&self, transfer_id: &str) -> bool {
+        let resp = self.send_command(IpcCommand::TransferCancel {
+            transfer_id: transfer_id.into(),
+        });
+        matches!(resp, Some(synergos_ipc::IpcResponse::Ok))
+    }
+
+    /// 転送を発行する (ピアから file_id を取得)。成功時 true。
+    pub fn request_transfer(&self, project_id: &str, file_id: &str, peer_id: &str) -> bool {
+        let resp = self.send_command(IpcCommand::TransferRequest {
+            project_id: project_id.into(),
+            file_id: file_id.into(),
+            peer_id: peer_id.into(),
+        });
+        matches!(resp, Some(synergos_ipc::IpcResponse::Ok))
+    }
 }

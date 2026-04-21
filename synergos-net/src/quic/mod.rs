@@ -136,11 +136,23 @@ impl QuicManager {
         }
     }
 
-    /// QUIC エンドポイントを初期化し、リスンを開始する
+    /// QUIC エンドポイントを初期化し、リスンを開始する。
+    ///
+    /// サーバ設定に加え、クライアント既定設定も同時に差し込むので
+    /// 以降 `connect()` は同 endpoint で使える (これをしないと `connect()`
+    /// は "no default client config" エラーで必ず失敗する既知バグがあった)。
     pub async fn bind(&self, addr: SocketAddr) -> Result<SocketAddr> {
         let server_config = self.build_server_config()?;
-        let endpoint = quinn::Endpoint::server(server_config, addr)
+        let mut endpoint = quinn::Endpoint::server(server_config, addr)
             .map_err(|e| SynergosNetError::Quic(format!("Failed to bind: {}", e)))?;
+
+        // Phase D で導入した dev 向け ClientConfig を差し込む。
+        // S1 の最終対策 (ピア公開鍵派生 cert + カスタム CertVerifier) は
+        // 後続作業で build_client_config をハード化することで置き換える。
+        match self.build_client_config() {
+            Ok(cc) => endpoint.set_default_client_config(cc),
+            Err(e) => tracing::warn!("QUIC client config init failed: {e}"),
+        }
 
         let actual_addr = endpoint
             .local_addr()
@@ -332,6 +344,81 @@ impl QuicManager {
     // ── 内部ヘルパー ──
 
     /// サーバー用 TLS 設定を構築（自己署名証明書）
+    /// 開発時の簡易 ClientConfig。**本物のピア認証ではない**。
+    ///
+    /// TODO(S1): `identity::Identity` の公開鍵を cert に埋め、ピア側で
+    /// (1) cert から公開鍵を取り出し、(2) hash(pubkey) == PeerId を検証、
+    /// (3) その公開鍵を後続の署名検証に転用する CertVerifier を実装する。
+    /// 現状は dev/テスト用に `SkipServerVerification` を採用し、`connect()`
+    /// を「そもそも通る」ようにするに留める。リリースビルドでは使わせない。
+    fn build_client_config(&self) -> Result<quinn::ClientConfig> {
+        #[derive(Debug)]
+        struct DevOnlySkipVerify;
+        impl rustls::client::danger::ServerCertVerifier for DevOnlySkipVerify {
+            fn verify_server_cert(
+                &self,
+                _end_entity: &rustls::pki_types::CertificateDer<'_>,
+                _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+                _server_name: &rustls::pki_types::ServerName<'_>,
+                _ocsp: &[u8],
+                _now: rustls::pki_types::UnixTime,
+            ) -> std::result::Result<
+                rustls::client::danger::ServerCertVerified,
+                rustls::Error,
+            > {
+                Ok(rustls::client::danger::ServerCertVerified::assertion())
+            }
+            fn verify_tls12_signature(
+                &self,
+                _message: &[u8],
+                _cert: &rustls::pki_types::CertificateDer<'_>,
+                _dss: &rustls::DigitallySignedStruct,
+            ) -> std::result::Result<
+                rustls::client::danger::HandshakeSignatureValid,
+                rustls::Error,
+            > {
+                Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+            }
+            fn verify_tls13_signature(
+                &self,
+                _message: &[u8],
+                _cert: &rustls::pki_types::CertificateDer<'_>,
+                _dss: &rustls::DigitallySignedStruct,
+            ) -> std::result::Result<
+                rustls::client::danger::HandshakeSignatureValid,
+                rustls::Error,
+            > {
+                Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+            }
+            fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+                vec![
+                    rustls::SignatureScheme::ED25519,
+                    rustls::SignatureScheme::ECDSA_NISTP256_SHA256,
+                    rustls::SignatureScheme::RSA_PSS_SHA256,
+                ]
+            }
+        }
+
+        let client_crypto = rustls::ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(DevOnlySkipVerify))
+            .with_no_client_auth();
+
+        let qcc = quinn::crypto::rustls::QuicClientConfig::try_from(client_crypto)
+            .map_err(|e| SynergosNetError::Quic(format!("QUIC client crypto: {e}")))?;
+        let mut cc = quinn::ClientConfig::new(Arc::new(qcc));
+
+        let mut transport = quinn::TransportConfig::default();
+        transport.max_concurrent_bidi_streams(self.config.max_concurrent_streams.into());
+        transport.max_idle_timeout(Some(
+            Duration::from_millis(self.config.idle_timeout_ms)
+                .try_into()
+                .unwrap_or_else(|_| quinn::IdleTimeout::from(quinn::VarInt::from_u32(30_000))),
+        ));
+        cc.transport_config(Arc::new(transport));
+        Ok(cc)
+    }
+
     fn build_server_config(&self) -> Result<quinn::ServerConfig> {
         let cert = rcgen::generate_simple_self_signed(vec!["synergos".into()])
             .map_err(|e| SynergosNetError::Quic(format!("Cert generation error: {}", e)))?;

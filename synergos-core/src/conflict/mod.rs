@@ -170,6 +170,14 @@ impl ConflictManager {
         // コンフリクトを登録
         self.conflicts.insert(file_id.clone(), conflict.clone());
 
+        // 関連 peer に対して hot-standby 通知を自動 enqueue (#15 対策)。
+        // これまで queue_notification を呼ぶ側がおらず機能していなかった。
+        for peer in &conflict.involved_peers {
+            if peer != local_peer {
+                self.queue_notification(&conflict, peer);
+            }
+        }
+
         // EventBus にコンフリクト検出イベントを発行
         self.event_bus.emit(ConflictDetectedEvent {
             project_id: project_id.to_string(),

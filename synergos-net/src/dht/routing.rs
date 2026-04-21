@@ -1,6 +1,10 @@
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::types::{NodeId, PeerId, Route};
+
+/// バケット最古エントリが stale (応答確認が必要) と判断するまでの閾値。
+/// Kademlia の本来の運用 (ping→タイムアウトで evict) に合わせて長めに取る。
+const STALE_THRESHOLD: Duration = Duration::from_secs(15 * 60);
 
 /// Kademlia k-bucket 内のエントリ
 #[derive(Debug, Clone)]
@@ -29,26 +33,41 @@ impl KBucket {
     }
 
     /// エントリを追加または更新
+    ///
+    /// Kademlia の eviction policy に近づけた挙動:
+    /// - 既存 node_id → 末尾へ move (LRU 更新)
+    /// - bucket 空きあり → 末尾に append
+    /// - bucket 満杯 + 最古エントリが stale (≥ STALE_THRESHOLD) → 最古を置換
+    /// - bucket 満杯 + 最古も fresh → 新規候補を drop
+    ///
+    /// これにより「KBucket eviction flooding」(S22) — 古いだけで生きている
+    /// ノードが短命 peer によって無差別に追い出される問題を抑える。
+    /// (本来は最古ノードに ping を投げて応答確認後に判断するが、その
+    /// スケジューリングは上位の RoutingTable::maintenance に委ねる。)
     pub fn upsert(&mut self, entry: BucketEntry) {
-        if let Some(existing) = self.entries.iter_mut().find(|e| e.node_id == entry.node_id) {
-            // 既存エントリを更新して末尾に移動
+        if let Some(pos) = self.entries.iter().position(|e| e.node_id == entry.node_id) {
+            // 既存エントリを末尾へ move しつつ last_seen / endpoints を更新 (LRU)
+            let mut existing = self.entries.remove(pos);
             existing.endpoints = entry.endpoints;
             existing.last_seen = entry.last_seen;
             existing.rtt_ms = entry.rtt_ms;
+            self.entries.push(existing);
         } else if self.entries.len() < self.k {
             self.entries.push(entry);
-        } else {
-            // bucket がフル → 最も古いエントリが応答しない場合のみ置換
-            // （Kademlia の eviction policy）
-            // ここでは簡易的に最古を置換
-            if let Some(oldest) = self
-                .entries
-                .iter()
-                .enumerate()
-                .min_by_key(|(_, e)| e.last_seen)
-                .map(|(i, _)| i)
-            {
-                self.entries[oldest] = entry;
+        } else if let Some((oldest_idx, oldest)) = self
+            .entries
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, e)| e.last_seen)
+        {
+            if oldest.last_seen.elapsed() >= STALE_THRESHOLD {
+                self.entries[oldest_idx] = entry;
+            } else {
+                tracing::debug!(
+                    "kbucket full and oldest entry fresh; dropping new peer {:?}",
+                    entry.peer_id
+                );
+                return;
             }
         }
         self.last_refreshed = Instant::now();

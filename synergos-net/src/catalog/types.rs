@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::types::{ChunkId, FileId};
+use crate::types::{Blake3Hash, ChunkId, FileId};
 
 /// ルートカタログ（プロジェクトに 1 つ）
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -17,11 +17,19 @@ pub struct RootCatalog {
 }
 
 /// チャンクインデックス（ルートカタログ内のエントリ）
+///
+/// `crc` は帯域効率の良いキャッシュキー比較用に残してある。整合性検証
+/// (改竄検出) には必ず `content_hash` を使うこと (S5 対策)。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChunkIndex {
     pub chunk_id: ChunkId,
-    /// このチャンク内ファイルの CRC を合成した値
+    /// このチャンク内ファイルの CRC を合成した値 (キャッシュキー用)
     pub crc: u32,
+    /// このチャンク内ファイルの Blake3 合成ハッシュ (整合性検証用)。
+    /// デフォルト値はゼロ。古いピアは未設定で送ってくる可能性があるため
+    /// 受信側はゼロ値の場合フォールバックとして CRC だけで比較してよい。
+    #[serde(default)]
+    pub content_hash: Blake3Hash,
     /// このチャンクの最終更新時刻
     pub last_updated: u64,
 }
@@ -65,8 +73,12 @@ pub struct FileEntry {
     pub file_id: FileId,
     /// ファイルパス（プロジェクトルート相対）
     pub path: String,
-    /// 現在のファイル CRC
+    /// 現在のファイル CRC (キャッシュキー / 低コスト比較用)
     pub crc: u32,
+    /// 現在のファイル内容の Blake3 ハッシュ (整合性検証用)。
+    /// 古いピアからのメッセージではゼロ値になり得る。
+    #[serde(default)]
+    pub content_hash: Blake3Hash,
     /// ファイルの状態
     pub state: FileState,
     /// ファイルサイズ

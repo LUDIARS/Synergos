@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 
 use crate::error::{Result, SynergosNetError};
+use crate::identity::{self, Identity};
 use crate::types::{Blake3Hash, Cid, FileId, PeerId};
 
 /// チェーンブロック
@@ -14,10 +15,16 @@ pub struct ChainBlock {
     pub version: u64,
     /// 作成者
     pub author: PeerId,
+    /// 作成者の公開鍵 (32 bytes)。PeerId と独立で保持することで
+    /// 受信側が鍵→PeerId 導出と署名検証の両方を確認できる (S4 対策)。
+    pub author_public_key: [u8; 32],
     /// 作成時刻 (Unix timestamp ms)
     pub timestamp: u64,
     /// 更新内容
     pub payload: ChainPayload,
+    /// 作者による `signing_message()` への ed25519 署名 (64 bytes)。
+    /// 未署名ブロックは 0 埋め。`sign(&mut self, ...)` 呼び出しで埋まる。
+    pub signature: [u8; 64],
 }
 
 impl ChainBlock {
@@ -29,6 +36,7 @@ impl ChainBlock {
         }
         hasher.update(&self.version.to_le_bytes());
         hasher.update(self.author.0.as_bytes());
+        hasher.update(&self.author_public_key);
         hasher.update(&self.timestamp.to_le_bytes());
         match &self.payload {
             ChainPayload::TextDiff { patch, result_crc } => {
@@ -50,6 +58,65 @@ impl ChainBlock {
             }
         }
         self.hash = Blake3Hash(*hasher.finalize().as_bytes());
+    }
+
+    /// 署名対象のメッセージバイト列を組み立てる。
+    /// - 自身のブロックハッシュを含むことで `compute_hash` が改竄検出に寄与。
+    /// - prev_hash も含み、チェーン全体の改竄を遡って検出できるように。
+    pub fn signing_message(&self) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(32 + 33 + 8 + 32 + 8);
+        buf.extend_from_slice(&self.hash.0);
+        if let Some(ref prev) = self.prev_hash {
+            buf.push(1);
+            buf.extend_from_slice(&prev.0);
+        } else {
+            buf.push(0);
+        }
+        buf.extend_from_slice(&self.version.to_le_bytes());
+        buf.extend_from_slice(&self.author_public_key);
+        buf.extend_from_slice(&self.timestamp.to_le_bytes());
+        buf
+    }
+
+    /// 作者の Identity で署名し、`author` / `author_public_key` を確定させる。
+    /// `compute_hash` はこの関数内で呼ばれる。
+    pub fn sign(&mut self, identity: &Identity) {
+        self.author = identity.peer_id().clone();
+        self.author_public_key = identity.public_key_bytes();
+        self.compute_hash();
+        self.signature = identity.sign(&self.signing_message());
+    }
+
+    /// 受信したブロックを検証する。
+    /// 1. `author_public_key` → PeerId 導出が `author` と一致するか
+    /// 2. `compute_hash` の結果が格納済み `hash` と一致するか
+    /// 3. `signature` が `author_public_key` による有効な署名か
+    pub fn verify(&self) -> Result<()> {
+        let derived = identity::peer_id_from_public_bytes(&self.author_public_key);
+        if derived != self.author {
+            return Err(SynergosNetError::Gossip(
+                "ChainBlock author does not match public key".into(),
+            ));
+        }
+        let mut clone = self.clone();
+        clone.compute_hash();
+        if clone.hash != self.hash {
+            return Err(SynergosNetError::Gossip(
+                "ChainBlock hash mismatch".into(),
+            ));
+        }
+        identity::verify(
+            &self.author_public_key,
+            &self.signing_message(),
+            &self.signature,
+        )
+        .map_err(|_| SynergosNetError::Gossip("ChainBlock signature invalid".into()))?;
+        Ok(())
+    }
+
+    /// 署名が埋まっているか (全 0 でないか) を簡易判定。
+    pub fn is_signed(&self) -> bool {
+        self.signature.iter().any(|b| *b != 0)
     }
 }
 
@@ -170,19 +237,68 @@ mod tests {
     use super::*;
 
     fn make_block(version: u64, prev: Option<Blake3Hash>) -> ChainBlock {
+        let id = Identity::generate();
         let mut block = ChainBlock {
             hash: Blake3Hash([0; 32]),
             prev_hash: prev,
             version,
-            author: PeerId::new("test"),
+            author: id.peer_id().clone(),
+            author_public_key: id.public_key_bytes(),
             timestamp: version * 1000,
             payload: ChainPayload::TextDiff {
                 patch: format!("patch-{}", version),
                 result_crc: version as u32,
             },
+            signature: [0u8; 64],
         };
-        block.compute_hash();
+        block.sign(&id);
         block
+    }
+
+    #[test]
+    fn signed_block_verifies() {
+        let id = Identity::generate();
+        let mut block = ChainBlock {
+            hash: Blake3Hash([0; 32]),
+            prev_hash: None,
+            version: 1,
+            author: PeerId::new(""), // sign が上書き
+            author_public_key: [0u8; 32],
+            timestamp: 42,
+            payload: ChainPayload::TextDiff {
+                patch: "p".into(),
+                result_crc: 7,
+            },
+            signature: [0u8; 64],
+        };
+        block.sign(&id);
+        assert!(block.is_signed());
+        block.verify().expect("valid signature");
+    }
+
+    #[test]
+    fn tampered_payload_fails_verify() {
+        let id = Identity::generate();
+        let mut block = ChainBlock {
+            hash: Blake3Hash([0; 32]),
+            prev_hash: None,
+            version: 1,
+            author: PeerId::new(""),
+            author_public_key: [0u8; 32],
+            timestamp: 42,
+            payload: ChainPayload::TextDiff {
+                patch: "original".into(),
+                result_crc: 1,
+            },
+            signature: [0u8; 64],
+        };
+        block.sign(&id);
+        // ペイロードを差し替え (hash は元のまま)
+        block.payload = ChainPayload::TextDiff {
+            patch: "tampered".into(),
+            result_crc: 999,
+        };
+        assert!(block.verify().is_err());
     }
 
     #[test]

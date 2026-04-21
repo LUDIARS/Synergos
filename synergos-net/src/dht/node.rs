@@ -27,6 +27,11 @@ impl PeerRecord {
     }
 }
 
+/// DHT ノード情報ストアの上限。S8 対策: 悪意ある peer が announce を
+/// 大量に送ってきても 10k 件で頭打ちになる。超過時は最も古いものから
+/// evict する。
+const DHT_STORE_MAX: usize = 10_000;
+
 /// DHT ノード（Kademlia ベース）
 pub struct DhtNode {
     /// 自身のピアID
@@ -85,6 +90,20 @@ impl DhtNode {
     /// 自身のレコードを DHT に公開
     pub async fn announce(&self, record: PeerRecord) {
         let node_id = NodeId::from_peer_id(&record.peer_id);
+        // 上限を超えた場合は一度 GC、それでも収まらなければ最古を捨てる (S8)
+        if self.store.len() >= DHT_STORE_MAX && !self.store.contains_key(&node_id) {
+            self.gc_expired();
+            if self.store.len() >= DHT_STORE_MAX {
+                if let Some(oldest_key) = self
+                    .store
+                    .iter()
+                    .min_by_key(|e| e.value().published_at)
+                    .map(|e| e.key().clone())
+                {
+                    self.store.remove(&oldest_key);
+                }
+            }
+        }
         self.store.insert(node_id, record);
     }
 

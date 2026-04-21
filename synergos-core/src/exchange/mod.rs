@@ -67,6 +67,9 @@ pub struct ShareRequest {
     pub priority: TransferPriority,
     /// 送信先ピア（None の場合は Gossipsub で全ピアにブロードキャスト）
     pub target_peer: Option<PeerId>,
+    /// このバージョンを TransferLedger / Gossip へ伝播する。
+    /// 呼び出し側（PublishUpdate 経由）が把握していない場合は 1 を使う。
+    pub version: u64,
 }
 
 /// ファイル取得リクエスト
@@ -77,6 +80,8 @@ pub struct FetchRequest {
     /// 取得元ピア（None の場合は Gossipsub で Want をブロードキャスト）
     pub source_peer: Option<PeerId>,
     pub priority: TransferPriority,
+    /// 欲しいバージョン。0 は「任意の最新」を意味する。
+    pub version: u64,
 }
 
 /// アクティブ転送の情報
@@ -93,6 +98,9 @@ pub struct ActiveTransfer {
     pub peer_id: PeerId,
     pub state: TransferState,
     pub priority: TransferPriority,
+    /// このアクティブ転送が担当するファイルバージョン。
+    /// 転送完了時に TransferLedger へ反映される。
+    pub version: u64,
 }
 
 /// ファイル公開通知（ローカル変更をネットワークに公開）
@@ -179,24 +187,39 @@ pub struct Exchange {
 }
 
 impl Exchange {
+    /// 最小構成のコンストラクタ（テスト・後方互換用）
     pub fn new(event_bus: SharedEventBus) -> Self {
+        Self::with_network(event_bus, PeerId::new("local"), None)
+    }
+
+    /// ネットワーク依存を注入して構築する本番向けコンストラクタ
+    pub fn with_network(
+        event_bus: SharedEventBus,
+        local_peer_id: PeerId,
+        gossip: Option<Arc<GossipNode>>,
+    ) -> Self {
         Self {
             event_bus,
             transfers: DashMap::new(),
             ledger: Arc::new(TransferLedger::new()),
-            gossip: None,
-            local_peer_id: PeerId::new("local"),
+            gossip,
+            local_peer_id,
         }
     }
 
-    /// ローカルピアIDを設定
-    pub fn set_local_peer_id(&mut self, peer_id: PeerId) {
-        self.local_peer_id = peer_id;
-    }
-
-    /// Gossipsub ノードを設定
-    pub fn set_gossip(&mut self, gossip: Arc<GossipNode>) {
-        self.gossip = Some(gossip);
+    /// 完了済み/キャンセル済み転送をテーブルから除去
+    pub fn gc_finished_transfers(&self) -> usize {
+        let mut removed = 0;
+        self.transfers.retain(|_, t| match &t.state {
+            TransferState::Completed
+            | TransferState::Cancelled
+            | TransferState::Failed(_) => {
+                removed += 1;
+                false
+            }
+            _ => true,
+        });
+        removed
     }
 
     /// TransferLedger への参照を取得
@@ -223,6 +246,10 @@ impl Exchange {
                     version,
                     size: file_size,
                     crc,
+                    // TODO(S5): Exchange の呼び出し元から Blake3 を渡せるよう
+                    // broadcast_offer のシグネチャを拡張する。現状は CRC だけ
+                    // 流して content_hash はゼロ (受信側は CRC フォールバック)。
+                    content_hash: Default::default(),
                 },
             );
         }
@@ -281,7 +308,7 @@ impl Exchange {
             // TransferLedger で fulfilled をマーク
             self.ledger.mark_fulfilled(
                 &transfer.file_id,
-                0, // version は簡易的に 0
+                transfer.version,
                 &transfer.peer_id,
             );
         }
@@ -349,6 +376,7 @@ impl FileSharing for Exchange {
             peer_id,
             state: TransferState::Queued,
             priority: request.priority,
+            version: request.version,
         };
 
         self.transfers.insert(transfer_id.clone(), transfer);
@@ -357,7 +385,7 @@ impl FileSharing for Exchange {
         let offer = OfferEntry {
             sender: self.local_peer_id.clone(),
             file_id: request.file_id.clone(),
-            version: 0,
+            version: request.version,
             file_size: request.file_size,
             crc: crc32fast::hash(&request.checksum.0),
             offered_at: now_ms(),
@@ -370,7 +398,7 @@ impl FileSharing for Exchange {
         self.broadcast_offer(
             &request.project_id,
             &request.file_id,
-            0,
+            request.version,
             request.file_size,
             crc32fast::hash(&request.checksum.0),
         );
@@ -404,6 +432,7 @@ impl FileSharing for Exchange {
             peer_id,
             state: TransferState::Queued,
             priority: request.priority,
+            version: request.version,
         };
 
         self.transfers.insert(transfer_id.clone(), transfer);
@@ -412,7 +441,7 @@ impl FileSharing for Exchange {
         let want = WantEntry {
             requester: self.local_peer_id.clone(),
             file_id: request.file_id.clone(),
-            version: 0,
+            version: request.version,
             requested_at: now_ms(),
             state: LedgerEntryState::Pending,
         };

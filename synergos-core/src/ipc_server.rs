@@ -8,17 +8,22 @@
 //! EventBus と連携してレスポンス・イベントプッシュを行う。
 
 use std::sync::Arc;
-use tokio::sync::broadcast;
+use std::time::Duration;
+use tokio::sync::{broadcast, Mutex};
 
 use synergos_ipc::command::IpcCommand;
+use synergos_ipc::event::{EventCategory, EventFilter, IpcEvent};
 use synergos_ipc::response::{
     DaemonStatus, IpcResponse, NetworkStatusInfo, PeerInfo, TransferInfo,
 };
-use synergos_ipc::transport::{IpcError, IpcTransport};
+use synergos_ipc::transport::{IpcError, IpcTransport, ServerMessage};
 use synergos_net::types::{FileId, PeerId, TransferId};
 
 use crate::conflict::ConflictManager;
-use crate::event_bus::SharedEventBus;
+use crate::event_bus::{
+    ConflictDetectedEvent, NetworkStatusEvent, PeerConnectedEvent, PeerDisconnectedEvent,
+    SharedEventBus, TransferCompletedEvent, TransferProgressEvent,
+};
 use crate::exchange::{
     Exchange, FetchRequest, FileSharing, PublishNotification, TransferDirection, TransferPriority,
     TransferState,
@@ -61,15 +66,37 @@ impl IpcServer {
         let _ = tokio::fs::remove_file(&path).await;
 
         let listener = tokio::net::UnixListener::bind(&path)?;
+
+        // ソケットを `chmod 0600`: uid_check と併せて多層防御。
+        // デーモンを起動した UID 以外の書込みを OS レベルで遮る。
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(0o600);
+            if let Err(e) = tokio::fs::set_permissions(&path, perms).await {
+                tracing::warn!("failed to chmod 0600 {}: {}", path.display(), e);
+            }
+        }
+
         tracing::info!("IPC server listening on {}", path.display());
 
         let mut shutdown_rx = self.ctx.shutdown_tx.subscribe();
+        // accept エラー時の指数バックオフ上限 (fd 枯渇時のタイトループ防止)
+        let mut backoff_ms = 0u64;
 
         loop {
             tokio::select! {
                 accept_result = listener.accept() => {
                     match accept_result {
                         Ok((stream, _addr)) => {
+                            backoff_ms = 0;
+
+                            // peer uid 検証: 起動ユーザ以外を拒絶。
+                            if let Err(reason) = verify_peer_uid(&stream) {
+                                tracing::warn!("rejecting client: {reason}");
+                                drop(stream);
+                                continue;
+                            }
+
                             let ctx = self.ctx.clone();
                             tokio::spawn(async move {
                                 if let Err(e) = handle_client(stream, ctx).await {
@@ -79,6 +106,9 @@ impl IpcServer {
                         }
                         Err(e) => {
                             tracing::error!("Accept error: {}", e);
+                            // 指数バックオフ (最大 1s)
+                            backoff_ms = (backoff_ms * 2).max(10).min(1000);
+                            tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
                         }
                     }
                 }
@@ -94,14 +124,127 @@ impl IpcServer {
         Ok(())
     }
 
-    /// Windows 用の IPC サーバー（スタブ）
+    /// Windows 用の IPC サーバー（Named Pipe）。
+    ///
+    /// `tokio::net::windows::named_pipe::NamedPipeServer` を 1 インスタンス
+    /// ずつ create → wait_for_client → 切り離して次インスタンスを create、
+    /// という標準パターン。`FIRST_PIPE_INSTANCE` でパイプ名を占有して
+    /// なりすましインスタンスの作成を拒む。
     #[cfg(windows)]
     pub async fn run(&self) -> Result<(), IpcError> {
-        tracing::warn!("Windows Named Pipe server not yet implemented");
+        use std::time::Duration;
+        use tokio::net::windows::named_pipe::{PipeMode, ServerOptions};
+
+        let path = synergos_ipc::transport::socket_path();
+        let pipe_name = path.to_string_lossy().to_string();
+
         let mut shutdown_rx = self.ctx.shutdown_tx.subscribe();
-        let _ = shutdown_rx.recv().await;
-        Ok(())
+
+        // 初回インスタンスだけ first_pipe_instance(true) で作成してパイプ名を予約する。
+        let mut server = ServerOptions::new()
+            .first_pipe_instance(true)
+            .pipe_mode(PipeMode::Byte)
+            .create(&pipe_name)
+            .map_err(IpcError::Io)?;
+        tracing::info!("IPC named pipe listening on {pipe_name}");
+
+        // accept エラー時の指数バックオフ上限 (fd 枯渇時のタイトループ防止に相当)
+        let mut backoff_ms = 0u64;
+
+        loop {
+            let connect_result = tokio::select! {
+                r = server.connect() => r,
+                _ = shutdown_rx.recv() => {
+                    tracing::info!("IPC server shutting down");
+                    return Ok(());
+                }
+            };
+
+            match connect_result {
+                Ok(()) => {
+                    backoff_ms = 0;
+                    let next = ServerOptions::new()
+                        .pipe_mode(PipeMode::Byte)
+                        .create(&pipe_name);
+                    let next = match next {
+                        Ok(n) => n,
+                        Err(e) => {
+                            tracing::error!("failed to create next pipe instance: {e}");
+                            backoff_ms = (backoff_ms * 2).max(10).min(1000);
+                            tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                            continue;
+                        }
+                    };
+                    // `server.connect()` の借用は既に resolved。mem::replace で
+                    // 現インスタンスを取り出し、次インスタンスを server にセット。
+                    let connected = std::mem::replace(&mut server, next);
+                    let ctx = self.ctx.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = handle_client_windows(connected, ctx).await {
+                            tracing::warn!("Client connection error: {}", e);
+                        }
+                    });
+                }
+                Err(e) => {
+                    tracing::error!("Named pipe accept error: {e}");
+                    backoff_ms = (backoff_ms * 2).max(10).min(1000);
+                    tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                }
+            }
+        }
     }
+}
+
+/// 接続中クライアントの writer。Response / Event を多重化するため Mutex でガードする。
+#[cfg(unix)]
+type SharedWriter = Arc<Mutex<tokio::net::unix::OwnedWriteHalf>>;
+
+/// 接続元 UID が自プロセス UID と一致するか確認する。
+///
+/// 非 Unix や UCred 非対応プラットフォームでは許容する (Windows は別経路)。
+#[cfg(unix)]
+fn verify_peer_uid(stream: &tokio::net::UnixStream) -> Result<(), String> {
+    use std::os::unix::io::AsRawFd;
+    // SAFETY: `stream` は生きている UnixStream。借用期間内でのみ fd を触る。
+    // std の UnixStream::peer_cred を借りるために unsafe FromRawFd + ManuallyDrop パターン。
+    let fd = stream.as_raw_fd();
+    let std_stream = unsafe {
+        use std::os::unix::io::FromRawFd;
+        std::mem::ManuallyDrop::new(std::os::unix::net::UnixStream::from_raw_fd(fd))
+    };
+    let cred = match std_stream.peer_cred() {
+        Ok(c) => c,
+        Err(e) => {
+            // peer_cred が取れない OS (macOS 等旧バージョン) は allow (ベストエフォート)
+            tracing::debug!("peer_cred unavailable, skipping uid check: {e}");
+            return Ok(());
+        }
+    };
+    let peer_uid = cred.uid();
+    // 自プロセス UID
+    // SAFETY: libc call with no side effects; always succeeds.
+    let self_uid = unsafe { libc::geteuid() };
+    if peer_uid != self_uid {
+        return Err(format!(
+            "peer uid {peer_uid} does not match daemon uid {self_uid}"
+        ));
+    }
+    Ok(())
+}
+
+/// Windows Named Pipe 接続のハンドリング。Unix 版と共通の dispatch/relay
+/// ロジックをトレイト越しに呼び出すラッパ。
+#[cfg(windows)]
+async fn handle_client_windows(
+    pipe: tokio::net::windows::named_pipe::NamedPipeServer,
+    ctx: Arc<ServiceContext>,
+) -> Result<(), IpcError> {
+    use tokio::io::{AsyncRead, AsyncWrite};
+
+    let (reader, writer) = tokio::io::split(pipe);
+    let writer: Arc<Mutex<tokio::io::WriteHalf<tokio::net::windows::named_pipe::NamedPipeServer>>> =
+        Arc::new(Mutex::new(writer));
+    handle_client_generic(reader, writer, ctx).await
 }
 
 /// クライアント接続のハンドリング
@@ -110,7 +253,24 @@ async fn handle_client(
     stream: tokio::net::UnixStream,
     ctx: Arc<ServiceContext>,
 ) -> Result<(), IpcError> {
-    let (mut reader, mut writer) = stream.into_split();
+    let (reader, writer) = stream.into_split();
+    let writer: SharedWriter = Arc::new(Mutex::new(writer));
+    handle_client_generic(reader, writer, ctx).await
+}
+
+/// Unix / Windows 共通のクライアント処理。
+async fn handle_client_generic<R, W>(
+    mut reader: R,
+    writer: Arc<Mutex<W>>,
+    ctx: Arc<ServiceContext>,
+) -> Result<(), IpcError>
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+    W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+
+    // Subscribe 起動時にここへタスクハンドルを保持。Unsubscribe / 切断時に abort。
+    let mut event_relay: Option<tokio::task::JoinHandle<()>> = None;
 
     loop {
         let command: IpcCommand = match IpcTransport::read_message(&mut reader).await {
@@ -119,17 +279,249 @@ async fn handle_client(
                 tracing::debug!("Client disconnected");
                 break;
             }
-            Err(e) => return Err(e),
+            Err(e) => {
+                if let Some(h) = event_relay.take() {
+                    h.abort();
+                }
+                return Err(e);
+            }
         };
 
         tracing::debug!("Received command: {:?}", command);
 
-        let response = dispatch_command(command, &ctx).await;
+        match command {
+            IpcCommand::Subscribe { events } => {
+                // 既存リレーがあれば停止してから再起動
+                if let Some(h) = event_relay.take() {
+                    h.abort();
+                }
+                let subscription_id = uuid::Uuid::new_v4().to_string();
+                let resp = IpcResponse::Subscribed {
+                    subscription_id: subscription_id.clone(),
+                };
+                send_server_message(&writer, ServerMessage::Response(resp)).await?;
 
-        IpcTransport::write_message(&mut writer, &response).await?;
+                let writer_clone = writer.clone();
+                let ctx_clone = ctx.clone();
+                // 複数フィルタが来た場合はいずれかに match すれば配信する OR 合成。
+                // None (Vec が空) の場合は All とみなす。
+                let filters = if events.is_empty() {
+                    vec![EventFilter::All]
+                } else {
+                    events
+                };
+                event_relay = Some(tokio::spawn(async move {
+                    relay_events(ctx_clone, writer_clone, filters).await;
+                }));
+            }
+            IpcCommand::Unsubscribe { .. } => {
+                if let Some(h) = event_relay.take() {
+                    h.abort();
+                }
+                send_server_message(&writer, ServerMessage::Response(IpcResponse::Ok)).await?;
+            }
+            other => {
+                let response = dispatch_command(other, &ctx).await;
+                send_server_message(&writer, ServerMessage::Response(response)).await?;
+            }
+        }
     }
 
+    if let Some(h) = event_relay.take() {
+        h.abort();
+    }
     Ok(())
+}
+
+async fn send_server_message<W>(
+    writer: &Arc<Mutex<W>>,
+    msg: ServerMessage,
+) -> Result<(), IpcError>
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    let mut guard = writer.lock().await;
+    IpcTransport::write_message(&mut *guard, &msg).await
+}
+
+/// EventBus → クライアントへ IpcEvent を中継する per-client タスク。
+/// `filter` に合致しないイベントはスキップ。
+async fn relay_events<W>(
+    ctx: Arc<ServiceContext>,
+    writer: Arc<Mutex<W>>,
+    filters: Vec<EventFilter>,
+) where
+    W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    // `filter_event` に渡す際に参照渡しにしたいので slice で借用する形に。
+    let filters_ref = filters.as_slice();
+    // 可変参照渡しを避けるため各マッチで filters_ref をそのまま使う。
+    // NB: filter_event は下で Vec<EventFilter> を受け取るよう定義を併せて変更。
+    let mut rx_peer_connected = ctx.event_bus.subscribe::<PeerConnectedEvent>();
+    let mut rx_peer_disconnected = ctx.event_bus.subscribe::<PeerDisconnectedEvent>();
+    let mut rx_transfer_progress = ctx.event_bus.subscribe::<TransferProgressEvent>();
+    let mut rx_transfer_completed = ctx.event_bus.subscribe::<TransferCompletedEvent>();
+    let mut rx_conflict = ctx.event_bus.subscribe::<ConflictDetectedEvent>();
+    let mut rx_network = ctx.event_bus.subscribe::<NetworkStatusEvent>();
+
+    loop {
+        let event: Option<IpcEvent> = tokio::select! {
+            r = rx_peer_connected.recv() => match r {
+                Ok(ev) => {
+                    let pid = ev.project_id.clone();
+                    filter_events(
+                        filters_ref, EventCategory::Peer, Some(&pid),
+                        IpcEvent::PeerConnected {
+                            project_id: ev.project_id,
+                            peer_id: ev.peer_id,
+                            display_name: ev.display_name,
+                            route: ev.route,
+                            rtt_ms: ev.rtt_ms,
+                        },
+                    )
+                }
+                Err(_) => continue,
+            },
+            r = rx_peer_disconnected.recv() => match r {
+                Ok(ev) => {
+                    let pid = ev.project_id.clone();
+                    filter_events(
+                        filters_ref, EventCategory::Peer, Some(&pid),
+                        IpcEvent::PeerDisconnected {
+                            project_id: ev.project_id,
+                            peer_id: ev.peer_id,
+                            reason: ev.reason,
+                        },
+                    )
+                }
+                Err(_) => continue,
+            },
+            r = rx_transfer_progress.recv() => match r {
+                Ok(ev) => filter_events(
+                    filters_ref, EventCategory::Transfer, None,
+                    IpcEvent::TransferProgress {
+                        transfer_id: ev.transfer_id,
+                        peer_id: String::new(),
+                        file_name: ev.file_name,
+                        bytes_transferred: ev.bytes_transferred,
+                        total_bytes: ev.total_bytes,
+                        speed_bps: ev.speed_bps,
+                    },
+                ),
+                Err(_) => continue,
+            },
+            r = rx_transfer_completed.recv() => match r {
+                Ok(ev) => filter_events(
+                    filters_ref, EventCategory::Transfer, None,
+                    IpcEvent::TransferCompleted {
+                        transfer_id: ev.transfer_id,
+                        peer_id: String::new(),
+                        file_name: ev.file_name,
+                        file_path: ev.file_path,
+                    },
+                ),
+                Err(_) => continue,
+            },
+            r = rx_conflict.recv() => match r {
+                Ok(ev) => {
+                    let pid = ev.project_id.clone();
+                    filter_events(
+                        filters_ref, EventCategory::Conflict, Some(&pid),
+                        IpcEvent::ConflictDetected {
+                            project_id: ev.project_id,
+                            file_id: ev.file_id,
+                            file_path: ev.file_path,
+                            involved_peers: ev.involved_peers,
+                        },
+                    )
+                }
+                Err(_) => continue,
+            },
+            r = rx_network.recv() => match r {
+                Ok(ev) => filter_events(
+                    filters_ref, EventCategory::Network, None,
+                    IpcEvent::NetworkStatusUpdated {
+                        active_connections: ev.active_connections,
+                        total_bandwidth_bps: ev.total_bandwidth_bps,
+                        used_bandwidth_bps: ev.used_bandwidth_bps,
+                        avg_latency_ms: ev.avg_latency_ms,
+                    },
+                ),
+                Err(_) => continue,
+            },
+        };
+
+        let Some(ipc_event) = event else { continue };
+
+        if let Err(e) = send_server_message(&writer, ServerMessage::Event(ipc_event)).await {
+            tracing::debug!("event relay write failed (client likely gone): {e}");
+            break;
+        }
+    }
+}
+
+/// 複数 filter の OR 合成。いずれかが受け入れるなら `Some(event)`。
+fn filter_events(
+    filters: &[EventFilter],
+    category: EventCategory,
+    project_id: Option<&str>,
+    event: IpcEvent,
+) -> Option<IpcEvent> {
+    for f in filters {
+        if filter_event_one(f, &category, project_id).is_some() {
+            return Some(event);
+        }
+    }
+    None
+}
+
+/// 1 本の filter で判定。`Some(())` なら受理。
+fn filter_event_one(
+    filter: &EventFilter,
+    category: &EventCategory,
+    project_id: Option<&str>,
+) -> Option<()> {
+    match filter {
+        EventFilter::All => Some(()),
+        EventFilter::Project(target) => match project_id {
+            Some(p) if p == target => Some(()),
+            Some(_) => None,
+            None => Some(()),
+        },
+        EventFilter::Category(target) => {
+            if std::mem::discriminant(target) == std::mem::discriminant(category) {
+                Some(())
+            } else {
+                None
+            }
+        }
+    }
+}
+
+/// (旧シグネチャ、互換のため残置) フィルタ 1 件で判定して event を返す。
+#[allow(dead_code)]
+fn filter_event(
+    filter: &EventFilter,
+    category: EventCategory,
+    project_id: Option<&str>,
+    event: IpcEvent,
+) -> Option<IpcEvent> {
+    match filter {
+        EventFilter::All => Some(event),
+        EventFilter::Project(target) => match project_id {
+            Some(p) if p == target => Some(event),
+            Some(_) => None,
+            // プロジェクト非依存イベント (Network / Transfer 等) は透過
+            None => Some(event),
+        },
+        EventFilter::Category(target) => {
+            if std::mem::discriminant(target) == std::mem::discriminant(&category) {
+                Some(event)
+            } else {
+                None
+            }
+        }
+    }
 }
 
 /// コマンドをディスパッチしてレスポンスを生成
@@ -332,9 +724,12 @@ async fn dispatch_command(command: IpcCommand, ctx: &ServiceContext) -> IpcRespo
                 file_id: FileId::new(file_id),
                 source_peer: Some(PeerId::new(peer_id)),
                 priority: TransferPriority::Interactive,
+                // IPC 経由の要求は「任意の最新」として 0 を渡す。
+                // 呼出側が具体バージョンを指定したい場合は IpcCommand を拡張する。
+                version: 0,
             };
             match ctx.exchange.fetch_file(request).await {
-                Ok(tid) => IpcResponse::Ok,
+                Ok(_tid) => IpcResponse::Ok,
                 Err(e) => IpcResponse::Error {
                     code: 3,
                     message: e.to_string(),
@@ -381,23 +776,88 @@ async fn dispatch_command(command: IpcCommand, ctx: &ServiceContext) -> IpcRespo
             project_id,
             file_paths,
         } => {
-            let notifications: Vec<PublishNotification> = file_paths
-                .iter()
-                .map(|path| {
-                    let file_size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-                    let crc = crc32fast::hash(
-                        path.to_string_lossy().as_bytes(),
-                    );
-                    PublishNotification {
-                        project_id: project_id.clone(),
-                        file_id: FileId::new(path.to_string_lossy().to_string()),
-                        file_path: path.clone(),
-                        file_size,
-                        crc,
-                        version: 1,
+            // プロジェクトルートを引き当て、与えられたパスがその配下に収まるか検証。
+            // SSRF 様の「任意絶対パスに `metadata` できる」問題 (S11) の対策。
+            let project_root = match ctx.project_manager.project_root(&project_id) {
+                Some(p) => p,
+                None => {
+                    return IpcResponse::Error {
+                        code: 3,
+                        message: format!("unknown project: {project_id}"),
+                    };
+                }
+            };
+            let project_root = match tokio::fs::canonicalize(&project_root).await {
+                Ok(p) => p,
+                Err(e) => {
+                    return IpcResponse::Error {
+                        code: 3,
+                        message: format!("project root canonicalize failed: {e}"),
+                    };
+                }
+            };
+
+            let mut notifications: Vec<PublishNotification> = Vec::with_capacity(file_paths.len());
+            for path in &file_paths {
+                let absolute = if path.is_absolute() {
+                    path.clone()
+                } else {
+                    project_root.join(path)
+                };
+                let canonical = match tokio::fs::canonicalize(&absolute).await {
+                    Ok(p) => p,
+                    Err(e) => {
+                        return IpcResponse::Error {
+                            code: 3,
+                            message: format!("file not found or unreadable: {:?}: {e}", absolute),
+                        };
                     }
-                })
-                .collect();
+                };
+                if !canonical.starts_with(&project_root) {
+                    return IpcResponse::Error {
+                        code: 3,
+                        message: format!(
+                            "file outside project root: {:?} (root: {:?})",
+                            canonical, project_root
+                        ),
+                    };
+                }
+
+                let metadata = match tokio::fs::metadata(&canonical).await {
+                    Ok(m) => m,
+                    Err(e) => {
+                        return IpcResponse::Error {
+                            code: 3,
+                            message: format!("metadata failed {:?}: {e}", canonical),
+                        };
+                    }
+                };
+                let file_size = metadata.len();
+                let bytes = match tokio::fs::read(&canonical).await {
+                    Ok(b) => b,
+                    Err(e) => {
+                        return IpcResponse::Error {
+                            code: 3,
+                            message: format!("read failed {:?}: {e}", canonical),
+                        };
+                    }
+                };
+                let crc = crc32fast::hash(&bytes);
+
+                let rel = canonical
+                    .strip_prefix(&project_root)
+                    .map(|r| r.to_path_buf())
+                    .unwrap_or(canonical.clone());
+
+                notifications.push(PublishNotification {
+                    project_id: project_id.clone(),
+                    file_id: FileId::new(rel.to_string_lossy().to_string()),
+                    file_path: canonical,
+                    file_size,
+                    crc,
+                    version: 1,
+                });
+            }
             match ctx.exchange.publish_updates(notifications).await {
                 Ok(()) => IpcResponse::Ok,
                 Err(e) => IpcResponse::Error {
@@ -447,13 +907,9 @@ async fn dispatch_command(command: IpcCommand, ctx: &ServiceContext) -> IpcRespo
             })
         }
 
-        IpcCommand::Subscribe { .. } => {
-            // イベント購読: subscription_id を返し、別途イベントプッシュで通知
-            IpcResponse::Subscribed {
-                subscription_id: uuid::Uuid::new_v4().to_string(),
-            }
-        }
-
+        // Subscribe / Unsubscribe は handle_client 側で per-client タスクとして
+        // 処理するため、ここに届くことはない。保険として Ok を返す。
+        IpcCommand::Subscribe { .. } => IpcResponse::Ok,
         IpcCommand::Unsubscribe { .. } => IpcResponse::Ok,
     }
 }

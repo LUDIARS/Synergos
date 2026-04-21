@@ -11,8 +11,10 @@ pub mod config;
 pub mod dht;
 pub mod error;
 pub mod gossip;
+pub mod identity;
 pub mod mesh;
 pub mod quic;
+pub mod transfer;
 pub mod tunnel;
 pub mod types;
 
@@ -24,6 +26,7 @@ pub use config::NetConfig;
 pub use dht::DhtNode;
 pub use error::{Result, SynergosNetError};
 pub use gossip::{GossipMessage, GossipNode};
+pub use identity::{peer_id_from_public_bytes, verify as verify_signature, Identity, IdentityError};
 pub use mesh::Mesh;
 pub use quic::{QuicManager, SpeedTestResult, CalibratedParams, ConnectionCalibrator};
 pub use tunnel::{TunnelManager, TunnelState};

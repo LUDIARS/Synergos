@@ -171,8 +171,23 @@ impl Mesh {
         }
     }
 
-    /// IPv6 アドレスへの到達性をプローブする
+    /// IPv6 アドレスへの到達性をプローブする。
+    ///
+    /// S12 対策: unspecified / loopback / multicast / link-local のような
+    /// 外部プローブに使うべきでないアドレスは拒絶する。
+    /// (任意 IPv6 への TCP 接続は SSRF 様の攻撃面になる。)
     pub async fn probe_ipv6(&self, addr: SocketAddrV6) -> ProbeResult {
+        let ip = *addr.ip();
+        let link_local = (ip.segments()[0] & 0xffc0) == 0xfe80;
+        if ip.is_unspecified() || ip.is_loopback() || ip.is_multicast() || link_local {
+            return ProbeResult {
+                reachable: false,
+                rtt_ms: None,
+                error: Some("refused: restricted IPv6 address".into()),
+                addr: Some(addr),
+            };
+        }
+
         let timeout = Duration::from_millis(self.config.probe_timeout_ms as u64);
         let start = Instant::now();
 

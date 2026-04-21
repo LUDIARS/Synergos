@@ -15,4 +15,4 @@ pub use client::IpcClient;
 pub use command::IpcCommand;
 pub use event::{EventFilter, IpcEvent};
 pub use response::IpcResponse;
-pub use transport::{IpcError, IpcTransport};
+pub use transport::{IpcError, IpcTransport, ServerMessage};
