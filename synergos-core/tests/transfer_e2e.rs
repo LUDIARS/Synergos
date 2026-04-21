@@ -43,22 +43,15 @@ async fn execute_send_and_handle_incoming_roundtrip() {
         .unwrap();
 
     // サーバ側 accept + dispatcher を spawn
-    let dst_dir = std::env::temp_dir().join(format!(
-        "synergos-e2e-dst-{}",
-        uuid::Uuid::new_v4()
-    ));
+    let dst_dir = std::env::temp_dir().join(format!("synergos-e2e-dst-{}", uuid::Uuid::new_v4()));
     tokio::fs::create_dir_all(&dst_dir).await.unwrap();
 
     let event_bus_server: SharedEventBus = Arc::new(CoreEventBus::new());
-    let mut ex_server = Exchange::with_network(
-        event_bus_server.clone(),
-        server_id.peer_id().clone(),
-        None,
-    );
+    let mut ex_server =
+        Exchange::with_network(event_bus_server.clone(), server_id.peer_id().clone(), None);
     let dst_dir_clone = dst_dir.clone();
-    let resolver: OutPathResolver = Arc::new(move |_p, file_id: &FileId| {
-        Some(dst_dir_clone.join(&file_id.0))
-    });
+    let resolver: OutPathResolver =
+        Arc::new(move |_p, file_id: &FileId| Some(dst_dir_clone.join(&file_id.0)));
     ex_server.attach_quic(server_quic.clone(), resolver);
     let ex_server = Arc::new(ex_server);
 
@@ -69,30 +62,22 @@ async fn execute_send_and_handle_incoming_roundtrip() {
         if let Ok(Some(acc)) = sq.accept().await {
             let sender = acc.peer_id.clone();
             let connection = acc.connection;
-            loop {
-                match connection.accept_bi().await {
-                    Ok((send, mut recv)) => {
-                        let _ = send; // 受信側は不要
-                        let mut magic = [0u8; 4];
-                        if recv.read_exact(&mut magic).await.is_err() {
-                            continue;
-                        }
-                        if &magic == TRANSFER_STREAM_MAGIC {
-                            let _ = ex.handle_incoming_transfer(recv, sender.clone()).await;
-                        }
-                        break;
-                    }
-                    Err(_) => break,
+            while let Ok((send, mut recv)) = connection.accept_bi().await {
+                let _ = send; // 受信側は不要
+                let mut magic = [0u8; 4];
+                if recv.read_exact(&mut magic).await.is_err() {
+                    continue;
                 }
+                if &magic == TRANSFER_STREAM_MAGIC {
+                    let _ = ex.handle_incoming_transfer(recv, sender.clone()).await;
+                }
+                break;
             }
         }
     });
 
     // ソースファイルを用意
-    let src_dir = std::env::temp_dir().join(format!(
-        "synergos-e2e-src-{}",
-        uuid::Uuid::new_v4()
-    ));
+    let src_dir = std::env::temp_dir().join(format!("synergos-e2e-src-{}", uuid::Uuid::new_v4()));
     tokio::fs::create_dir_all(&src_dir).await.unwrap();
     let src_file = src_dir.join("sample.bin");
     let payload = (0..200u32)
@@ -110,11 +95,8 @@ async fn execute_send_and_handle_incoming_roundtrip() {
 
     // クライアント側 Exchange
     let event_bus_client: SharedEventBus = Arc::new(CoreEventBus::new());
-    let mut ex_client = Exchange::with_network(
-        event_bus_client.clone(),
-        client_id.peer_id().clone(),
-        None,
-    );
+    let mut ex_client =
+        Exchange::with_network(event_bus_client.clone(), client_id.peer_id().clone(), None);
     let dummy_resolver: OutPathResolver = Arc::new(|_, _| None);
     ex_client.attach_quic(client_quic.clone(), dummy_resolver);
     let ex_client = Arc::new(ex_client);

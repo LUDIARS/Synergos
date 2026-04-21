@@ -991,7 +991,10 @@ pub async fn dispatch_command(command: IpcCommand, ctx: &ServiceContext) -> IpcR
                 .collect();
             IpcResponse::ConflictList(items)
         }
-        IpcCommand::ConflictResolve { file_id, resolution } => {
+        IpcCommand::ConflictResolve {
+            file_id,
+            resolution,
+        } => {
             let res = match resolution.as_str() {
                 "keep_local" => crate::conflict::ConflictResolution::KeepLocal,
                 "accept_remote" => crate::conflict::ConflictResolution::AcceptRemote,

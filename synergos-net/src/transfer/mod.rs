@@ -205,10 +205,7 @@ where
 
 /// 受信ラッパ: magic は呼び出し側で既に消費済みの前提。QUIC recv half を
 /// そのまま `receive_stream` に渡す。
-pub async fn receive_over_quic(
-    recv: quinn::RecvStream,
-    out_path: &Path,
-) -> Result<TransferHeader> {
+pub async fn receive_over_quic(recv: quinn::RecvStream, out_path: &Path) -> Result<TransferHeader> {
     receive_stream(recv, out_path).await
 }
 

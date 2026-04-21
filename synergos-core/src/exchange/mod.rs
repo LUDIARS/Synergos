@@ -23,8 +23,7 @@ use crate::event_bus::{SharedEventBus, TransferCompletedEvent, TransferProgressE
 /// 受信側で転送の保存先を解決するためのレゾルバ。`(project_id, file_id)` から
 /// 最終的な書き込み先 `PathBuf` を返す。通常は ProjectManager 経由で
 /// プロジェクトルート + 相対パスを組み立てる想定。
-pub type OutPathResolver =
-    Arc<dyn Fn(&str, &FileId) -> Option<PathBuf> + Send + Sync + 'static>;
+pub type OutPathResolver = Arc<dyn Fn(&str, &FileId) -> Option<PathBuf> + Send + Sync + 'static>;
 
 /// QUIC 送信を進行しつつ 128KiB ごとに読み込んだ累積バイトを
 /// `tokio::sync::mpsc` で投げ出す `AsyncRead` ラッパ。
@@ -375,7 +374,12 @@ impl Exchange {
 
         // bidi ストリームを開く
         let (send, _recv) = quic
-            .open_stream(&target_peer, StreamType::Data { transfer_id: transfer_id.clone() })
+            .open_stream(
+                &target_peer,
+                StreamType::Data {
+                    transfer_id: transfer_id.clone(),
+                },
+            )
             .await
             .map_err(|e| FileSharingError::NetworkError(format!("open_stream: {e}")))?;
 
@@ -581,7 +585,10 @@ pub async fn spawn_send_after_share(
     };
     let _ = version; // 既存の ActiveTransfer.version に既に載っている
 
-    if let Err(e) = exchange.execute_send(transfer_id, target, path, header).await {
+    if let Err(e) = exchange
+        .execute_send(transfer_id, target, path, header)
+        .await
+    {
         tracing::warn!("execute_send failed: {e}");
     }
 }

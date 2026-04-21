@@ -27,9 +27,7 @@ pub fn show(ui: &mut egui::Ui, connection: &CoreConnection) {
     if conflicts.is_empty() {
         ui.label("No active conflicts.");
         ui.add_space(8.0);
-        ui.label(
-            "When file conflicts are detected between peers, they will appear here.",
-        );
+        ui.label("When file conflicts are detected between peers, they will appear here.");
         render_help(ui);
         return;
     }
@@ -50,24 +48,32 @@ pub fn show(ui: &mut egui::Ui, connection: &CoreConnection) {
 
                 for c in &conflicts {
                     ui.label(&c.file_path);
-                    ui.label(format!("{} ({})", c.local_version, truncate(&c.local_author)));
-                    ui.label(format!("{} ({})", c.remote_version, truncate(&c.remote_author)));
+                    ui.label(format!(
+                        "{} ({})",
+                        c.local_version,
+                        truncate(&c.local_author)
+                    ));
+                    ui.label(format!(
+                        "{} ({})",
+                        c.remote_version,
+                        truncate(&c.remote_author)
+                    ));
                     ui.label(&c.state);
                     ui.horizontal(|ui| {
-                        if ui.button("Keep Local").clicked() {
-                            if connection.resolve_conflict(&c.file_id, "keep_local") {
-                                connection.refresh_conflicts(None);
-                            }
+                        if ui.button("Keep Local").clicked()
+                            && connection.resolve_conflict(&c.file_id, "keep_local")
+                        {
+                            connection.refresh_conflicts(None);
                         }
-                        if ui.button("Accept Remote").clicked() {
-                            if connection.resolve_conflict(&c.file_id, "accept_remote") {
-                                connection.refresh_conflicts(None);
-                            }
+                        if ui.button("Accept Remote").clicked()
+                            && connection.resolve_conflict(&c.file_id, "accept_remote")
+                        {
+                            connection.refresh_conflicts(None);
                         }
-                        if ui.button("Manual").clicked() {
-                            if connection.resolve_conflict(&c.file_id, "manual_merge") {
-                                connection.refresh_conflicts(None);
-                            }
+                        if ui.button("Manual").clicked()
+                            && connection.resolve_conflict(&c.file_id, "manual_merge")
+                        {
+                            connection.refresh_conflicts(None);
                         }
                     });
                     ui.end_row();

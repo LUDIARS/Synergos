@@ -193,10 +193,7 @@ impl DhtNode {
                             None
                         }
                         Err(_) => {
-                            tracing::debug!(
-                                "find_peer_iterative: timeout from {}",
-                                peer.short()
-                            );
+                            tracing::debug!("find_peer_iterative: timeout from {}", peer.short());
                             None
                         }
                     }
@@ -217,7 +214,8 @@ impl DhtNode {
                             let rec = PeerRecord::from_dto(dto);
                             let pid = rec.peer_id.clone();
                             // routing table にも反映
-                            self.add_peer(pid.clone(), rec.endpoints.clone(), None).await;
+                            self.add_peer(pid.clone(), rec.endpoints.clone(), None)
+                                .await;
                             // 未問合せなら候補に入れる
                             if !queried.contains(&pid) && !candidates.contains(&pid) {
                                 candidates.push(pid);

@@ -34,7 +34,9 @@ fn tmp_dir() -> PathBuf {
 async fn project_open_rejects_duplicate() {
     let pm = ProjectManager::new(bus());
     let dir = tmp_dir();
-    pm.open_project("p1".into(), dir.clone(), None).await.unwrap();
+    pm.open_project("p1".into(), dir.clone(), None)
+        .await
+        .unwrap();
     let err = pm
         .open_project("p1".into(), dir.clone(), None)
         .await
@@ -52,10 +54,7 @@ async fn project_open_uses_fallback_display_name() {
         .await
         .unwrap();
     // Fallback: display_name が project_id になっているはず
-    let info = pm
-        .get_project("pAlpha")
-        .await
-        .expect("project exists");
+    let info = pm.get_project("pAlpha").await.expect("project exists");
     assert_eq!(info.display_name, "pAlpha");
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -85,10 +84,7 @@ async fn project_root_returns_registered_path() {
 #[tokio::test]
 async fn conflict_resolve_on_unknown_returns_err() {
     let cm = ConflictManager::new(bus());
-    let err = cm.resolve_conflict(
-        &FileId::new("nofile"),
-        ConflictResolution::KeepLocal,
-    );
+    let err = cm.resolve_conflict(&FileId::new("nofile"), ConflictResolution::KeepLocal);
     assert!(err.is_err());
 }
 
@@ -125,7 +121,10 @@ async fn exchange_fetch_registers_queued_transfer() {
         .unwrap();
     let info = ex.get_transfer(&id).await.expect("transfer stored");
     // Queued でも Matched (offer 先行があれば Running) でも OK
-    assert!(matches!(info.state, TransferState::Queued | TransferState::Running));
+    assert!(matches!(
+        info.state,
+        TransferState::Queued | TransferState::Running
+    ));
 }
 
 #[tokio::test]
@@ -192,9 +191,15 @@ async fn exchange_pause_resume_roundtrip() {
     // update_progress で Running にしてから pause
     ex.update_progress(&id, 1, 1);
     ex.pause_transfer(&id).await.unwrap();
-    assert_eq!(ex.get_transfer(&id).await.unwrap().state, TransferState::Paused);
+    assert_eq!(
+        ex.get_transfer(&id).await.unwrap().state,
+        TransferState::Paused
+    );
     ex.resume_transfer(&id).await.unwrap();
-    assert_eq!(ex.get_transfer(&id).await.unwrap().state, TransferState::Running);
+    assert_eq!(
+        ex.get_transfer(&id).await.unwrap().state,
+        TransferState::Running
+    );
 }
 
 // ── PresenceService ─────────────────────────────────────────────────

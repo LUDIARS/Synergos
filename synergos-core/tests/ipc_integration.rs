@@ -43,7 +43,10 @@ async fn run_server_once(
             Err(_) => return,
         };
         let resp = dispatch_command(cmd, &ctx).await;
-        if IpcTransport::write_message(&mut writer, &resp).await.is_err() {
+        if IpcTransport::write_message(&mut writer, &resp)
+            .await
+            .is_err()
+        {
             return;
         }
     }

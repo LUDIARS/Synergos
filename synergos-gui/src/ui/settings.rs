@@ -73,12 +73,11 @@ pub fn show(ui: &mut egui::Ui, connection: &CoreConnection) {
     // ── ネットワーク設定 編集 (#13) ──
     ui.collapsing("Network Tuning", |ui| {
         let id = ui.make_persistent_id("synergos_net_tuning");
-        let (mut mesh_n, mut max_streams, mut hostname, mut feedback) =
-            ui.memory_mut(|m| {
-                m.data
-                    .get_persisted::<(String, String, String, String)>(id)
-                    .unwrap_or_default()
-            });
+        let (mut mesh_n, mut max_streams, mut hostname, mut feedback) = ui.memory_mut(|m| {
+            m.data
+                .get_persisted::<(String, String, String, String)>(id)
+                .unwrap_or_default()
+        });
 
         egui::Grid::new("network_tuning_form")
             .num_columns(2)

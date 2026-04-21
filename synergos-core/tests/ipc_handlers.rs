@@ -3,12 +3,12 @@
 
 use std::sync::Arc;
 
+use synergos_core::conflict::ConflictManager;
 use synergos_core::event_bus::{CoreEventBus, SharedEventBus};
 use synergos_core::exchange::Exchange;
 use synergos_core::ipc_server::{dispatch_command, ServiceContext};
 use synergos_core::presence::PresenceService;
 use synergos_core::project::ProjectManager;
-use synergos_core::conflict::ConflictManager;
 use synergos_ipc::command::IpcCommand;
 use synergos_ipc::response::IpcResponse;
 use tokio::sync::broadcast;

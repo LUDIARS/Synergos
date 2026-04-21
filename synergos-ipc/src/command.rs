@@ -198,7 +198,10 @@ impl IpcCommand {
                 }
                 Ok(())
             }
-            Self::ConflictResolve { file_id, resolution } => {
+            Self::ConflictResolve {
+                file_id,
+                resolution,
+            } => {
                 check_id("file_id", file_id)?;
                 match resolution.as_str() {
                     "keep_local" | "accept_remote" | "manual_merge" => Ok(()),

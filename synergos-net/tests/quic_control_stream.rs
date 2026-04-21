@@ -37,17 +37,12 @@ async fn control_stream_byte_roundtrip() {
     let server_task = tokio::spawn(async move {
         if let Ok(Some(acc)) = sq.accept().await {
             if let Ok((mut send, mut recv)) = acc.connection.accept_bi().await {
-                let mut buf = vec![0u8; 64];
+                let mut buf = [0u8; 64];
                 let mut total = 0;
-                loop {
-                    match recv.read(&mut buf[total..]).await {
-                        Ok(Some(n)) => {
-                            total += n;
-                            if total >= 4 {
-                                break;
-                            }
-                        }
-                        _ => break,
+                while let Ok(Some(n)) = recv.read(&mut buf[total..]).await {
+                    total += n;
+                    if total >= 4 {
+                        break;
                     }
                 }
                 let _ = send.write_all(b"pong").await;
@@ -95,5 +90,7 @@ async fn list_connections_tracks_active_sessions() {
     let info = client.get_connection(server_id.peer_id()).unwrap();
     assert_eq!(info.peer_id, *server_id.peer_id());
 
-    tokio::time::timeout(Duration::from_millis(200), task).await.ok();
+    tokio::time::timeout(Duration::from_millis(200), task)
+        .await
+        .ok();
 }

@@ -497,9 +497,7 @@ pub struct AcceptedConnection {
 /// 取れない前提。よって今は remote_address から派生した仮 PeerId を返す。
 fn peer_id_from_connection(connection: &quinn::Connection) -> Result<PeerId> {
     if let Some(identity) = connection.peer_identity() {
-        if let Ok(certs) =
-            identity.downcast::<Vec<rustls::pki_types::CertificateDer<'static>>>()
-        {
+        if let Ok(certs) = identity.downcast::<Vec<rustls::pki_types::CertificateDer<'static>>>() {
             if let Some(cert) = certs.first() {
                 if let Some(peer_id) = verifier::peer_id_from_cert(cert.as_ref()) {
                     return Ok(peer_id);
@@ -528,15 +526,12 @@ fn build_server_cert(
         .to_pkcs8_der()
         .map_err(|e| SynergosNetError::Quic(format!("identity pkcs8 export: {e}")))?;
 
-    let key_pair =
-        rcgen::KeyPair::try_from(pkcs8.as_slice())
-            .map_err(|e| SynergosNetError::Quic(format!("rcgen keypair: {e}")))?;
+    let key_pair = rcgen::KeyPair::try_from(pkcs8.as_slice())
+        .map_err(|e| SynergosNetError::Quic(format!("rcgen keypair: {e}")))?;
 
-    let mut params = rcgen::CertificateParams::new(vec![
-        "synergos".to_string(),
-        identity.peer_id().to_string(),
-    ])
-    .map_err(|e| SynergosNetError::Quic(format!("rcgen params: {e}")))?;
+    let mut params =
+        rcgen::CertificateParams::new(vec!["synergos".to_string(), identity.peer_id().to_string()])
+            .map_err(|e| SynergosNetError::Quic(format!("rcgen params: {e}")))?;
     params
         .distinguished_name
         .push(rcgen::DnType::CommonName, identity.peer_id().to_string());

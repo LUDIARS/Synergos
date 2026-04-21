@@ -8,9 +8,7 @@
 use std::time::{Duration, Instant};
 
 use synergos_net::catalog::CatalogManager;
-use synergos_net::chain::{
-    LedgerAction, LedgerEntryState, OfferEntry, TransferLedger, WantEntry,
-};
+use synergos_net::chain::{LedgerAction, LedgerEntryState, OfferEntry, TransferLedger, WantEntry};
 use synergos_net::config::MeshConfig;
 use synergos_net::dht::rpc::RouteDto;
 use synergos_net::mesh::Mesh;

@@ -67,17 +67,10 @@ async fn find_node_over_quic_resolves_target_via_server_announce() {
     let server_task = tokio::spawn(async move {
         if let Ok(Some(acc)) = sq.accept().await {
             let connection = acc.connection;
-            loop {
-                match connection.accept_bi().await {
-                    Ok((send, mut recv)) => {
-                        let mut magic = [0u8; 4];
-                        if recv.read_exact(&mut magic).await.is_ok()
-                            && &magic == b"DHT1"
-                        {
-                            let _ = handle_dht_stream(sdht.clone(), send, recv).await;
-                        }
-                    }
-                    Err(_) => break,
+            while let Ok((send, mut recv)) = connection.accept_bi().await {
+                let mut magic = [0u8; 4];
+                if recv.read_exact(&mut magic).await.is_ok() && &magic == b"DHT1" {
+                    let _ = handle_dht_stream(sdht.clone(), send, recv).await;
                 }
             }
         }
@@ -112,5 +105,7 @@ async fn find_node_over_quic_resolves_target_via_server_announce() {
     client_quic
         .disconnect(server_id_entity.peer_id(), "done")
         .await;
-    tokio::time::timeout(Duration::from_millis(200), server_task).await.ok();
+    tokio::time::timeout(Duration::from_millis(200), server_task)
+        .await
+        .ok();
 }

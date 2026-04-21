@@ -127,10 +127,11 @@ impl Daemon {
         // 必要あり — 暫定で FileId をそのまま相対パスとして扱う)。
         {
             let pm = project_manager.clone();
-            let resolver: crate::exchange::OutPathResolver = Arc::new(move |project_id, file_id| {
-                let root = pm.project_root(project_id)?;
-                Some(root.join(file_id.0.clone()))
-            });
+            let resolver: crate::exchange::OutPathResolver =
+                Arc::new(move |project_id, file_id| {
+                    let root = pm.project_root(project_id)?;
+                    Some(root.join(file_id.0.clone()))
+                });
             exchange_inner.attach_quic(net.quic.clone(), resolver);
         }
         let exchange = Arc::new(exchange_inner);
