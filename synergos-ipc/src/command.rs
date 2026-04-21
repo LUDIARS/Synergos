@@ -86,3 +86,138 @@ pub enum IpcCommand {
     /// イベント購読解除
     Unsubscribe { subscription_id: String },
 }
+
+impl IpcCommand {
+    /// 入力バリデーション。dispatcher が処理に入る前に呼ばれ、Err なら
+    /// 不正コマンドとして即座に Error 応答を返す。
+    ///
+    /// 主なチェック:
+    /// - 識別子の空文字 (project_id / peer_id / file_id 等)
+    /// - 過大な長さ (DoS 防止: 1 KiB を超える文字列はカット)
+    /// - PublishUpdate.file_paths は空でないこと、上限 1024 件
+    pub fn validate(&self) -> Result<(), String> {
+        const MAX_ID_LEN: usize = 1024;
+        const MAX_PATHS_PER_PUBLISH: usize = 1024;
+
+        let check_id = |label: &str, s: &str| -> Result<(), String> {
+            if s.trim().is_empty() {
+                Err(format!("{label} must not be empty"))
+            } else if s.len() > MAX_ID_LEN {
+                Err(format!("{label} too long ({} > {MAX_ID_LEN})", s.len()))
+            } else {
+                Ok(())
+            }
+        };
+
+        match self {
+            Self::Ping
+            | Self::Shutdown
+            | Self::Status
+            | Self::NetworkStatus
+            | Self::ProjectList => Ok(()),
+
+            Self::ProjectOpen { project_id, .. }
+            | Self::ProjectClose { project_id }
+            | Self::ProjectGet { project_id }
+            | Self::ProjectCreateInvite { project_id, .. }
+            | Self::PeerList { project_id }
+            | Self::ProjectUpdate { project_id, .. } => check_id("project_id", project_id),
+
+            Self::ProjectJoin { invite_token, .. } => check_id("invite_token", invite_token),
+
+            Self::PeerConnect {
+                project_id,
+                peer_id,
+            } => {
+                check_id("project_id", project_id)?;
+                check_id("peer_id", peer_id)
+            }
+            Self::PeerDisconnect { peer_id } => check_id("peer_id", peer_id),
+
+            Self::TransferRequest {
+                project_id,
+                file_id,
+                peer_id,
+            } => {
+                check_id("project_id", project_id)?;
+                check_id("file_id", file_id)?;
+                check_id("peer_id", peer_id)
+            }
+            Self::TransferList { project_id } => {
+                if let Some(p) = project_id {
+                    check_id("project_id", p)?;
+                }
+                Ok(())
+            }
+            Self::TransferCancel { transfer_id } => check_id("transfer_id", transfer_id),
+
+            Self::PublishUpdate {
+                project_id,
+                file_paths,
+            } => {
+                check_id("project_id", project_id)?;
+                if file_paths.is_empty() {
+                    return Err("file_paths must not be empty".into());
+                }
+                if file_paths.len() > MAX_PATHS_PER_PUBLISH {
+                    return Err(format!(
+                        "too many file_paths ({} > {MAX_PATHS_PER_PUBLISH})",
+                        file_paths.len()
+                    ));
+                }
+                Ok(())
+            }
+
+            Self::Subscribe { .. } => Ok(()),
+            Self::Unsubscribe { subscription_id } => check_id("subscription_id", subscription_id),
+        }
+    }
+}
+
+#[cfg(test)]
+mod validate_tests {
+    use super::*;
+
+    #[test]
+    fn empty_project_id_rejected() {
+        let cmd = IpcCommand::ProjectClose {
+            project_id: "".into(),
+        };
+        assert!(cmd.validate().is_err());
+    }
+
+    #[test]
+    fn whitespace_only_id_rejected() {
+        let cmd = IpcCommand::PeerDisconnect {
+            peer_id: "   ".into(),
+        };
+        assert!(cmd.validate().is_err());
+    }
+
+    #[test]
+    fn long_id_rejected() {
+        let cmd = IpcCommand::ProjectClose {
+            project_id: "x".repeat(2048),
+        };
+        assert!(cmd.validate().is_err());
+    }
+
+    #[test]
+    fn empty_publish_paths_rejected() {
+        let cmd = IpcCommand::PublishUpdate {
+            project_id: "p".into(),
+            file_paths: vec![],
+        };
+        assert!(cmd.validate().is_err());
+    }
+
+    #[test]
+    fn happy_path_passes() {
+        let cmd = IpcCommand::TransferRequest {
+            project_id: "p".into(),
+            file_id: "f".into(),
+            peer_id: "x".into(),
+        };
+        cmd.validate().unwrap();
+    }
+}
