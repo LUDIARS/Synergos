@@ -69,10 +69,11 @@ impl SynergosNet {
     /// Network Foundation を起動する
     pub fn new(
         config: NetConfig,
-        local_peer_id: PeerId,
+        identity: Arc<Identity>,
         project_id: String,
         handler: Arc<dyn NetEventHandler>,
     ) -> Self {
+        let local_peer_id = identity.peer_id().clone();
         let dht = DhtNode::new(local_peer_id.clone(), config.dht.clone());
         let gossip = GossipNode::new(local_peer_id, config.gossipsub.clone());
         let catalog = CatalogManager::new(
@@ -81,7 +82,7 @@ impl SynergosNet {
             config.catalog.chain_max_depth,
         );
         let ledger = TransferLedger::new();
-        let quic = Arc::new(QuicManager::new(config.quic.clone()));
+        let quic = Arc::new(QuicManager::new(config.quic.clone(), identity));
         let tunnel = Arc::new(TunnelManager::new(&config.tunnel));
         let mesh = Arc::new(Mesh::new(config.mesh.clone()));
         let conduit = Conduit::new(

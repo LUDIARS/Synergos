@@ -4,18 +4,8 @@
 //! EventBus + IPC サーバーを提供し、GUI / CLI / Ars Plugin からの
 //! コマンドを受け付ける。
 
-mod cli;
-mod daemon;
-mod event_bus;
-mod ipc_server;
-mod project;
-
-pub mod conflict;
-pub mod exchange;
-pub mod presence;
-
 use clap::Parser;
-use cli::Cli;
+use synergos_core::cli::{self, Cli};
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]

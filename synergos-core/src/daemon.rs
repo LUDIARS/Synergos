@@ -8,8 +8,16 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::broadcast;
 
 use synergos_net::{
-    conduit::Conduit, config::NetConfig, dht::DhtNode, gossip::GossipNode, mesh::Mesh,
-    quic::QuicManager, tunnel::TunnelManager, types::PeerId,
+    conduit::Conduit,
+    config::NetConfig,
+    dht::{handle_dht_stream, DhtNode, DHT_STREAM_MAGIC},
+    gossip::GossipNode,
+    identity::Identity,
+    mesh::Mesh,
+    quic::QuicManager,
+    transfer::TRANSFER_STREAM_MAGIC,
+    tunnel::TunnelManager,
+    types::PeerId,
 };
 
 use crate::conflict::ConflictManager;
@@ -41,6 +49,7 @@ impl Default for DaemonConfig {
 /// ネットワーク基盤のハンドル群（Daemon が保持して寿命を合わせる）
 pub struct NetworkHandles {
     pub local_peer_id: PeerId,
+    pub identity: Arc<Identity>,
     pub net_config: Arc<NetConfig>,
     pub dht: Arc<DhtNode>,
     pub gossip: Arc<GossipNode>,
@@ -66,8 +75,12 @@ impl Daemon {
             .map_err(|e| anyhow::anyhow!("invalid net config: {e}"))?;
         let net_config = Arc::new(net_config);
 
-        // ── ローカル識別子（永続化は別途：TODO） ──
-        let local_peer_id = PeerId::generate();
+        // ── ローカル識別子（ed25519 キー + BLAKE3 派生 PeerId を永続化） ──
+        let identity = Arc::new(
+            Identity::load_or_generate(&Identity::default_path())
+                .map_err(|e| anyhow::anyhow!("identity init failed: {e}"))?,
+        );
+        let local_peer_id = identity.peer_id().clone();
 
         // ── ネットワーク基盤コンポーネント ──
         let dht = Arc::new(DhtNode::new(local_peer_id.clone(), net_config.dht.clone()));
@@ -75,7 +88,7 @@ impl Daemon {
             local_peer_id.clone(),
             net_config.gossipsub.clone(),
         ));
-        let quic = Arc::new(QuicManager::new(net_config.quic.clone()));
+        let quic = Arc::new(QuicManager::new(net_config.quic.clone(), identity.clone()));
         let tunnel = Arc::new(TunnelManager::new(&net_config.tunnel));
         let mesh = Arc::new(Mesh::new(net_config.mesh.clone()));
         let conduit = Arc::new(Conduit::new(
@@ -87,6 +100,7 @@ impl Daemon {
 
         let net = Arc::new(NetworkHandles {
             local_peer_id: local_peer_id.clone(),
+            identity,
             net_config,
             dht: dht.clone(),
             gossip: gossip.clone(),
@@ -102,11 +116,24 @@ impl Daemon {
             event_bus.clone(),
             Some(gossip.clone()),
         ));
-        let exchange = Arc::new(Exchange::with_network(
+        let mut exchange_inner = Exchange::with_network(
             event_bus.clone(),
             local_peer_id.clone(),
             Some(gossip.clone()),
-        ));
+        );
+        // QUIC と受信先レゾルバを注入する。
+        // リゾルバは ProjectManager からプロジェクトルートを引いて FileId を
+        // 相対パスとして連結する (実運用では file_id に path 情報を持たせる
+        // 必要あり — 暫定で FileId をそのまま相対パスとして扱う)。
+        {
+            let pm = project_manager.clone();
+            let resolver: crate::exchange::OutPathResolver = Arc::new(move |project_id, file_id| {
+                let root = pm.project_root(project_id)?;
+                Some(root.join(file_id.0.clone()))
+            });
+            exchange_inner.attach_quic(net.quic.clone(), resolver);
+        }
+        let exchange = Arc::new(exchange_inner);
         let presence = Arc::new(PresenceService::with_network(
             event_bus.clone(),
             Some(dht.clone()),
@@ -164,6 +191,13 @@ impl Daemon {
             self.ctx.shutdown_tx.subscribe(),
         );
 
+        // QUIC 着信ストリームディスパッチャ (DHT / Transfer を magic で振り分け)
+        let quic_accept_task = spawn_quic_accept_loop(
+            self.net.clone(),
+            self.ctx.clone(),
+            self.ctx.shutdown_tx.subscribe(),
+        );
+
         // IPC サーバーを実行（シャットダウンまでブロック）
         ipc_server.run().await?;
 
@@ -171,6 +205,7 @@ impl Daemon {
         signal_task.abort();
         cleanup_task.abort();
         heartbeat_task.abort();
+        quic_accept_task.abort();
 
         // グレースフルシャットダウン
         self.shutdown().await?;
@@ -281,6 +316,90 @@ fn spawn_periodic_cleanup(
             }
         }
     })
+}
+
+/// QUIC 着信ストリームを受け付け、magic バイトで DHT / Transfer にディスパッチする。
+///
+/// 今のところ `QuicManager::accept` で受け取った Connection から `accept_bi()` を
+/// ループで拾い、1 bidi ストリームごとに:
+///   1. 先頭 4 byte を読んで magic を判定
+///   2. DHT なら `handle_dht_stream` に委譲
+///   3. Transfer なら `Exchange::handle_incoming_transfer` に委譲
+fn spawn_quic_accept_loop(
+    net: Arc<NetworkHandles>,
+    ctx: Arc<ServiceContext>,
+    mut shutdown_rx: broadcast::Receiver<()>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = shutdown_rx.recv() => break,
+                accepted = net.quic.accept() => {
+                    match accepted {
+                        Ok(Some(acc)) => {
+                            let dht = net.dht.clone();
+                            let exchange = ctx.exchange.clone();
+                            let sender = acc.peer_id.clone();
+                            let connection = acc.connection;
+                            tokio::spawn(async move {
+                                dispatch_peer_streams(connection, sender, dht, exchange).await;
+                            });
+                        }
+                        Ok(None) => {
+                            tracing::debug!("quic accept returned None (endpoint closed); exiting loop");
+                            break;
+                        }
+                        Err(e) => {
+                            tracing::warn!("quic accept error: {e}");
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                        }
+                    }
+                }
+            }
+        }
+    })
+}
+
+/// 1 つの QUIC コネクションから bidi ストリームをループで受け、先頭 magic で
+/// DHT / Transfer に振り分ける。コネクションが閉じられたらループを抜ける。
+async fn dispatch_peer_streams(
+    connection: quinn::Connection,
+    sender: PeerId,
+    dht: Arc<DhtNode>,
+    exchange: Arc<crate::exchange::Exchange>,
+) {
+    loop {
+        let (send, mut recv) = match connection.accept_bi().await {
+            Ok(pair) => pair,
+            Err(e) => {
+                tracing::debug!("connection {} closed: {e}", sender.short());
+                return;
+            }
+        };
+
+        let mut magic = [0u8; 4];
+        if let Err(e) = recv.read_exact(&mut magic).await {
+            tracing::debug!("stream magic read failed from {}: {e}", sender.short());
+            continue;
+        }
+
+        let dht = dht.clone();
+        let exchange = exchange.clone();
+        let sender_cloned = sender.clone();
+        tokio::spawn(async move {
+            if &magic == DHT_STREAM_MAGIC {
+                if let Err(e) = handle_dht_stream(dht, send, recv).await {
+                    tracing::debug!("DHT stream handler error: {e}");
+                }
+            } else if &magic == TRANSFER_STREAM_MAGIC {
+                if let Err(e) = exchange.handle_incoming_transfer(recv, sender_cloned).await {
+                    tracing::debug!("Transfer stream handler error: {e}");
+                }
+            } else {
+                tracing::debug!("unknown stream magic {:?}", magic);
+            }
+        });
+    }
 }
 
 /// Gossipsub ハートビート

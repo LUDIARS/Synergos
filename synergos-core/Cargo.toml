@@ -17,6 +17,9 @@ synergos-ipc = { path = "../synergos-ipc" }
 tokio = { version = "1", features = ["full"] }
 async-trait = "0.1"
 
+# QUIC (for transfer stream handling)
+quinn = "0.11"
+
 # Crypto / Hash
 blake3 = "1"
 

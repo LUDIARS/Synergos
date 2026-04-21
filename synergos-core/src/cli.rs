@@ -6,7 +6,7 @@
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
-use crate::daemon::Daemon;
+use crate::daemon::{Daemon, DaemonConfig};
 
 /// Synergos Core Daemon
 #[derive(Parser)]
@@ -146,7 +146,7 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
         Command::Start { config } => {
             tracing::info!("Starting Synergos core daemon...");
-            let daemon_config = crate::daemon::DaemonConfig {
+            let daemon_config = DaemonConfig {
                 config_path: config,
                 ..Default::default()
             };
