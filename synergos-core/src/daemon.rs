@@ -199,6 +199,14 @@ impl Daemon {
             self.ctx.shutdown_tx.subscribe(),
         );
 
+        // Gossip サブスクライバ: FileWant / FileOffer を Exchange に配線する。
+        // これで Synergos 既存の gossip チャネルだけで自動更新がドライブする。
+        let gossip_sub_task = spawn_gossip_subscriber(
+            self.net.gossip.clone(),
+            self.ctx.clone(),
+            self.ctx.shutdown_tx.subscribe(),
+        );
+
         // IPC サーバーを実行（シャットダウンまでブロック）
         ipc_server.run().await?;
 
@@ -207,6 +215,7 @@ impl Daemon {
         cleanup_task.abort();
         heartbeat_task.abort();
         quic_accept_task.abort();
+        gossip_sub_task.abort();
 
         // グレースフルシャットダウン
         self.shutdown().await?;
@@ -423,6 +432,47 @@ async fn dispatch_peer_streams(
             }
         });
     }
+}
+
+/// Gossip メッセージサブスクライバ。`GossipNode::receiver()` で購読し、
+/// `FileWant` / `FileOffer` を `Exchange::handle_file_want` /
+/// `handle_file_offer` に流す。
+///
+/// これにより「誰かがファイル A を Want した」→「A を持っている自分が
+/// gossip 経由で気付く」→「QUIC の `TXFR` ストリームを開いて実データを
+/// 送る」という完全な自動更新チェーンが Synergos 既存の gossip + ledger +
+/// conduit 経路だけで成立する。IPC からの直接コマンドには依存しない。
+fn spawn_gossip_subscriber(
+    gossip: Arc<GossipNode>,
+    ctx: Arc<ServiceContext>,
+    mut shutdown_rx: broadcast::Receiver<()>,
+) -> tokio::task::JoinHandle<()> {
+    let mut rx = gossip.receiver();
+    tokio::spawn(async move {
+        use synergos_net::gossip::GossipMessage;
+        loop {
+            tokio::select! {
+                _ = shutdown_rx.recv() => break,
+                msg = rx.recv() => {
+                    match msg {
+                        Ok((_topic, GossipMessage::FileWant { requester, file_id, version })) => {
+                            ctx.exchange.handle_file_want(requester, file_id, version);
+                        }
+                        Ok((_topic, GossipMessage::FileOffer { sender, file_id, version, size, crc, content_hash: _ })) => {
+                            ctx.exchange.handle_file_offer(sender, file_id, version, size, crc);
+                        }
+                        Ok(_) => {
+                            // CatalogUpdate / PeerStatus / ConflictAlert は別系統で処理
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                            tracing::warn!("gossip subscriber lagged; dropped {n} messages");
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            }
+        }
+    })
 }
 
 /// Gossipsub ハートビート

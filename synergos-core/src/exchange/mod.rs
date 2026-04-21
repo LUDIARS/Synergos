@@ -229,6 +229,17 @@ pub trait FileSharing: Send + Sync {
 
 use synergos_net::types::now_ms;
 
+/// ローカルが「送信可能 (Offer 済)」として保持するファイルの記録。
+/// FileWant を受けたときに即座に送信を起動するのに必要な項目。
+#[derive(Debug, Clone)]
+pub struct SharedFileRecord {
+    pub project_id: String,
+    pub file_path: PathBuf,
+    pub file_size: u64,
+    pub crc: u32,
+    pub version: u64,
+}
+
 /// ファイル転送制御サービス
 pub struct Exchange {
     event_bus: SharedEventBus,
@@ -242,6 +253,9 @@ pub struct Exchange {
     quic: Option<Arc<QuicManager>>,
     /// 受信時に保存先パスを解決するレゾルバ
     out_path_resolver: Option<OutPathResolver>,
+    /// ローカルが share_file / publish_updates で登録したファイル
+    /// (FileWant 受信時に send_and_share を起動する材料にする)
+    shared_files: DashMap<FileId, SharedFileRecord>,
     /// ローカルピアID
     local_peer_id: PeerId,
 }
@@ -265,6 +279,7 @@ impl Exchange {
             gossip,
             quic: None,
             out_path_resolver: None,
+            shared_files: DashMap::new(),
             local_peer_id,
         }
     }
@@ -472,6 +487,104 @@ impl Exchange {
         Ok(())
     }
 
+    /// Gossip で `FileWant` を受信したときのハンドラ。
+    /// 自ノードが該当ファイルを `share_file` / `publish_updates` 経由で
+    /// 登録済 (= `shared_files` にある) 場合、要求ピアに対して QUIC で
+    /// 実データをプッシュする (Synergos 既存の共有ルート経由)。
+    ///
+    /// 既に該当 peer へ同じバージョンを送ったことがあれば ledger の
+    /// `mark_fulfilled` でスキップされる想定。
+    pub fn handle_file_want(self: &Arc<Self>, requester: PeerId, file_id: FileId, version: u64) {
+        if requester == self.local_peer_id {
+            return; // 自分の Want は無視
+        }
+        let record = match self.shared_files.get(&file_id) {
+            Some(r) => r.value().clone(),
+            None => {
+                tracing::debug!(
+                    "handle_file_want: no local offer for {} (requester={})",
+                    file_id,
+                    requester.short()
+                );
+                return;
+            }
+        };
+        // 要求バージョン 0 = 任意の最新、それ以外は一致するバージョンのみ
+        if version != 0 && version != record.version {
+            tracing::debug!(
+                "handle_file_want: version mismatch (want v{version}, have v{})",
+                record.version
+            );
+            return;
+        }
+        if self.quic.is_none() {
+            tracing::debug!("handle_file_want: QUIC not attached, cannot auto-send");
+            return;
+        }
+
+        let ex = self.clone();
+        let req = ShareRequest {
+            project_id: record.project_id.clone(),
+            file_id: file_id.clone(),
+            file_path: record.file_path.clone(),
+            file_size: record.file_size,
+            checksum: synergos_net::types::Blake3Hash::default(),
+            priority: TransferPriority::Interactive,
+            target_peer: Some(requester.clone()),
+            version: record.version,
+        };
+        tokio::spawn(async move {
+            tracing::info!(
+                "auto-sending {} v{} to {} via FileWant",
+                file_id,
+                record.version,
+                requester.short()
+            );
+            if let Err(e) = share_and_send(ex, req).await {
+                tracing::warn!("auto-send via FileWant failed: {e}");
+            }
+        });
+    }
+
+    /// Gossip で `FileOffer` を受信したときのハンドラ。
+    /// リモートの Offer を TransferLedger に登録し、自分の保留 Want と
+    /// マッチしたらログを出す (実受信は相手側が開く QUIC ストリームを
+    /// Daemon のディスパッチャが handle_incoming_transfer に流すので
+    /// ここで別途 fetch を起動する必要はない)。
+    pub fn handle_file_offer(
+        &self,
+        sender: PeerId,
+        file_id: FileId,
+        version: u64,
+        file_size: u64,
+        crc: u32,
+    ) {
+        if sender == self.local_peer_id {
+            return;
+        }
+        let offer = OfferEntry {
+            sender: sender.clone(),
+            file_id: file_id.clone(),
+            version,
+            file_size,
+            crc,
+            offered_at: now_ms(),
+            state: LedgerEntryState::Pending,
+        };
+        let actions = self.ledger.register_offer(offer);
+        for action in actions {
+            if let LedgerAction::Match { sender, file_size } = action {
+                tracing::info!(
+                    "FileOffer matched a pending Want: sender={}, size={}",
+                    sender.short(),
+                    file_size
+                );
+                // 相手 (sender) が我々の FileWant を受けて QUIC push する。
+                // こちら側は Daemon の accept ループが自動で受信する。
+            }
+        }
+    }
+
     /// 転送を失敗状態に遷移
     fn fail_transfer(&self, transfer_id: &TransferId, reason: String) {
         if let Some(mut entry) = self.transfers.get_mut(transfer_id) {
@@ -645,6 +758,18 @@ impl FileSharing for Exchange {
         let actions = self.ledger.register_offer(offer);
         tracing::debug!("Ledger offer registered, actions: {}", actions.len());
 
+        // FileWant 到着時に即転送起動できるよう、path とメタを保存
+        self.shared_files.insert(
+            request.file_id.clone(),
+            SharedFileRecord {
+                project_id: request.project_id.clone(),
+                file_path: request.file_path.clone(),
+                file_size: request.file_size,
+                crc: crc32fast::hash(&request.checksum.0),
+                version: request.version,
+            },
+        );
+
         // Gossipsub で FileOffer をブロードキャスト
         self.broadcast_offer(
             &request.project_id,
@@ -742,7 +867,7 @@ impl FileSharing for Exchange {
                 notif.version
             );
 
-            // TransferLedger に各ファ��ルの Offer を登録
+            // TransferLedger に各ファイルの Offer を登録
             let offer = OfferEntry {
                 sender: self.local_peer_id.clone(),
                 file_id: notif.file_id.clone(),
@@ -753,6 +878,18 @@ impl FileSharing for Exchange {
                 state: LedgerEntryState::Pending,
             };
             self.ledger.register_offer(offer);
+
+            // 受信した FileWant に自動応答するため shared_files にも登録
+            self.shared_files.insert(
+                notif.file_id.clone(),
+                SharedFileRecord {
+                    project_id: notif.project_id.clone(),
+                    file_path: notif.file_path.clone(),
+                    file_size: notif.file_size,
+                    crc: notif.crc,
+                    version: notif.version,
+                },
+            );
 
             // Gossipsub で FileOffer をブロードキャスト
             self.broadcast_offer(
