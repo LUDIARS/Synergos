@@ -846,6 +846,7 @@ pub async fn dispatch_command(command: IpcCommand, ctx: &ServiceContext) -> IpcR
                 }
             };
 
+            use synergos_net::types::redact_path;
             let mut notifications: Vec<PublishNotification> = Vec::with_capacity(file_paths.len());
             for path in &file_paths {
                 let absolute = if path.is_absolute() {
@@ -858,7 +859,10 @@ pub async fn dispatch_command(command: IpcCommand, ctx: &ServiceContext) -> IpcR
                     Err(e) => {
                         return IpcResponse::Error {
                             code: 3,
-                            message: format!("file not found or unreadable: {:?}: {e}", absolute),
+                            message: format!(
+                                "file not found or unreadable: {}: {e}",
+                                redact_path(&project_root, &absolute)
+                            ),
                         };
                     }
                 };
@@ -866,8 +870,8 @@ pub async fn dispatch_command(command: IpcCommand, ctx: &ServiceContext) -> IpcR
                     return IpcResponse::Error {
                         code: 3,
                         message: format!(
-                            "file outside project root: {:?} (root: {:?})",
-                            canonical, project_root
+                            "file outside project root: {}",
+                            redact_path(&project_root, &canonical)
                         ),
                     };
                 }
@@ -877,7 +881,10 @@ pub async fn dispatch_command(command: IpcCommand, ctx: &ServiceContext) -> IpcR
                     Err(e) => {
                         return IpcResponse::Error {
                             code: 3,
-                            message: format!("metadata failed {:?}: {e}", canonical),
+                            message: format!(
+                                "metadata failed {}: {e}",
+                                redact_path(&project_root, &canonical)
+                            ),
                         };
                     }
                 };
@@ -887,7 +894,10 @@ pub async fn dispatch_command(command: IpcCommand, ctx: &ServiceContext) -> IpcR
                     Err(e) => {
                         return IpcResponse::Error {
                             code: 3,
-                            message: format!("read failed {:?}: {e}", canonical),
+                            message: format!(
+                                "read failed {}: {e}",
+                                redact_path(&project_root, &canonical)
+                            ),
                         };
                     }
                 };
@@ -956,5 +966,59 @@ pub async fn dispatch_command(command: IpcCommand, ctx: &ServiceContext) -> IpcR
         // 処理するため、ここに届くことはない。保険として Ok を返す。
         IpcCommand::Subscribe { .. } => IpcResponse::Ok,
         IpcCommand::Unsubscribe { .. } => IpcResponse::Ok,
+
+        IpcCommand::ConflictList { project_id } => {
+            let items = ctx
+                .conflict_manager
+                .list_conflicts(project_id.as_deref())
+                .into_iter()
+                .map(|c| synergos_ipc::response::ConflictInfoDto {
+                    file_id: c.file_id.to_string(),
+                    file_path: c.file_path,
+                    project_id: c.project_id,
+                    local_version: c.local_version,
+                    local_author: c.local_author.to_string(),
+                    remote_version: c.remote_version,
+                    remote_author: c.remote_author.to_string(),
+                    detected_at: c.detected_at,
+                    state: match c.state {
+                        crate::conflict::ConflictState::Active => "active".into(),
+                        crate::conflict::ConflictState::Resolved { resolution } => {
+                            format!("resolved:{:?}", resolution)
+                        }
+                    },
+                })
+                .collect();
+            IpcResponse::ConflictList(items)
+        }
+        IpcCommand::ConflictResolve { file_id, resolution } => {
+            let res = match resolution.as_str() {
+                "keep_local" => crate::conflict::ConflictResolution::KeepLocal,
+                "accept_remote" => crate::conflict::ConflictResolution::AcceptRemote,
+                "manual_merge" => crate::conflict::ConflictResolution::ManualMerge,
+                other => {
+                    return IpcResponse::Error {
+                        code: 4,
+                        message: format!("invalid resolution: {other}"),
+                    }
+                }
+            };
+            match ctx
+                .conflict_manager
+                .resolve_conflict(&synergos_net::types::FileId::new(file_id), res)
+            {
+                Ok(_) => IpcResponse::Ok,
+                Err(e) => IpcResponse::Error {
+                    code: 4,
+                    message: e.to_string(),
+                },
+            }
+        }
+        IpcCommand::ConfigUpdate { .. } => {
+            // 現状はホット差替えなしで、将来の完全対応までは受理のみ。
+            // デーモンを再起動するかどうかは呼び出し側が決定する。
+            tracing::info!("ConfigUpdate received; no hot-swap implemented yet");
+            IpcResponse::Ok
+        }
     }
 }

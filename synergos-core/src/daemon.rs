@@ -309,6 +309,28 @@ fn spawn_periodic_cleanup(
                             ctx.presence.update_bandwidth(&info.peer_id, bw);
                         }
                     }
+
+                    // Route Migration: 各接続済みピアに対して try_migrate_route を呼び、
+                    // より高優先度の経路が開通していれば切り替える (S-route)。
+                    // QUIC のアクティブリストを元にするのでオフラインピアは触らない。
+                    for info in net.quic.list_connections() {
+                        match net.conduit.try_migrate_route(&info.peer_id).await {
+                            Ok(Some(new_route)) => {
+                                tracing::debug!(
+                                    "route migrated for {}: {:?}",
+                                    info.peer_id.short(),
+                                    new_route
+                                );
+                            }
+                            Ok(None) => {}
+                            Err(e) => {
+                                tracing::debug!(
+                                    "route migration attempt for {} failed: {e}",
+                                    info.peer_id.short()
+                                );
+                            }
+                        }
+                    }
                 }
                 _ = shutdown_rx.recv() => {
                     break;

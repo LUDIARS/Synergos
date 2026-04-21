@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 
 use synergos_ipc::command::IpcCommand;
 use synergos_ipc::response::{
-    DaemonStatus, NetworkStatusInfo, PeerInfo, ProjectInfo, TransferInfo,
+    ConflictInfoDto, DaemonStatus, NetworkStatusInfo, PeerInfo, ProjectInfo, TransferInfo,
 };
 
 /// Core デーモンへの接続状態
@@ -27,6 +27,7 @@ pub struct ConnectionCache {
     pub peers: Vec<PeerInfo>,
     pub transfers: Vec<TransferInfo>,
     pub network: Option<NetworkStatusInfo>,
+    pub conflicts: Vec<ConflictInfoDto>,
     /// 最後にリフレッシュした時刻
     pub last_refresh: Option<std::time::Instant>,
 }
@@ -201,6 +202,46 @@ impl CoreConnection {
             project_id: project_id.into(),
             file_id: file_id.into(),
             peer_id: peer_id.into(),
+        });
+        matches!(resp, Some(synergos_ipc::IpcResponse::Ok))
+    }
+
+    // ── コンフリクト (#13) ──
+
+    /// コンフリクト一覧をリフレッシュ
+    pub fn refresh_conflicts(&self, project_id: Option<&str>) {
+        let resp = self.send_command(IpcCommand::ConflictList {
+            project_id: project_id.map(String::from),
+        });
+        if let Some(synergos_ipc::IpcResponse::ConflictList(items)) = resp {
+            let mut cache = self.cache.lock().unwrap();
+            cache.conflicts = items;
+        }
+    }
+
+    /// コンフリクトを解決する。
+    /// `resolution` は "keep_local" / "accept_remote" / "manual_merge"。
+    pub fn resolve_conflict(&self, file_id: &str, resolution: &str) -> bool {
+        let resp = self.send_command(IpcCommand::ConflictResolve {
+            file_id: file_id.into(),
+            resolution: resolution.into(),
+        });
+        matches!(resp, Some(synergos_ipc::IpcResponse::Ok))
+    }
+
+    // ── 設定変更 (#13) ──
+
+    /// ネットワーク設定を部分更新する。成功時 true。
+    pub fn update_config(
+        &self,
+        mesh_n: Option<u16>,
+        max_concurrent_streams: Option<u32>,
+        tunnel_hostname: Option<String>,
+    ) -> bool {
+        let resp = self.send_command(IpcCommand::ConfigUpdate {
+            mesh_n,
+            max_concurrent_streams,
+            tunnel_hostname,
         });
         matches!(resp, Some(synergos_ipc::IpcResponse::Ok))
     }

@@ -35,12 +35,12 @@ impl SignedGossipMessage {
     /// 等の peer_id が `sender_public_key` の導出結果と一致することも確認する。
     pub fn verify(&self) -> Result<()> {
         if self.sender_public_key.len() != 32 {
-            return Err(SynergosNetError::Gossip(
+            return Err(SynergosNetError::Identity(
                 "gossip sender_public_key length != 32".into(),
             ));
         }
         if self.signature.len() != 64 {
-            return Err(SynergosNetError::Gossip(
+            return Err(SynergosNetError::Identity(
                 "gossip signature length != 64".into(),
             ));
         }
@@ -55,21 +55,21 @@ impl SignedGossipMessage {
         match &self.message {
             GossipMessage::PeerStatus { origin, .. } => {
                 if origin != &derived {
-                    return Err(SynergosNetError::Gossip(
+                    return Err(SynergosNetError::Identity(
                         "gossip origin peer_id mismatch with signer".into(),
                     ));
                 }
             }
             GossipMessage::FileOffer { sender, .. } => {
                 if sender != &derived {
-                    return Err(SynergosNetError::Gossip(
+                    return Err(SynergosNetError::Identity(
                         "gossip FileOffer sender mismatch with signer".into(),
                     ));
                 }
             }
             GossipMessage::FileWant { requester, .. } => {
                 if requester != &derived {
-                    return Err(SynergosNetError::Gossip(
+                    return Err(SynergosNetError::Identity(
                         "gossip FileWant requester mismatch with signer".into(),
                     ));
                 }
@@ -79,7 +79,7 @@ impl SignedGossipMessage {
             GossipMessage::CatalogUpdate { .. } | GossipMessage::ConflictAlert { .. } => {}
         }
         identity::verify(&pub_bytes, &signing_bytes(&self.message), &sig_bytes)
-            .map_err(|_| SynergosNetError::Gossip("gossip signature invalid".into()))
+            .map_err(|_| SynergosNetError::Identity("gossip signature invalid".into()))
     }
 }
 

@@ -40,8 +40,25 @@ pub enum IpcResponse {
     /// ネットワーク状態
     NetworkStatus(NetworkStatusInfo),
 
+    /// コンフリクト一覧
+    ConflictList(Vec<ConflictInfoDto>),
+
     /// イベント購読完了
     Subscribed { subscription_id: String },
+}
+
+/// コンフリクト情報 (IPC 向け DTO)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConflictInfoDto {
+    pub file_id: String,
+    pub file_path: String,
+    pub project_id: String,
+    pub local_version: u64,
+    pub local_author: String,
+    pub remote_version: u64,
+    pub remote_author: String,
+    pub detected_at: u64,
+    pub state: String,
 }
 
 /// デーモン状態

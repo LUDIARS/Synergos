@@ -259,7 +259,7 @@ impl NodeRegistry for PresenceService {
     async fn unregister_self(&self) -> Result<(), NodeRegistryError> {
         let mut local = self.local_node.write().await;
         if let Some(reg) = local.take() {
-            tracing::info!("Unregistering self (peer_id={})", reg.peer_id);
+            tracing::info!("Unregistering self (peer_id={})", reg.peer_id.short());
             self.nodes.remove(&reg.peer_id);
 
             // Gossipsub でオフラインステータスをブロードキャスト
