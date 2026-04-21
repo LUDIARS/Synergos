@@ -20,6 +20,11 @@ pub struct TunnelConfig {
     pub api_token_ref: String,
     /// Tunnel の公開ホスト名（空の場合は自動生成）
     pub hostname: String,
+    /// cloudflared バイナリが未検出でもシミュレーションモードで成功扱いにするか。
+    /// `false`（既定）ではバイナリが無い場合はエラーを返す。
+    /// 開発時のみ `true` を検討する。
+    #[serde(default)]
+    pub allow_simulation: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -133,6 +138,7 @@ impl Default for NetConfig {
             tunnel: TunnelConfig {
                 api_token_ref: String::new(),
                 hostname: String::new(),
+                allow_simulation: false,
             },
             mesh: MeshConfig {
                 doh_endpoint: "https://cloudflare-dns.com/dns-query".into(),
@@ -145,7 +151,9 @@ impl Default for NetConfig {
                 max_concurrent_streams: 100,
                 idle_timeout_ms: 30000,
                 max_udp_payload_size: 1452,
-                enable_0rtt: true,
+                // 0-RTT はリプレイ攻撃の余地があるため既定は OFF。
+                // 明示的にリスクを受容する運用のみ true に設定する。
+                enable_0rtt: false,
             },
             dht: DhtConfig {
                 k_bucket_size: 20,

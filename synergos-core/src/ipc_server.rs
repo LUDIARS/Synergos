@@ -381,23 +381,95 @@ async fn dispatch_command(command: IpcCommand, ctx: &ServiceContext) -> IpcRespo
             project_id,
             file_paths,
         } => {
-            let notifications: Vec<PublishNotification> = file_paths
-                .iter()
-                .map(|path| {
-                    let file_size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-                    let crc = crc32fast::hash(
-                        path.to_string_lossy().as_bytes(),
-                    );
-                    PublishNotification {
-                        project_id: project_id.clone(),
-                        file_id: FileId::new(path.to_string_lossy().to_string()),
-                        file_path: path.clone(),
-                        file_size,
-                        crc,
-                        version: 1,
+            // プロジェクトルートを引き当て、与えられたパスがその配下に収まるか検証。
+            // SSRF 様の「任意絶対パスに `metadata` できる」問題 (S11) の対策。
+            let project_root = match ctx.project_manager.project_root(&project_id) {
+                Some(p) => p,
+                None => {
+                    return IpcResponse::Error {
+                        code: 3,
+                        message: format!("unknown project: {project_id}"),
+                    };
+                }
+            };
+            let project_root = match tokio::fs::canonicalize(&project_root).await {
+                Ok(p) => p,
+                Err(e) => {
+                    return IpcResponse::Error {
+                        code: 3,
+                        message: format!("project root canonicalize failed: {e}"),
+                    };
+                }
+            };
+
+            let mut notifications: Vec<PublishNotification> = Vec::with_capacity(file_paths.len());
+            for path in &file_paths {
+                // 相対パスならルートからの相対として解釈。絶対パスはそのまま扱う。
+                let absolute = if path.is_absolute() {
+                    path.clone()
+                } else {
+                    project_root.join(path)
+                };
+                let canonical = match tokio::fs::canonicalize(&absolute).await {
+                    Ok(p) => p,
+                    Err(e) => {
+                        return IpcResponse::Error {
+                            code: 3,
+                            message: format!("file not found or unreadable: {:?}: {e}", absolute),
+                        };
                     }
-                })
-                .collect();
+                };
+                if !canonical.starts_with(&project_root) {
+                    return IpcResponse::Error {
+                        code: 3,
+                        message: format!(
+                            "file outside project root: {:?} (root: {:?})",
+                            canonical, project_root
+                        ),
+                    };
+                }
+
+                // ファイルのメタデータ + 内容ハッシュを非同期で算出。
+                // crc には **ファイルパス文字列** ではなく **ファイル内容** の
+                // CRC32 を入れる。将来 Blake3 に置き換える前提の暫定値で、
+                // 少なくともパス変更だけで同一 CRC になるバグ (S5 予兆) を潰す。
+                let metadata = match tokio::fs::metadata(&canonical).await {
+                    Ok(m) => m,
+                    Err(e) => {
+                        return IpcResponse::Error {
+                            code: 3,
+                            message: format!("metadata failed {:?}: {e}", canonical),
+                        };
+                    }
+                };
+                let file_size = metadata.len();
+                let bytes = match tokio::fs::read(&canonical).await {
+                    Ok(b) => b,
+                    Err(e) => {
+                        return IpcResponse::Error {
+                            code: 3,
+                            message: format!("read failed {:?}: {e}", canonical),
+                        };
+                    }
+                };
+                let crc = crc32fast::hash(&bytes);
+
+                // ルート相対パスを file_id に採用することでプロジェクト内で安定した
+                // 識別子になる (絶対パスは OS 依存で再現性が低い)。
+                let rel = canonical
+                    .strip_prefix(&project_root)
+                    .map(|r| r.to_path_buf())
+                    .unwrap_or(canonical.clone());
+
+                notifications.push(PublishNotification {
+                    project_id: project_id.clone(),
+                    file_id: FileId::new(rel.to_string_lossy().to_string()),
+                    file_path: canonical,
+                    file_size,
+                    crc,
+                    version: 1,
+                });
+            }
             match ctx.exchange.publish_updates(notifications).await {
                 Ok(()) => IpcResponse::Ok,
                 Err(e) => IpcResponse::Error {

@@ -228,6 +228,14 @@ impl ProjectManager {
     pub fn list(&self) -> Vec<ProjectInfo> {
         self.list_projects()
     }
+
+    /// 指定プロジェクトのルートディレクトリを返す。未登録なら `None`。
+    /// ファイルパス検証 (ルート内に閉じ込め) のために IPC ハンドラが利用する。
+    pub fn project_root(&self, project_id: &str) -> Option<PathBuf> {
+        self.projects
+            .get(project_id)
+            .map(|entry| entry.root_path.clone())
+    }
 }
 
 fn now_epoch_secs() -> u64 {

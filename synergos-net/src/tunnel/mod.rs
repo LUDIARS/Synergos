@@ -175,21 +175,33 @@ impl TunnelManager {
 
     /// cloudflared プロセスを起動する
     async fn spawn_cloudflared(&self) -> Result<String> {
-        // cloudflared が PATH にあるか確認
-        let which_result = tokio::process::Command::new("which")
-            .arg("cloudflared")
-            .output()
-            .await;
+        // hostname が指定されていれば引数注入を防ぐために先に検証する。
+        // 許可する文字種: DNS サブドメインとして正当なもののみ
+        // (ASCII 英数字 / ドット / ハイフン)。
+        if !self.config.hostname.is_empty() && !is_valid_hostname(&self.config.hostname) {
+            return Err(SynergosNetError::Tunnel(format!(
+                "invalid hostname: {:?}; expected [a-zA-Z0-9.-]+",
+                self.config.hostname
+            )));
+        }
 
-        let cloudflared_available = which_result
-            .map(|o| o.status.success())
-            .unwrap_or(false);
+        // cloudflared が PATH にあるか確認（Windows 含めクロスプラットフォーム）
+        let cloudflared_available = locate_executable("cloudflared").is_some();
 
         if !cloudflared_available {
-            // cloudflared が利用不可の場合、シミュレーションモードで動作
-            tracing::warn!("cloudflared not found in PATH, running in simulation mode");
-            let tunnel_id = format!("sim-{}", uuid::Uuid::new_v4());
-            return Ok(tunnel_id);
+            if self.config.allow_simulation {
+                tracing::warn!(
+                    "cloudflared not found in PATH — running in simulation mode \
+                    (allow_simulation=true)"
+                );
+                let tunnel_id = format!("sim-{}", uuid::Uuid::new_v4());
+                return Ok(tunnel_id);
+            }
+            return Err(SynergosNetError::Tunnel(
+                "cloudflared binary not found in PATH. Install cloudflared or \
+                set tunnel.allow_simulation=true in config (development only)."
+                    .into(),
+            ));
         }
 
         // cloudflared tunnel run を起動
@@ -214,5 +226,80 @@ impl TunnelManager {
         *self.process.write().await = Some(child);
 
         Ok(tunnel_id)
+    }
+}
+
+/// DNS ホスト名として妥当か検証。許可: `[a-zA-Z0-9.-]+`、かつ先頭/末尾が英数字。
+/// cloudflared の `--hostname` にユーザー入力を渡す前の防御線。
+fn is_valid_hostname(s: &str) -> bool {
+    if s.is_empty() || s.len() > 253 {
+        return false;
+    }
+    let bytes = s.as_bytes();
+    let ok = |b: u8| b.is_ascii_alphanumeric() || b == b'.' || b == b'-';
+    if bytes.iter().any(|&b| !ok(b)) {
+        return false;
+    }
+    // 連続したドットや先頭/末尾の `.` / `-` を弾く
+    if bytes.first().map_or(true, |&b| !b.is_ascii_alphanumeric())
+        || bytes.last().map_or(true, |&b| !b.is_ascii_alphanumeric())
+    {
+        return false;
+    }
+    !s.contains("..")
+}
+
+/// PATH 上の実行ファイルを探す。Windows の `PATHEXT` (.exe / .cmd / .bat) も
+/// 考慮する簡易版。見つからなければ `None`。
+///
+/// 純粋 std 実装にしてあるのは外部クレート `which` を追加しないため。
+fn locate_executable(name: &str) -> Option<std::path::PathBuf> {
+    let path = std::env::var_os("PATH")?;
+
+    #[cfg(windows)]
+    let exts: Vec<String> = std::env::var("PATHEXT")
+        .unwrap_or_else(|_| ".EXE;.CMD;.BAT;.COM".into())
+        .split(';')
+        .map(|e| e.to_ascii_lowercase())
+        .collect();
+
+    for dir in std::env::split_paths(&path) {
+        let direct = dir.join(name);
+        if direct.is_file() {
+            return Some(direct);
+        }
+        #[cfg(windows)]
+        for ext in &exts {
+            let with_ext = dir.join(format!("{name}{ext}"));
+            if with_ext.is_file() {
+                return Some(with_ext);
+            }
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod hostname_tests {
+    use super::is_valid_hostname;
+
+    #[test]
+    fn accepts_normal_dns() {
+        assert!(is_valid_hostname("tunnel.example.com"));
+        assert!(is_valid_hostname("a.b"));
+        assert!(is_valid_hostname("node-01.proj.example"));
+    }
+
+    #[test]
+    fn rejects_injection_shapes() {
+        assert!(!is_valid_hostname(""));
+        assert!(!is_valid_hostname(".leading.dot"));
+        assert!(!is_valid_hostname("trailing-"));
+        assert!(!is_valid_hostname("double..dot"));
+        assert!(!is_valid_hostname("has space"));
+        assert!(!is_valid_hostname("has/slash"));
+        assert!(!is_valid_hostname("semi;colon"));
+        assert!(!is_valid_hostname("quote\"mark"));
+        assert!(!is_valid_hostname("--flag"));
     }
 }
