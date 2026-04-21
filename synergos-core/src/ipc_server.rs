@@ -921,11 +921,7 @@ async fn dispatch_command(command: IpcCommand, ctx: &ServiceContext) -> IpcRespo
                     .iter()
                     .filter(|p| p.rtt_ms.is_some())
                     .count() as u32;
-                if count > 0 {
-                    total_rtt / count
-                } else {
-                    0
-                }
+                total_rtt.checked_div(count).unwrap_or(0)
             };
 
             let primary_route = connected_peers
