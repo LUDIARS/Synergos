@@ -15,6 +15,17 @@ impl PeerId {
     pub fn generate() -> Self {
         Self(uuid::Uuid::new_v4().to_string())
     }
+
+    /// ログ用の短縮表示: 先頭 12 文字 + "…"。
+    /// 完全な PeerId を `info!` 等に載せないようにする (S24 対策)。
+    /// 詳細な識別が必要な場合は `Display` を使用する。
+    pub fn short(&self) -> String {
+        if self.0.len() > 12 {
+            format!("{}…", &self.0[..12])
+        } else {
+            self.0.clone()
+        }
+    }
 }
 
 impl fmt::Display for PeerId {

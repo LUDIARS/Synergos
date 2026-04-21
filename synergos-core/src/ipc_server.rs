@@ -8,6 +8,7 @@
 //! EventBus と連携してレスポンス・イベントプッシュを行う。
 
 use std::sync::Arc;
+#[cfg(unix)]
 use std::time::Duration;
 use tokio::sync::{broadcast, Mutex};
 
@@ -292,8 +293,6 @@ async fn handle_client_windows(
     pipe: tokio::net::windows::named_pipe::NamedPipeServer,
     ctx: Arc<ServiceContext>,
 ) -> Result<(), IpcError> {
-    use tokio::io::{AsyncRead, AsyncWrite};
-
     let (reader, writer) = tokio::io::split(pipe);
     let writer: Arc<Mutex<tokio::io::WriteHalf<tokio::net::windows::named_pipe::NamedPipeServer>>> =
         Arc::new(Mutex::new(writer));

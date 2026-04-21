@@ -70,3 +70,19 @@ jobs:
         run: cargo build --workspace --all-targets
       - name: Run tests
         run: cargo test --workspace --all-targets
+
+  audit:
+    runs-on: ubuntu-latest
+    name: Security audit
+    # transitive dep の脆弱性 (rustls / quinn / hickory 等) は upstream 追従で
+    # しか直せないケースが多い。CI では情報提供として毎回走らせるが、
+    # merge をブロックしない運用にする。定期的に手でチェックして pin し直す。
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-audit
+        run: cargo install --locked cargo-audit
+      - name: Run cargo audit
+        run: cargo audit

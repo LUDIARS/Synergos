@@ -6,8 +6,6 @@
 use std::net::{Ipv6Addr, SocketAddr, SocketAddrV6};
 use std::time::{Duration, Instant};
 
-use tokio::sync::RwLock;
-
 use crate::config::MeshConfig;
 use crate::error::{Result, SynergosNetError};
 

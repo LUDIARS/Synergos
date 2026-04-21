@@ -8,11 +8,10 @@ use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 
-use crate::config::NetConfig;
 use crate::error::{Result, SynergosNetError};
 use crate::mesh::{Mesh, ProbeResult};
-use crate::quic::{QuicConnectionInfo, QuicManager};
-use crate::tunnel::{TunnelManager, TunnelState};
+use crate::quic::QuicManager;
+use crate::tunnel::TunnelManager;
 use crate::types::{ConnectionState, PeerEndpoint, PeerId, Route, RouteKind};
 
 /// 経路検出結果
@@ -50,6 +49,7 @@ struct ManagedPeer {
 ///
 /// 各ピアへの最適な接続経路を選択し、接続の確立・維持・切り替えを管理する。
 /// IPv6 Direct → Tunnel → Relay の優先度で接続を試行する。
+#[allow(dead_code)]
 pub struct Conduit {
     /// 管理中のピア（PeerId → ManagedPeer）
     peers: DashMap<PeerId, ManagedPeer>,
@@ -144,7 +144,7 @@ impl Conduit {
                     };
                     entry.last_seen = Instant::now();
                 }
-                tracing::info!("Connected to peer {} via {:?}", peer_id, route_kind);
+                tracing::info!("Connected to peer {} via {:?}", peer_id.short(), route_kind);
                 Ok(route_kind)
             }
             Err(e) => {
@@ -170,7 +170,7 @@ impl Conduit {
             entry.active_route = None;
         }
 
-        tracing::info!("Disconnected peer {}: {}", peer_id, reason);
+        tracing::info!("Disconnected peer {}: {}", peer_id.short(), reason);
         Ok(())
     }
 
