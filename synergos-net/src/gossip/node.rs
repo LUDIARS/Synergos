@@ -38,15 +38,50 @@ impl MessageCache {
     }
 
     fn gc(&self) {
-        // 最も古い 25% を削除
-        let target = self.max_size / 4;
-        let mut entries: Vec<_> = self
-            .seen
-            .iter()
-            .map(|e| (e.key().clone(), *e.value()))
-            .collect();
-        entries.sort_by_key(|(_, t)| *t);
-        for (key, _) in entries.into_iter().take(target) {
+        // 最も古い 25% を削除する。
+        // 旧実装は Vec 全体を sort していて O(n log n)。max-heap で
+        // 「最古 k 件」のみ保持することで O(n log k) に短縮する。
+        let target = (self.max_size / 4).max(1);
+        if self.seen.len() <= target {
+            self.seen.clear();
+            return;
+        }
+        // MessageId は Ord 未実装なので Instant だけで順序付けする wrapper。
+        // (top = 最大時刻 = 最新) で max-heap を作り、走査中に top より古い
+        // ものが来たら swap することで結果的に heap には「最古 target 件」が残る。
+        use std::cmp::Ordering;
+        use std::collections::BinaryHeap;
+        struct ByTime(Instant, MessageId);
+        impl PartialEq for ByTime {
+            fn eq(&self, o: &Self) -> bool {
+                self.0 == o.0
+            }
+        }
+        impl Eq for ByTime {}
+        impl Ord for ByTime {
+            fn cmp(&self, o: &Self) -> Ordering {
+                self.0.cmp(&o.0)
+            }
+        }
+        impl PartialOrd for ByTime {
+            fn partial_cmp(&self, o: &Self) -> Option<Ordering> {
+                Some(self.cmp(o))
+            }
+        }
+
+        let mut oldest: BinaryHeap<ByTime> = BinaryHeap::with_capacity(target + 1);
+        for entry in self.seen.iter() {
+            let t = *entry.value();
+            if oldest.len() < target {
+                oldest.push(ByTime(t, entry.key().clone()));
+            } else if let Some(top) = oldest.peek() {
+                if t < top.0 {
+                    oldest.pop();
+                    oldest.push(ByTime(t, entry.key().clone()));
+                }
+            }
+        }
+        for ByTime(_t, key) in oldest {
             self.seen.remove(&key);
         }
     }

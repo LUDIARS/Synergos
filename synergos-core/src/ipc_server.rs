@@ -340,6 +340,19 @@ where
 
         tracing::debug!("Received command: {:?}", command);
 
+        // dispatcher 前に共通の入力バリデーションを通す。空文字 / 過長 ID 等を弾く。
+        if let Err(reason) = command.validate() {
+            send_server_message(
+                &writer,
+                ServerMessage::Response(IpcResponse::Error {
+                    code: 400,
+                    message: format!("invalid command: {reason}"),
+                }),
+            )
+            .await?;
+            continue;
+        }
+
         match command {
             IpcCommand::Subscribe { events } => {
                 // 既存リレーがあれば停止してから再起動
