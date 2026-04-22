@@ -4230,6 +4230,7 @@ dependencies = [
  "libc",
  "pretty_assertions",
  "quinn",
+ "rmp-serde",
  "serde",
  "serde_json",
  "serial_test",

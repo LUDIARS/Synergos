@@ -30,6 +30,7 @@ fn make_ctx() -> Arc<ServiceContext> {
         started_at: 0,
         net_config: None,
         catalogs: Arc::new(DashMap::new()),
+        content_store: Arc::new(synergos_net::content::MemoryContentStore::new()),
     })
 }
 
@@ -41,6 +42,8 @@ async fn dispatch_catalog_update(ctx: &ServiceContext, msg: GossipMessage) {
         root_crc,
         update_count,
         updated_chunks,
+        catalog_cid,
+        publisher,
     } = msg
     {
         let local_match = match ctx.catalogs.get(&project_id) {
@@ -56,6 +59,12 @@ async fn dispatch_catalog_update(ctx: &ServiceContext, msg: GossipMessage) {
                 remote_root_crc: root_crc,
                 remote_update_count: update_count,
                 changed_chunks: updated_chunks.iter().map(|c| c.0.clone()).collect(),
+                catalog_cid,
+                publisher: if publisher.0.is_empty() {
+                    None
+                } else {
+                    Some(publisher.0.clone())
+                },
             });
         }
     }
@@ -79,6 +88,8 @@ async fn catalog_update_matching_local_emits_nothing() {
             root_crc: root.catalog_crc,
             update_count: root.update_count,
             updated_chunks: vec![],
+            catalog_cid: None,
+            publisher: PeerId::default(),
         },
     )
     .await;
@@ -103,6 +114,8 @@ async fn catalog_update_drift_emits_sync_needed_event() {
             root_crc: 0xDEAD_BEEF,
             update_count: 99,
             updated_chunks: vec![ChunkId("chunk-1".into()), ChunkId("chunk-2".into())],
+            catalog_cid: None,
+            publisher: PeerId::default(),
         },
     )
     .await;
@@ -130,6 +143,8 @@ async fn catalog_update_for_unknown_project_is_ignored() {
             root_crc: 0x1234,
             update_count: 1,
             updated_chunks: vec![],
+            catalog_cid: None,
+            publisher: PeerId::default(),
         },
     )
     .await;

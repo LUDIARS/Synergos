@@ -13,10 +13,11 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use dashmap::DashMap;
 use synergos_net::chain::{LedgerAction, LedgerEntryState, OfferEntry, TransferLedger, WantEntry};
+use synergos_net::content::{Block, ContentStore, MemoryContentStore};
 use synergos_net::gossip::{GossipMessage, GossipNode};
 use synergos_net::quic::{QuicManager, StreamType};
 use synergos_net::transfer::{receive_over_quic, send_over_quic, TransferHeader};
-use synergos_net::types::{Blake3Hash, FileId, PeerId, TopicId, TransferId};
+use synergos_net::types::{Blake3Hash, Cid, FileId, PeerId, TopicId, TransferId};
 
 use crate::event_bus::{SharedEventBus, TransferCompletedEvent, TransferProgressEvent};
 
@@ -229,6 +230,58 @@ pub trait FileSharing: Send + Sync {
 
 use synergos_net::types::now_ms;
 
+/// publish_updates から呼ばれ、ContentStore に put するための RootCatalog スナップショットを組み立てる。
+///
+/// 既存の `CatalogManager` は ProjectOpen 時に生成されるが、publish_updates から
+/// 直接触らず、notifications から最小限の `RootCatalog` を作って put する。
+/// 受信側は同じ `RootCatalog` 型で deserialize すれば chunk / file 一覧を復元できる。
+fn build_catalog_snapshot(
+    project_id: &str,
+    total_crc: u32,
+    update_count: u64,
+    notifications: &[PublishNotification],
+) -> synergos_net::catalog::RootCatalog {
+    use synergos_net::catalog::{ChunkIndex, FileEntry, FileState, RootCatalog};
+    use synergos_net::types::ChunkId;
+
+    let chunk_id = ChunkId::generate();
+    let files: Vec<FileEntry> = notifications
+        .iter()
+        .map(|n| FileEntry {
+            file_id: n.file_id.clone(),
+            path: n.file_path.to_string_lossy().to_string(),
+            crc: n.crc,
+            content_hash: Blake3Hash::default(),
+            state: FileState::Synced,
+            size: n.file_size,
+        })
+        .collect();
+
+    let chunk_crc = {
+        let mut hasher = crc32fast::Hasher::new();
+        for f in &files {
+            hasher.update(&f.crc.to_le_bytes());
+        }
+        hasher.finalize()
+    };
+
+    // 1 回の publish_updates を 1 chunk として扱う最小表現。子 chunk の
+    // 実 Block は将来の拡張 (Bitswap session の fetch_dag で辿る) 用に
+    // 別途生成する想定で、現状は ChunkIndex のメタだけ返す。
+    RootCatalog {
+        project_id: project_id.to_string(),
+        update_count,
+        chunks: vec![ChunkIndex {
+            chunk_id,
+            crc: chunk_crc,
+            content_hash: Blake3Hash::default(),
+            last_updated: now_ms(),
+        }],
+        catalog_crc: total_crc,
+        last_updated: now_ms(),
+    }
+}
+
 /// ローカルが「送信可能 (Offer 済)」として保持するファイルの記録。
 /// FileWant を受けたときに即座に送信を起動するのに必要な項目。
 #[derive(Debug, Clone)]
@@ -258,6 +311,9 @@ pub struct Exchange {
     shared_files: DashMap<FileId, SharedFileRecord>,
     /// ローカルピアID
     local_peer_id: PeerId,
+    /// Bitswap 用 ContentStore (注入済みなら publish_updates で RootCatalog
+    /// スナップショットを put し、catalog_cid を CatalogUpdate に乗せる)。
+    content_store: Option<Arc<MemoryContentStore>>,
 }
 
 impl Exchange {
@@ -281,6 +337,7 @@ impl Exchange {
             out_path_resolver: None,
             shared_files: DashMap::new(),
             local_peer_id,
+            content_store: None,
         }
     }
 
@@ -289,6 +346,12 @@ impl Exchange {
     pub fn attach_quic(&mut self, quic: Arc<QuicManager>, resolver: OutPathResolver) {
         self.quic = Some(quic);
         self.out_path_resolver = Some(resolver);
+    }
+
+    /// Bitswap 用 ContentStore を注入する。publish_updates 時に
+    /// RootCatalog スナップショットをここに put して catalog_cid を advertise する。
+    pub fn attach_content_store(&mut self, store: Arc<MemoryContentStore>) {
+        self.content_store = Some(store);
     }
 
     /// 完了済み/キャンセル済み転送をテーブルから除去
@@ -352,8 +415,15 @@ impl Exchange {
         }
     }
 
-    /// Gossipsub 経由で CatalogUpdate をブロードキャスト
-    fn broadcast_catalog_update(&self, project_id: &str, root_crc: u32, update_count: u64) {
+    /// Gossipsub 経由で CatalogUpdate をブロードキャスト。`catalog_cid` は
+    /// 本ノードの ContentStore に置かれた RootCatalog スナップショットの CID。
+    fn broadcast_catalog_update(
+        &self,
+        project_id: &str,
+        root_crc: u32,
+        update_count: u64,
+        catalog_cid: Option<Cid>,
+    ) {
         if let Some(gossip) = &self.gossip {
             let topic = TopicId::project(project_id);
             gossip.publish(
@@ -363,6 +433,8 @@ impl Exchange {
                     root_crc,
                     update_count,
                     updated_chunks: vec![],
+                    catalog_cid,
+                    publisher: self.local_peer_id.clone(),
                 },
             );
         }
@@ -865,11 +937,12 @@ impl FileSharing for Exchange {
         //   Step 1  transfer ledger に Offer を登録 (want とのマッチ判定)
         //   Step 2  shared_files に path+meta を記録 (FileWant 着信時に使う)
         //   Step 3  Gossipsub で FileOffer をブロードキャスト (to all peers)
-        //   Step 4  Gossipsub で CatalogUpdate をブロードキャスト
-        //   Step 5  EventBus に TransferCompleted 様の通知を出す (UI 反映)
+        //   Step 4  ContentStore に RootCatalog snapshot を put し catalog_cid を得る
+        //   Step 5  Gossipsub で CatalogUpdate (catalog_cid 付き) をブロードキャスト
         //
-        // これらは同一プロセス内で順に実行される (I/O は内部で並列可)。
-        // 上位 (GUI / CLI) からは `publish_updates` を呼ぶだけで一気通貫。
+        // Step 4 以降は `content_store` が attach 済のときだけ走る (テスト用に
+        // attach 無しでも Step 3 まで動く)。受信側は BitswapSession で
+        // catalog_cid を引き、RootCatalog を deserialize して full diff を計算する (#25)。
         // ──────────────────────────────────────────────────────────────
         tracing::info!(
             "[asset-update] begin: {} file(s) in project {:?}",
@@ -881,7 +954,7 @@ impl FileSharing for Exchange {
 
         for notif in &notifications {
             tracing::info!(
-                "[asset-update][step 1/4] ledger Offer: file_id={} version={} size={}",
+                "[asset-update][step 1/5] ledger Offer: file_id={} version={} size={}",
                 notif.file_id,
                 notif.version,
                 notif.file_size
@@ -898,7 +971,7 @@ impl FileSharing for Exchange {
             self.ledger.register_offer(offer);
 
             tracing::info!(
-                "[asset-update][step 2/4] shared_files register: file_id={}",
+                "[asset-update][step 2/5] shared_files register: file_id={}",
                 notif.file_id
             );
             self.shared_files.insert(
@@ -913,7 +986,7 @@ impl FileSharing for Exchange {
             );
 
             tracing::info!(
-                "[asset-update][step 3/4] gossip FileOffer bcast: file_id={}",
+                "[asset-update][step 3/5] gossip FileOffer bcast: file_id={}",
                 notif.file_id
             );
             self.broadcast_offer(
@@ -930,12 +1003,58 @@ impl FileSharing for Exchange {
         }
 
         if let Some(first) = notifications.first() {
+            // Step 4: RootCatalog snapshot を ContentStore に put して catalog_cid を得る
+            let catalog_cid = if let Some(store) = &self.content_store {
+                let snapshot = build_catalog_snapshot(
+                    &first.project_id,
+                    total_crc,
+                    notifications.len() as u64,
+                    &notifications,
+                );
+                match rmp_serde::to_vec(&snapshot) {
+                    Ok(bytes) => {
+                        let block = Block::new(bytes);
+                        let cid = block.cid.clone();
+                        let file_total = notifications.len();
+                        match store.put(block).await {
+                            Ok(()) => {
+                                tracing::info!(
+                                    "[asset-update][step 4/5] content_store put RootCatalog: cid={} files={}",
+                                    cid.0,
+                                    file_total
+                                );
+                                Some(cid)
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "[asset-update][step 4/5] content_store put failed: {e}"
+                                );
+                                None
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("[asset-update][step 4/5] snapshot encode failed: {e}");
+                        None
+                    }
+                }
+            } else {
+                tracing::debug!("[asset-update][step 4/5] content_store not attached; skipping");
+                None
+            };
+
             tracing::info!(
-                "[asset-update][step 4/4] gossip CatalogUpdate bcast: project={} root_crc={total_crc:x} update_count={}",
+                "[asset-update][step 5/5] gossip CatalogUpdate bcast: project={} root_crc={total_crc:x} update_count={} catalog_cid={:?}",
                 first.project_id,
-                notifications.len()
+                notifications.len(),
+                catalog_cid.as_ref().map(|c| c.0.as_str())
             );
-            self.broadcast_catalog_update(&first.project_id, total_crc, notifications.len() as u64);
+            self.broadcast_catalog_update(
+                &first.project_id,
+                total_crc,
+                notifications.len() as u64,
+                catalog_cid,
+            );
         }
 
         tracing::info!("[asset-update] done");

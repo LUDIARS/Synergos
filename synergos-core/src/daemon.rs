@@ -10,6 +10,7 @@ use tokio::sync::broadcast;
 use synergos_net::{
     conduit::Conduit,
     config::NetConfig,
+    content::{handle_bitswap_stream, MemoryContentStore, BITSWAP_STREAM_MAGIC},
     dht::{handle_dht_stream, DhtNode, DHT_STREAM_MAGIC},
     gossip::{
         handle_gossip_stream, send_gossip, GossipNode, GossipWireMessage, GOSSIP_STREAM_MAGIC,
@@ -148,6 +149,11 @@ impl Daemon {
                 Arc::new(move |project_id, file_id| pm.resolve_file_path(project_id, file_id));
             exchange_inner.attach_quic(net.quic.clone(), resolver);
         }
+        // Bitswap 用 ContentStore: ServiceContext と同じインスタンスを
+        // Exchange にも流して、publish_updates 時に RootCatalog snapshot を
+        // put → BSW1 経路で相手が引けるようにする (#25/#26)。
+        let shared_content_store = Arc::new(synergos_net::content::MemoryContentStore::new());
+        exchange_inner.attach_content_store(shared_content_store.clone());
         let exchange = Arc::new(exchange_inner);
         let presence = Arc::new(PresenceService::with_network(
             event_bus.clone(),
@@ -172,6 +178,7 @@ impl Daemon {
             started_at,
             net_config: Some(net.net_config.clone()),
             catalogs: Arc::new(dashmap::DashMap::new()),
+            content_store: shared_content_store,
         });
 
         // 永続化されていた project を restore した後、それぞれの
@@ -245,6 +252,16 @@ impl Daemon {
             self.ctx.shutdown_tx.subscribe(),
         );
 
+        // CatalogSyncService: CatalogSyncNeededEvent を購読して BitswapSession で
+        // publisher から RootCatalog スナップショットを取りに行き、
+        // CatalogSyncCompletedEvent を emit する (#25/#26)。
+        let catalog_sync_task = crate::catalog_sync::CatalogSyncService::spawn(
+            self.ctx.event_bus.clone(),
+            self.net.quic.clone(),
+            self.ctx.content_store.clone(),
+            self.ctx.shutdown_tx.subscribe(),
+        );
+
         // IPC サーバーを実行（シャットダウンまでブロック）
         ipc_server.run().await?;
 
@@ -255,6 +272,7 @@ impl Daemon {
         quic_accept_task.abort();
         gossip_sub_task.abort();
         gossip_fanout_task.abort();
+        catalog_sync_task.abort();
 
         // グレースフルシャットダウン
         self.shutdown().await?;
@@ -411,11 +429,19 @@ fn spawn_quic_accept_loop(
                             let dht = net.dht.clone();
                             let gossip = net.gossip.clone();
                             let exchange = ctx.exchange.clone();
+                            let content_store = ctx.content_store.clone();
                             let sender = acc.peer_id.clone();
                             let connection = acc.connection;
                             tokio::spawn(async move {
-                                dispatch_peer_streams(connection, sender, dht, gossip, exchange)
-                                    .await;
+                                dispatch_peer_streams(
+                                    connection,
+                                    sender,
+                                    dht,
+                                    gossip,
+                                    exchange,
+                                    content_store,
+                                )
+                                .await;
                             });
                         }
                         Ok(None) => {
@@ -434,13 +460,14 @@ fn spawn_quic_accept_loop(
 }
 
 /// 1 つの QUIC コネクションから bidi ストリームをループで受け、先頭 magic で
-/// DHT / Transfer に振り分ける。コネクションが閉じられたらループを抜ける。
+/// DHT / Gossip / Transfer / Bitswap に振り分ける。コネクションが閉じられたらループを抜ける。
 async fn dispatch_peer_streams(
     connection: quinn::Connection,
     sender: PeerId,
     dht: Arc<DhtNode>,
     gossip: Arc<GossipNode>,
     exchange: Arc<crate::exchange::Exchange>,
+    content_store: Arc<MemoryContentStore>,
 ) {
     loop {
         let (send, mut recv) = match connection.accept_bi().await {
@@ -460,6 +487,7 @@ async fn dispatch_peer_streams(
         let dht = dht.clone();
         let gossip = gossip.clone();
         let exchange = exchange.clone();
+        let content_store = content_store.clone();
         let sender_cloned = sender.clone();
         tokio::spawn(async move {
             if &magic == DHT_STREAM_MAGIC {
@@ -474,6 +502,10 @@ async fn dispatch_peer_streams(
                 drop(send); // gossip は片方向相当 (応答なし)
                 if let Err(e) = handle_gossip_stream(gossip, recv, sender_cloned).await {
                     tracing::debug!("Gossip stream handler error: {e}");
+                }
+            } else if &magic == BITSWAP_STREAM_MAGIC {
+                if let Err(e) = handle_bitswap_stream(content_store, send, recv).await {
+                    tracing::debug!("Bitswap stream handler error: {e}");
                 }
             } else {
                 tracing::debug!("unknown stream magic {:?}", magic);
@@ -580,11 +612,11 @@ fn spawn_gossip_subscriber(
                         Ok((_topic, GossipMessage::ConflictAlert { file_id, conflicting_nodes, their_versions })) => {
                             ctx.conflict_manager.handle_conflict_alert(file_id, conflicting_nodes, their_versions);
                         }
-                        Ok((_topic, GossipMessage::CatalogUpdate { project_id, root_crc, update_count, updated_chunks })) => {
+                        Ok((_topic, GossipMessage::CatalogUpdate { project_id, root_crc, update_count, updated_chunks, catalog_cid, publisher })) => {
                             // #26: リモートの root_crc とローカルの root_catalog を比較する。
                             // 異なる場合は CatalogSyncNeededEvent を emit し、更新対象の
-                            // chunk IDs を EventBus 購読者 (GUI / IPC client) に通知する。
-                            // 実際のチャンク取得は Bitswap (#25) か既存の transfer 経路で別途行う。
+                            // chunk IDs と catalog_cid を EventBus 購読者 (CatalogSyncService)
+                            // に通知する。購読者側が BitswapSession で実チャンクを取りに行く。
                             let local_match = match ctx.catalogs.get(&project_id) {
                                 Some(cm) => {
                                     let local = cm.root_catalog().await;
@@ -598,8 +630,9 @@ fn spawn_gossip_subscriber(
                             };
                             if !local_match {
                                 tracing::info!(
-                                    "catalog drift detected: project={project_id} remote_crc={root_crc:x} remote_updates={update_count} changed_chunks={}",
-                                    updated_chunks.len()
+                                    "catalog drift detected: project={project_id} remote_crc={root_crc:x} remote_updates={update_count} changed_chunks={} catalog_cid={:?}",
+                                    updated_chunks.len(),
+                                    catalog_cid.as_ref().map(|c| c.0.as_str())
                                 );
                                 ctx.event_bus.emit(
                                     crate::event_bus::CatalogSyncNeededEvent {
@@ -610,6 +643,12 @@ fn spawn_gossip_subscriber(
                                             .iter()
                                             .map(|c| c.0.clone())
                                             .collect(),
+                                        catalog_cid: catalog_cid.clone(),
+                                        publisher: if publisher.0.is_empty() {
+                                            None
+                                        } else {
+                                            Some(publisher.0.clone())
+                                        },
                                     },
                                 );
                             } else {

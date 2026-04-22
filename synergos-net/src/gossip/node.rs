@@ -330,6 +330,8 @@ mod tests {
             root_crc: 0x1234,
             update_count: 1,
             updated_chunks: vec![],
+            catalog_cid: None,
+            publisher: PeerId::default(),
         };
 
         let targets = node.publish(&topic, msg);

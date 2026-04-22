@@ -149,7 +149,7 @@ impl CoreEvent for ConflictDetectedEvent {
 
 /// Catalog ドリフト検出イベント。gossip CatalogUpdate 受信時、ローカルの
 /// `root_crc`/`update_count` がリモートと一致しないときに emit される (#26)。
-/// 実際のチャンク取得は Bitswap / transfer で別途行う。
+/// `CatalogSyncService` が購読して BitswapSession 経由で実チャンクを取りに行く。
 #[derive(Debug, Clone)]
 pub struct CatalogSyncNeededEvent {
     pub project_id: String,
@@ -157,11 +157,35 @@ pub struct CatalogSyncNeededEvent {
     pub remote_update_count: u64,
     /// リモート側で変更があったチャンク ID の文字列リスト
     pub changed_chunks: Vec<String>,
+    /// 発行者がアドバタイズした RootCatalog スナップショットの CID (文字列化済)。
+    /// 旧ピア互換のため Option で、無い場合はドリフト検知のみでチャンク取得は走らない。
+    pub catalog_cid: Option<synergos_net::types::Cid>,
+    /// 発行ピア。BitswapSession の接続先解決に使う。空 publisher は旧プロトコル。
+    pub publisher: Option<String>,
 }
 
 impl CoreEvent for CatalogSyncNeededEvent {
     fn event_name() -> &'static str {
         "catalog_sync_needed"
+    }
+}
+
+/// Catalog sync が完了したときに emit されるイベント (成功/失敗)。
+/// GUI / CLI はこれを購読して UI の "syncing" 状態を解除する。
+#[derive(Debug, Clone)]
+pub struct CatalogSyncCompletedEvent {
+    pub project_id: String,
+    pub remote_root_crc: u32,
+    pub remote_update_count: u64,
+    /// Bitswap で実際に取り寄せた chunk block 数 (root を含む)。
+    pub fetched_blocks: u32,
+    /// エラーがあれば Some、成功なら None。
+    pub error: Option<String>,
+}
+
+impl CoreEvent for CatalogSyncCompletedEvent {
+    fn event_name() -> &'static str {
+        "catalog_sync_completed"
     }
 }
 
