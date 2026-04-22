@@ -11,10 +11,12 @@ use synergos_net::{
     conduit::Conduit,
     config::NetConfig,
     dht::{handle_dht_stream, DhtNode, DHT_STREAM_MAGIC},
-    gossip::GossipNode,
+    gossip::{
+        handle_gossip_stream, send_gossip, GossipNode, GossipWireMessage, GOSSIP_STREAM_MAGIC,
+    },
     identity::Identity,
     mesh::Mesh,
-    quic::QuicManager,
+    quic::{QuicManager, StreamType},
     transfer::TRANSFER_STREAM_MAGIC,
     tunnel::TunnelManager,
     types::PeerId,
@@ -84,10 +86,11 @@ impl Daemon {
 
         // ── ネットワーク基盤コンポーネント ──
         let dht = Arc::new(DhtNode::new(local_peer_id.clone(), net_config.dht.clone()));
-        let gossip = Arc::new(GossipNode::new(
-            local_peer_id.clone(),
-            net_config.gossipsub.clone(),
-        ));
+        let gossip = {
+            let mut g = GossipNode::new(local_peer_id.clone(), net_config.gossipsub.clone());
+            g.set_identity(identity.clone());
+            Arc::new(g)
+        };
         let quic = Arc::new(QuicManager::new(net_config.quic.clone(), identity.clone()));
         let tunnel = Arc::new(TunnelManager::new(&net_config.tunnel));
         let mesh = Arc::new(Mesh::new(net_config.mesh.clone()));
@@ -122,16 +125,13 @@ impl Daemon {
             Some(gossip.clone()),
         );
         // QUIC と受信先レゾルバを注入する。
-        // リゾルバは ProjectManager からプロジェクトルートを引いて FileId を
-        // 相対パスとして連結する (実運用では file_id に path 情報を持たせる
-        // 必要あり — 暫定で FileId をそのまま相対パスとして扱う)。
+        // リゾルバは `ProjectManager::resolve_file_path` に委譲し、
+        // 事前 register_file された file_id→path マッピングを優先する。
+        // 未登録の場合は FileId をそのまま相対パスとしてフォールバック。
         {
             let pm = project_manager.clone();
             let resolver: crate::exchange::OutPathResolver =
-                Arc::new(move |project_id, file_id| {
-                    let root = pm.project_root(project_id)?;
-                    Some(root.join(file_id.0.clone()))
-                });
+                Arc::new(move |project_id, file_id| pm.resolve_file_path(project_id, file_id));
             exchange_inner.attach_quic(net.quic.clone(), resolver);
         }
         let exchange = Arc::new(exchange_inner);
@@ -207,6 +207,14 @@ impl Daemon {
             self.ctx.shutdown_tx.subscribe(),
         );
 
+        // Gossip fan-out: publish() が outbound_rx に流す OutboundGossip を
+        // QUIC 上の GSP1 ストリームで各メッシュピアに配る。
+        let gossip_fanout_task = spawn_gossip_fanout(
+            self.net.gossip.clone(),
+            self.net.quic.clone(),
+            self.ctx.shutdown_tx.subscribe(),
+        );
+
         // IPC サーバーを実行（シャットダウンまでブロック）
         ipc_server.run().await?;
 
@@ -216,6 +224,7 @@ impl Daemon {
         heartbeat_task.abort();
         quic_accept_task.abort();
         gossip_sub_task.abort();
+        gossip_fanout_task.abort();
 
         // グレースフルシャットダウン
         self.shutdown().await?;
@@ -370,11 +379,13 @@ fn spawn_quic_accept_loop(
                     match accepted {
                         Ok(Some(acc)) => {
                             let dht = net.dht.clone();
+                            let gossip = net.gossip.clone();
                             let exchange = ctx.exchange.clone();
                             let sender = acc.peer_id.clone();
                             let connection = acc.connection;
                             tokio::spawn(async move {
-                                dispatch_peer_streams(connection, sender, dht, exchange).await;
+                                dispatch_peer_streams(connection, sender, dht, gossip, exchange)
+                                    .await;
                             });
                         }
                         Ok(None) => {
@@ -398,6 +409,7 @@ async fn dispatch_peer_streams(
     connection: quinn::Connection,
     sender: PeerId,
     dht: Arc<DhtNode>,
+    gossip: Arc<GossipNode>,
     exchange: Arc<crate::exchange::Exchange>,
 ) {
     loop {
@@ -416,6 +428,7 @@ async fn dispatch_peer_streams(
         }
 
         let dht = dht.clone();
+        let gossip = gossip.clone();
         let exchange = exchange.clone();
         let sender_cloned = sender.clone();
         tokio::spawn(async move {
@@ -427,11 +440,81 @@ async fn dispatch_peer_streams(
                 if let Err(e) = exchange.handle_incoming_transfer(recv, sender_cloned).await {
                     tracing::debug!("Transfer stream handler error: {e}");
                 }
+            } else if &magic == GOSSIP_STREAM_MAGIC {
+                drop(send); // gossip は片方向相当 (応答なし)
+                if let Err(e) = handle_gossip_stream(gossip, recv, sender_cloned).await {
+                    tracing::debug!("Gossip stream handler error: {e}");
+                }
             } else {
                 tracing::debug!("unknown stream magic {:?}", magic);
             }
         });
     }
+}
+
+/// 新ピア接続時に dispatch_peer_streams を spawn する箇所の呼び出し更新。
+/// spawn_quic_accept_loop は `dispatch_peer_streams` に `gossip` 引数を
+/// 渡す必要があるので、そちらも NetworkHandles 全体を引き回すよう修正する。
+fn spawn_gossip_fanout(
+    gossip: Arc<GossipNode>,
+    quic: Arc<QuicManager>,
+    mut shutdown_rx: broadcast::Receiver<()>,
+) -> tokio::task::JoinHandle<()> {
+    let mut rx = gossip.outbound_receiver();
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = shutdown_rx.recv() => break,
+                out = rx.recv() => {
+                    match out {
+                        Ok(outbound) => {
+                            // 各メッシュピアに対して独立 stream を開いて送信する。
+                            // publish() が返す peers は空のこともある (mesh 未形成) —
+                            // その場合は fallback として「現在 QUIC 接続中の全ピア」に
+                            // 流す。mesh が立ち上がる前の早期 publish を救う緩和策。
+                            let peers: Vec<PeerId> = if outbound.peers.is_empty() {
+                                quic.list_connections()
+                                    .into_iter()
+                                    .map(|c| c.peer_id)
+                                    .collect()
+                            } else {
+                                outbound.peers.clone()
+                            };
+                            for peer in peers {
+                                let wire = GossipWireMessage {
+                                    topic: outbound.topic.clone(),
+                                    signed: outbound.signed.clone(),
+                                };
+                                let quic = quic.clone();
+                                tokio::spawn(async move {
+                                    match quic.open_stream(&peer, StreamType::Control).await {
+                                        Ok((send, _recv)) => {
+                                            if let Err(e) = send_gossip(send, &wire).await {
+                                                tracing::debug!(
+                                                    "gossip send to {} failed: {e}",
+                                                    peer.short()
+                                                );
+                                            }
+                                        }
+                                        Err(e) => {
+                                            tracing::debug!(
+                                                "gossip open_stream to {} failed: {e}",
+                                                peer.short()
+                                            );
+                                        }
+                                    }
+                                });
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                            tracing::warn!("gossip fanout lagged; dropped {n} messages");
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            }
+        }
+    })
 }
 
 /// Gossip メッセージサブスクライバ。`GossipNode::receiver()` で購読し、

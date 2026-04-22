@@ -12,7 +12,7 @@ use dashmap::DashMap;
 
 use synergos_ipc::response::{ProjectDetail, ProjectInfo};
 use synergos_net::gossip::GossipNode;
-use synergos_net::types::TopicId;
+use synergos_net::types::{FileId, TopicId};
 
 use crate::event_bus::SharedEventBus;
 
@@ -185,6 +185,11 @@ pub struct ProjectManager {
     projects: DashMap<String, ManagedProject>,
     /// 招待トークン → project_id のマッピング
     invites: DashMap<String, InviteToken>,
+    /// ファイル ID → プロジェクト相対パス のマッピング (project_id ごと)。
+    /// publish_updates / share_file 時に登録され、受信側での保存先解決
+    /// (`out_path_resolver`) に使われる。FileId の中身が relative path
+    /// そのままでなくても動くよう、名前解決はこちら経由に寄せる。
+    file_paths: DashMap<(String, FileId), PathBuf>,
     event_bus: SharedEventBus,
     /// Gossipsub（任意）: プロジェクト開閉時にトピック subscribe/unsubscribe を行う
     gossip: Option<Arc<GossipNode>>,
@@ -202,9 +207,34 @@ impl ProjectManager {
         Self {
             projects: DashMap::new(),
             invites: DashMap::new(),
+            file_paths: DashMap::new(),
             event_bus,
             gossip,
         }
+    }
+
+    /// ファイル ID をプロジェクト相対パスに紐付けて登録する。
+    /// publish_updates / share_file から呼ばれ、受信側で file_id から
+    /// 保存先パスを引けるようにする。
+    pub fn register_file(&self, project_id: &str, file_id: FileId, relative: PathBuf) {
+        self.file_paths
+            .insert((project_id.to_string(), file_id), relative);
+    }
+
+    /// `project_id` + `file_id` から絶対保存先パスを解決する。
+    /// - 事前に `register_file` で明示的に紐付けられていればそれを優先
+    /// - 無ければ FileId の文字列をプロジェクト相対パスとして扱う (publish
+    ///   経由で登録した場合の既定動作との互換性を保つ)
+    pub fn resolve_file_path(&self, project_id: &str, file_id: &FileId) -> Option<PathBuf> {
+        let root = self.project_root(project_id)?;
+        if let Some(rel) = self
+            .file_paths
+            .get(&(project_id.to_string(), file_id.clone()))
+        {
+            return Some(root.join(&*rel));
+        }
+        // fallback: FileId をそのまま相対パスとして扱う
+        Some(root.join(&file_id.0))
     }
 
     /// 期限切れ招待トークンを除去

@@ -18,6 +18,7 @@
 //! 3. ピアの公開鍵が PeerId に一致しない場合は TLS ハンドシェイク時点で
 //!    拒否する。緩和パス (旧 `DevOnlySkipVerify`) は完全に削除した。
 
+pub mod hello;
 mod verifier;
 
 use std::net::SocketAddr;
@@ -222,6 +223,15 @@ impl QuicManager {
 
         let rtt = connection.rtt().as_millis() as u32;
 
+        // 相互認識のため HLO1 ストリームで自分の署名 Hello を送る。
+        // 失敗しても接続は閉じる (相手にこちらの PeerId を確信させられない)。
+        if let Err(e) = hello::send_hello(&connection, &self.identity).await {
+            connection.close(0u32.into(), b"hello failed");
+            return Err(SynergosNetError::Identity(format!(
+                "hello send failed: {e}"
+            )));
+        }
+
         let quic_conn = QuicConnection {
             peer_id: expected_peer_id.clone(),
             remote_addr: addr,
@@ -347,7 +357,15 @@ impl QuicManager {
         let remote_addr = connection.remote_address();
         let rtt = connection.rtt().as_millis() as u32;
 
-        let peer_id = peer_id_from_connection(&connection)?;
+        // クライアントからの HLO1 Hello を待って peer_id を確定させる。
+        // タイムアウト / 不正 Hello ならコネクションを閉じて拒否する。
+        let peer_id = match hello::recv_hello(&connection).await {
+            Ok(pid) => pid,
+            Err(e) => {
+                connection.close(0u32.into(), b"hello rejected");
+                return Err(e);
+            }
+        };
 
         let quic_conn = QuicConnection {
             peer_id: peer_id.clone(),
@@ -489,29 +507,6 @@ pub struct AcceptedConnection {
     pub peer_id: PeerId,
     pub remote_addr: SocketAddr,
     pub connection: quinn::Connection,
-}
-
-/// quinn::Connection から相手のピア証明書を取り出し、SPKI の公開鍵から
-/// PeerId を再計算する。サーバ側は `no_client_auth` で接続を受けるので
-/// クライアント証明書は存在せず、このヘルパは accept 側でも SPKI が
-/// 取れない前提。よって今は remote_address から派生した仮 PeerId を返す。
-fn peer_id_from_connection(connection: &quinn::Connection) -> Result<PeerId> {
-    if let Some(identity) = connection.peer_identity() {
-        if let Ok(certs) = identity.downcast::<Vec<rustls::pki_types::CertificateDer<'static>>>() {
-            if let Some(cert) = certs.first() {
-                if let Some(peer_id) = verifier::peer_id_from_cert(cert.as_ref()) {
-                    return Ok(peer_id);
-                }
-            }
-        }
-    }
-    // クライアント証明書が無い場合は、remote_addr 由来のダミー PeerId を
-    // 返す。これはゴシップ層で正しい PeerId が確定するまでの橋渡し用で、
-    // 真性認証は gossip 署名側で担保する。
-    Ok(PeerId::new(format!(
-        "pending-{}",
-        connection.remote_address()
-    )))
 }
 
 /// rcgen で ed25519 keypair から自己署名証明書を作り、rustls が受け取れる

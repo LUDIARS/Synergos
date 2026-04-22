@@ -130,8 +130,9 @@ pub(crate) fn extract_ed25519_spki(cert_der: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// `accept` 時に相手の証明書 DER から PeerId を再計算するためのヘルパ。
-/// サーバ側は現状クライアント証明書を要求していないので、ここが呼ばれるのは
-/// 相互認証を導入したときに限られる。
+/// サーバ側は現状クライアント証明書を要求していないのでテスト専用扱い。
+/// 将来クライアント証明書を要求する mTLS に切り替えたときはここを使う。
+#[cfg(test)]
 pub(crate) fn peer_id_from_cert(cert_der: &[u8]) -> Option<PeerId> {
     let pubkey = extract_ed25519_spki(cert_der)?;
     if pubkey.len() != 32 {

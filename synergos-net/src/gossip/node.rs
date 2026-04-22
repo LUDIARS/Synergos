@@ -6,6 +6,7 @@ use tokio::sync::broadcast;
 
 use super::message::canonical_bytes;
 use super::message::*;
+use super::transport::OutboundGossip;
 use crate::config::GossipsubConfig;
 use crate::identity::Identity;
 use crate::types::{MessageId, PeerId, TopicId};
@@ -100,6 +101,9 @@ pub struct GossipNode {
     message_cache: MessageCache,
     /// 受信メッセージの通知チャンネル
     tx: broadcast::Sender<(TopicId, GossipMessage)>,
+    /// 送信 (fan-out) メッセージの通知チャンネル。Daemon の gossip 送信タスクが
+    /// これを購読し、QUIC 上で `send_gossip` を使って各メッシュピアへ配信する。
+    outbound_tx: broadcast::Sender<OutboundGossip>,
     /// パラメータ
     params: GossipsubConfig,
     /// 自ノードの ed25519 identity。`with_identity` で設定された時のみ
@@ -113,16 +117,24 @@ pub struct GossipNode {
 impl GossipNode {
     pub fn new(local_peer_id: PeerId, params: GossipsubConfig) -> Self {
         let (tx, _) = broadcast::channel(256);
+        let (outbound_tx, _) = broadcast::channel(256);
         Self {
             local_peer_id,
             mesh: DashMap::new(),
             fanout: DashMap::new(),
             message_cache: MessageCache::new(params.message_cache_size),
             tx,
+            outbound_tx,
             params,
             identity: None,
             require_signature: false,
         }
+    }
+
+    /// Daemon の送信タスクが購読する outbound チャネルを取得する。
+    /// `publish()` のたびに (topic, signed, mesh peers) が流れてくる。
+    pub fn outbound_receiver(&self) -> broadcast::Receiver<OutboundGossip> {
+        self.outbound_tx.subscribe()
     }
 
     /// 署名付き送信 + 検証に使う Identity を差し込む。
@@ -175,14 +187,26 @@ impl GossipNode {
             return vec![]; // already published
         }
 
-        // broadcast channel に通知
-        let _ = self.tx.send((topic.clone(), message));
+        // ローカルの broadcast channel に通知 (自ノード内の購読者向け)
+        let _ = self.tx.send((topic.clone(), message.clone()));
 
-        // メッシュピアのリストを返す（実際の送信は上位レイヤが行う）
-        self.mesh
+        let peers = self
+            .mesh
             .get(topic)
             .map(|peers| peers.clone())
-            .unwrap_or_default()
+            .unwrap_or_default();
+
+        // Identity を持っていれば署名して outbound にも流す。
+        // Daemon の送信タスクがこれを拾って QUIC で各メッシュピアに配る。
+        if let Some(signed) = self.envelope(message) {
+            let _ = self.outbound_tx.send(OutboundGossip {
+                topic: topic.clone(),
+                signed,
+                peers: peers.clone(),
+            });
+        }
+
+        peers
     }
 
     /// 署名付き受信メッセージの処理。検証成功時はキャッシュチェック + 配信する。
