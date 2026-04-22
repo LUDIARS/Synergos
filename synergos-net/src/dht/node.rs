@@ -82,7 +82,6 @@ impl Default for FindNodeOptions {
 const DHT_STORE_MAX: usize = 10_000;
 
 /// DHT ノード（Kademlia ベース）
-#[allow(dead_code)]
 pub struct DhtNode {
     /// 自身のピアID
     pub local_peer_id: PeerId,
@@ -92,8 +91,6 @@ pub struct DhtNode {
     routing_table: RwLock<RoutingTable>,
     /// ノード情報ストア
     store: DashMap<NodeId, PeerRecord>,
-    /// 設定
-    config: DhtConfig,
 }
 
 impl DhtNode {
@@ -105,7 +102,6 @@ impl DhtNode {
             node_id,
             routing_table: RwLock::new(routing_table),
             store: DashMap::new(),
-            config,
         }
     }
 

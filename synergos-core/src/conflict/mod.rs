@@ -263,6 +263,52 @@ impl ConflictManager {
     }
 
     /// ホットスタンバイの期限切れ通知を削除（TTL: 24時間）
+    /// Gossip で受信した `ConflictAlert` をローカルの conflicts に反映する。
+    /// 既に同 file_id が登録済みの場合は involved_peers を追加し重複排除、
+    /// 未登録なら最小情報の ConflictInfo を生成して Active として登録する。
+    pub fn handle_conflict_alert(
+        &self,
+        file_id: FileId,
+        conflicting_nodes: Vec<PeerId>,
+        their_versions: Vec<u64>,
+    ) {
+        if let Some(mut entry) = self.conflicts.get_mut(&file_id) {
+            for p in &conflicting_nodes {
+                if !entry.involved_peers.contains(p) {
+                    entry.involved_peers.push(p.clone());
+                }
+            }
+        } else {
+            let remote_version = their_versions.iter().max().copied().unwrap_or(0);
+            let remote_author = conflicting_nodes
+                .first()
+                .cloned()
+                .unwrap_or_else(|| PeerId::new("unknown"));
+            let info = ConflictInfo {
+                file_id: file_id.clone(),
+                common_ancestor_hash: None,
+                common_ancestor_version: 0,
+                local_version: 0,
+                local_author: PeerId::new("local"),
+                remote_version,
+                remote_author,
+                involved_peers: conflicting_nodes,
+                detected_at: now_ms(),
+                state: ConflictState::Active,
+                file_path: String::new(),
+                project_id: String::new(),
+            };
+            // EventBus にも通知してから登録
+            self.event_bus.emit(ConflictDetectedEvent {
+                project_id: info.project_id.clone(),
+                file_id: info.file_id.to_string(),
+                file_path: info.file_path.clone(),
+                involved_peers: info.involved_peers.iter().map(|p| p.to_string()).collect(),
+            });
+            self.conflicts.insert(file_id, info);
+        }
+    }
+
     pub fn cleanup_expired_notifications(&self, ttl_ms: u64) {
         let now = now_ms();
         self.hot_standby.iter_mut().for_each(|mut entry| {

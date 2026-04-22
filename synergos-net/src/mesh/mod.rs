@@ -105,18 +105,23 @@ impl Mesh {
     /// 2. DNS-over-HTTPS で AAAA レコードを解決
     /// 3. フォールバック: 通常の DNS 解決
     pub async fn resolve_fqdn(&self, fqdn: &str) -> Result<ResolveResult> {
-        // 1. キャッシュ確認
-        if let Some(cached) = self.dns_cache.get(fqdn) {
-            if cached.cached_at.elapsed() < cached.ttl {
-                return Ok(ResolveResult {
-                    addresses: cached.addresses.clone(),
-                    method: ResolveMethod::Cached,
-                    resolve_time_ms: 0,
-                });
+        // 1. キャッシュ確認 — entry API で get → drop → remove の TOCTOU を潰す
+        //    (この間に別 task が新しい値を insert していたら remove で消えてしまっていた)
+        use dashmap::mapref::entry::Entry;
+        match self.dns_cache.entry(fqdn.to_string()) {
+            Entry::Occupied(occ) => {
+                if occ.get().cached_at.elapsed() < occ.get().ttl {
+                    let addresses = occ.get().addresses.clone();
+                    return Ok(ResolveResult {
+                        addresses,
+                        method: ResolveMethod::Cached,
+                        resolve_time_ms: 0,
+                    });
+                }
+                // TTL 切れなら同一ロック内で remove
+                occ.remove();
             }
-            // TTL 切れ → 削除
-            drop(cached);
-            self.dns_cache.remove(fqdn);
+            Entry::Vacant(_) => {}
         }
 
         let start = Instant::now();

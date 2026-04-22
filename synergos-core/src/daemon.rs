@@ -30,22 +30,10 @@ use crate::presence::{NodeRegistry, PresenceService};
 use crate::project::ProjectManager;
 
 /// デーモン設定
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
+#[derive(Debug, Clone, Default)]
 pub struct DaemonConfig {
     /// ネットワーク設定ファイルパス
     pub config_path: Option<PathBuf>,
-    /// ログレベル
-    pub log_level: String,
-}
-
-impl Default for DaemonConfig {
-    fn default() -> Self {
-        Self {
-            config_path: None,
-            log_level: "info".to_string(),
-        }
-    }
 }
 
 /// ネットワーク基盤のハンドル群（Daemon が保持して寿命を合わせる）
@@ -544,8 +532,17 @@ fn spawn_gossip_subscriber(
                         Ok((_topic, GossipMessage::FileOffer { sender, file_id, version, size, crc, content_hash: _ })) => {
                             ctx.exchange.handle_file_offer(sender, file_id, version, size, crc);
                         }
-                        Ok(_) => {
-                            // CatalogUpdate / PeerStatus / ConflictAlert は別系統で処理
+                        Ok((_topic, GossipMessage::PeerStatus { status, origin, .. })) => {
+                            ctx.presence.handle_peer_status(&status, &origin);
+                        }
+                        Ok((_topic, GossipMessage::ConflictAlert { file_id, conflicting_nodes, their_versions })) => {
+                            ctx.conflict_manager.handle_conflict_alert(file_id, conflicting_nodes, their_versions);
+                        }
+                        Ok((_topic, GossipMessage::CatalogUpdate { project_id, root_crc, update_count, .. })) => {
+                            // CatalogManager の本格 merge は別タスク。現状は observability のみ。
+                            tracing::debug!(
+                                "gossip CatalogUpdate: project={project_id} root_crc={root_crc:x} updates={update_count}"
+                            );
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                             tracing::warn!("gossip subscriber lagged; dropped {n} messages");

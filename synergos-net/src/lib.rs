@@ -51,7 +51,6 @@ pub trait NetEventHandler: Send + Sync + 'static {
 /// Network Foundation Layer のエントリポイント。
 /// `Daemon` は個別コンポーネントを直接配線するためこの集約 struct は
 /// 現状インスタンス化されない (将来の組込みホスト向け便宜)。
-#[allow(dead_code)]
 pub struct SynergosNet {
     pub config: NetConfig,
     pub dht: DhtNode,
@@ -62,6 +61,8 @@ pub struct SynergosNet {
     pub tunnel: Arc<TunnelManager>,
     pub mesh: Arc<Mesh>,
     pub conduit: Conduit,
+    /// 上位レイヤにイベントを通知するハンドラ (embed 用)
+    #[allow(dead_code)]
     handler: Arc<dyn NetEventHandler>,
 }
 

@@ -311,7 +311,7 @@ async fn handle_client(
 }
 
 /// Unix / Windows 共通のクライアント処理。
-async fn handle_client_generic<R, W>(
+pub async fn handle_client_generic<R, W>(
     mut reader: R,
     writer: Arc<Mutex<W>>,
     ctx: Arc<ServiceContext>,
@@ -549,32 +549,6 @@ fn filter_event_one(
         EventFilter::Category(target) => {
             if std::mem::discriminant(target) == std::mem::discriminant(category) {
                 Some(())
-            } else {
-                None
-            }
-        }
-    }
-}
-
-/// (旧シグネチャ、互換のため残置) フィルタ 1 件で判定して event を返す。
-#[allow(dead_code)]
-fn filter_event(
-    filter: &EventFilter,
-    category: EventCategory,
-    project_id: Option<&str>,
-    event: IpcEvent,
-) -> Option<IpcEvent> {
-    match filter {
-        EventFilter::All => Some(event),
-        EventFilter::Project(target) => match project_id {
-            Some(p) if p == target => Some(event),
-            Some(_) => None,
-            // プロジェクト非依存イベント (Network / Transfer 等) は透過
-            None => Some(event),
-        },
-        EventFilter::Category(target) => {
-            if std::mem::discriminant(target) == std::mem::discriminant(&category) {
-                Some(event)
             } else {
                 None
             }

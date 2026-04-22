@@ -49,7 +49,6 @@ struct ManagedPeer {
 ///
 /// 各ピアへの最適な接続経路を選択し、接続の確立・維持・切り替えを管理する。
 /// IPv6 Direct → Tunnel → Relay の優先度で接続を試行する。
-#[allow(dead_code)]
 pub struct Conduit {
     /// 管理中のピア（PeerId → ManagedPeer）
     peers: DashMap<PeerId, ManagedPeer>,
@@ -57,10 +56,8 @@ pub struct Conduit {
     quic: Arc<QuicManager>,
     /// Tunnel マネージャ
     tunnel: Arc<TunnelManager>,
-    /// Mesh マネージャ
+    /// Mesh マネージャ (probe_ipv6 等で使う)
     mesh: Arc<Mesh>,
-    /// Keepalive 間隔
-    keepalive_interval: Duration,
 }
 
 impl Conduit {
@@ -68,14 +65,13 @@ impl Conduit {
         quic: Arc<QuicManager>,
         tunnel: Arc<TunnelManager>,
         mesh: Arc<Mesh>,
-        keepalive_interval: Duration,
+        _keepalive_interval: Duration,
     ) -> Self {
         Self {
             peers: DashMap::new(),
             quic,
             tunnel,
             mesh,
-            keepalive_interval,
         }
     }
 
@@ -114,28 +110,22 @@ impl Conduit {
 
     /// ピアに接続する（最適な経路を自動選択）
     pub async fn connect_peer(&self, peer_id: &PeerId) -> Result<RouteKind> {
-        let peer = self
-            .peers
-            .get(peer_id)
-            .ok_or_else(|| SynergosNetError::PeerNotFound(peer_id.to_string()))?;
-
-        // 状態を Connecting に更新
-        drop(peer);
-        if let Some(mut entry) = self.peers.get_mut(peer_id) {
+        // S19: get → drop → get_mut の多段アクセスをやめ、単一 get_mut で
+        // 状態遷移と routes の複製を 1 ロック内で済ませる。
+        let routes = {
+            let mut entry = self
+                .peers
+                .get_mut(peer_id)
+                .ok_or_else(|| SynergosNetError::PeerNotFound(peer_id.to_string()))?;
             entry.state = ConnectionState::Connecting;
-        }
+            entry.routes.clone()
+        };
 
-        let peer = self
-            .peers
-            .get(peer_id)
-            .ok_or_else(|| SynergosNetError::PeerNotFound(peer_id.to_string()))?;
-
-        // 経路の優先度順に接続を試行
-        let route_result = self.try_connect_routes(peer_id, &peer.routes).await;
+        // 経路の優先度順に接続を試行 (ロック外で await)
+        let route_result = self.try_connect_routes(peer_id, &routes).await;
 
         match route_result {
             Ok(route_kind) => {
-                drop(peer);
                 if let Some(mut entry) = self.peers.get_mut(peer_id) {
                     entry.active_route = Some(route_kind);
                     entry.state = ConnectionState::Connected {
@@ -148,7 +138,6 @@ impl Conduit {
                 Ok(route_kind)
             }
             Err(e) => {
-                drop(peer);
                 if let Some(mut entry) = self.peers.get_mut(peer_id) {
                     entry.state = ConnectionState::Disconnected {
                         reason: e.to_string(),
@@ -213,16 +202,20 @@ impl Conduit {
             .get(peer_id)
             .ok_or_else(|| SynergosNetError::PeerNotFound(peer_id.to_string()))?;
 
-        let current_route = match &peer.active_route {
-            Some(r) => *r,
-            None => return Ok(None),
-        };
-
-        let endpoint = PeerEndpoint {
-            peer_id: peer.peer_id.clone(),
-            display_name: peer.display_name.clone(),
-            routes: peer.routes.clone(),
-            state: peer.state.clone(),
+        // S19: get した後 drop→get_mut するのをやめ、参照内で情報を抜き出して
+        // その場で drop する。get 自体は non-mut なのでブロックしない。
+        let (current_route, endpoint) = {
+            let current_route = match &peer.active_route {
+                Some(r) => *r,
+                None => return Ok(None),
+            };
+            let endpoint = PeerEndpoint {
+                peer_id: peer.peer_id.clone(),
+                display_name: peer.display_name.clone(),
+                routes: peer.routes.clone(),
+                state: peer.state.clone(),
+            };
+            (current_route, endpoint)
         };
         drop(peer);
 
