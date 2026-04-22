@@ -24,6 +24,7 @@ fn make_ctx() -> Arc<ServiceContext> {
         conflict_manager: Arc::new(ConflictManager::new(event_bus.clone())),
         shutdown_tx,
         started_at: 0,
+        net_config: None,
     })
 }
 

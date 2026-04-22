@@ -4178,6 +4178,7 @@ dependencies = [
  "pretty_assertions",
  "quinn",
  "serde",
+ "serde_json",
  "serial_test",
  "synergos-ipc",
  "synergos-net",

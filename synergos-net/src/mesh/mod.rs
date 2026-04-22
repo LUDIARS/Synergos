@@ -194,15 +194,23 @@ impl Mesh {
         let timeout = Duration::from_millis(self.config.probe_timeout_ms as u64);
         let start = Instant::now();
 
-        // TCP 接続でプローブ（QUIC ポートへの到達性確認）
-        let result = tokio::time::timeout(
-            timeout,
-            tokio::net::TcpStream::connect(SocketAddr::V6(addr)),
-        )
-        .await;
+        // QUIC は UDP ベースなので TCP では正確に検証できない (Issue #6 §3.5)。
+        // UDP パケットを 1 発送ってみて「ICMP unreachable」等が即座に返るかで
+        // 判断する。相手側が UDP で応答する保証はないので、成功 = "port is
+        // reachable (no ICMP rejection)" という意味合いに留める。
+        let probe = async {
+            use tokio::net::UdpSocket;
+            let sock = UdpSocket::bind("[::]:0").await?;
+            sock.connect(SocketAddr::V6(addr)).await?;
+            // 最小の QUIC Initial-ish: 1 byte だけ投げる。相手が QUIC なら
+            // 無視され、relay が閉じていれば ICMP port unreachable が返る。
+            let _ = sock.send(&[0]).await?;
+            std::io::Result::Ok(())
+        };
 
+        let result = tokio::time::timeout(timeout, probe).await;
         match result {
-            Ok(Ok(_stream)) => {
+            Ok(Ok(())) => {
                 let rtt = start.elapsed().as_millis() as u32;
                 ProbeResult {
                     reachable: true,
@@ -214,7 +222,7 @@ impl Mesh {
             Ok(Err(e)) => ProbeResult {
                 reachable: false,
                 rtt_ms: None,
-                error: Some(format!("Connection failed: {}", e)),
+                error: Some(format!("UDP probe failed: {}", e)),
                 addr: Some(addr),
             },
             Err(_) => ProbeResult {
