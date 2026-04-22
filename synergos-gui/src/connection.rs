@@ -32,6 +32,12 @@ pub struct ConnectionCache {
     pub last_refresh: Option<std::time::Instant>,
 }
 
+impl Default for CoreConnection {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CoreConnection {
     pub fn new() -> Self {
         let runtime = tokio::runtime::Builder::new_multi_thread()
