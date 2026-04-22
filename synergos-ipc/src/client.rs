@@ -15,7 +15,9 @@ use crate::event::IpcEvent;
 use crate::response::IpcResponse;
 use crate::transport::{IpcError, IpcTransport, ServerMessage};
 use std::sync::Arc;
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::AsyncRead;
+#[cfg(test)]
+use tokio::io::AsyncWrite;
 use tokio::sync::{mpsc, oneshot, Mutex};
 
 #[cfg(windows)]
@@ -181,10 +183,9 @@ async fn reader_task<R>(
     pending.clear();
 }
 
-// AsyncWrite bound は WriterHalf の型エイリアスに既に含まれる。
-// (明示制約は不要だが可読性のため inline で残す)
-#[allow(dead_code)]
-fn _assert_write_bounds() {
+// AsyncWrite bound 静的確認 (コンパイル時のみ実行される保証 check)。
+#[cfg(test)]
+const _: fn() = || {
     fn _is_write<W: AsyncWrite + Unpin>() {}
     _is_write::<WriterHalf>();
-}
+};

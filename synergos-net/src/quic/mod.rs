@@ -320,6 +320,14 @@ impl QuicManager {
             })
     }
 
+    /// 低レベルの `quinn::Connection` を取得する。テスト / 外部の accept_bi ループ
+    /// 等で直接使う用。通常は `open_stream` を使うこと。
+    pub fn raw_connection(&self, peer_id: &PeerId) -> Option<quinn::Connection> {
+        self.connections
+            .get(peer_id)
+            .and_then(|e| e.connection.clone())
+    }
+
     /// 全接続の情報を取得
     pub fn list_connections(&self) -> Vec<QuicConnectionInfo> {
         self.connections

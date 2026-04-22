@@ -148,7 +148,6 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             tracing::info!("Starting Synergos core daemon...");
             let daemon_config = DaemonConfig {
                 config_path: config,
-                ..Default::default()
             };
             let daemon = Daemon::new(daemon_config).await?;
             daemon.run().await?;

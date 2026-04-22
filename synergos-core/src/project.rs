@@ -197,7 +197,6 @@ pub struct ProjectManager {
 
 impl ProjectManager {
     /// 最小構成のコンストラクタ（テスト・後方互換用）
-    #[allow(dead_code)]
     pub fn new(event_bus: SharedEventBus) -> Self {
         Self::with_gossip(event_bus, None)
     }

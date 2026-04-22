@@ -89,13 +89,15 @@ impl MessageCache {
 }
 
 /// Gossipsub ノード
-#[allow(dead_code)]
 pub struct GossipNode {
-    /// ローカルピアID
+    /// ローカルピアID (将来の「自分向けメッセージを除外」等で使う予定の
+    /// identity 置き場。現状は publish フロー上不要だが構造的に保持する)
+    #[allow(dead_code)]
     local_peer_id: PeerId,
     /// メッシュピア（Topic ごと）
     mesh: DashMap<TopicId, Vec<PeerId>>,
-    /// ファンアウトピア（Topic ごと）
+    /// ファンアウトピア（Topic ごと、購読外 Topic 用の lazy mesh）
+    #[allow(dead_code)]
     fanout: DashMap<TopicId, Vec<PeerId>>,
     /// メッセージキャッシュ
     message_cache: MessageCache,

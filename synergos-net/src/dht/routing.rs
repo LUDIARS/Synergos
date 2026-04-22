@@ -87,24 +87,17 @@ impl KBucket {
 }
 
 /// Kademlia ルーティングテーブル
-#[allow(dead_code)]
 pub struct RoutingTable {
     /// 自身のノードID
     local_id: NodeId,
     /// 256 個の k-bucket (距離 0〜255)
     buckets: Vec<KBucket>,
-    /// k-bucket サイズ
-    k: usize,
 }
 
 impl RoutingTable {
     pub fn new(local_id: NodeId, k: usize) -> Self {
         let buckets = (0..256).map(|_| KBucket::new(k)).collect();
-        Self {
-            local_id,
-            buckets,
-            k,
-        }
+        Self { local_id, buckets }
     }
 
     /// ピアをルーティングテーブルに追加

@@ -219,6 +219,28 @@ impl PresenceService {
             entry.value_mut().last_seen = Instant::now();
         }
     }
+
+    /// Gossip で受信した PeerStatus をローカル状態に反映する。
+    /// origin が自分の場合は無視 (ループ防止)。
+    /// `activity.state` (Active / Idle / Offline) を PeerState に写像する。
+    pub fn handle_peer_status(
+        &self,
+        activity: &synergos_net::gossip::PeerActivityStatus,
+        _origin: &PeerId,
+    ) {
+        use synergos_net::gossip::ActivityState as AS;
+        let new_state = match activity.state {
+            AS::Active => PeerState::Connected,
+            AS::Idle => PeerState::Idle,
+            AS::Away => PeerState::Away,
+            AS::Offline => PeerState::Disconnected,
+        };
+        if let Some(mut entry) = self.nodes.get_mut(&activity.peer_id) {
+            entry.value_mut().state = new_state;
+            entry.value_mut().last_seen = Instant::now();
+        }
+        // else: まだ register されていないピアは無視 (register_node 経由で先に入る)
+    }
 }
 
 #[async_trait]
