@@ -65,6 +65,37 @@ async fn connect_succeeds_with_matching_peer_id() {
 }
 
 #[tokio::test]
+async fn mutual_auth_server_learns_client_peer_id() {
+    // サーバ側 accept が HLO1 経由でクライアントの真の PeerId を取得できる。
+    let server_id = Arc::new(Identity::generate());
+    let client_id = Arc::new(Identity::generate());
+    let expected_client = client_id.peer_id().clone();
+
+    let (server, server_addr) = bind_server(server_id.clone()).await;
+    let client = build_client(client_id).await;
+
+    let server_clone = server.clone();
+    let accept_task = tokio::spawn(async move { server_clone.accept().await });
+
+    client
+        .connect(server_id.peer_id().clone(), server_addr, "synergos")
+        .await
+        .expect("client connect with hello");
+
+    let accepted = tokio::time::timeout(Duration::from_secs(2), accept_task)
+        .await
+        .expect("accept task finishes")
+        .expect("task joins")
+        .expect("accept ok")
+        .expect("some connection");
+
+    assert_eq!(
+        accepted.peer_id, expected_client,
+        "server must identify client via HLO1 (not pending-{{addr}})"
+    );
+}
+
+#[tokio::test]
 async fn disconnect_removes_connection_entry() {
     let server_id = Arc::new(Identity::generate());
     let client_id = Arc::new(Identity::generate());

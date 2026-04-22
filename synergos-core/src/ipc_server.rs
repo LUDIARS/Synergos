@@ -908,9 +908,15 @@ pub async fn dispatch_command(command: IpcCommand, ctx: &ServiceContext) -> IpcR
                     .map(|r| r.to_path_buf())
                     .unwrap_or(canonical.clone());
 
+                let file_id = FileId::new(rel.to_string_lossy().to_string());
+                // ProjectManager に file_id → rel 相対パスを登録して、
+                // 受信側の out_path_resolver が確実に解決できるようにする。
+                ctx.project_manager
+                    .register_file(&project_id, file_id.clone(), rel.clone());
+
                 notifications.push(PublishNotification {
                     project_id: project_id.clone(),
-                    file_id: FileId::new(rel.to_string_lossy().to_string()),
+                    file_id,
                     file_path: canonical,
                     file_size,
                     crc,
