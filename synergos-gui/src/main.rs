@@ -5,9 +5,7 @@
 //!
 //! git に対する SourceTree のような位置づけ。Ars には一切依存しない。
 
-mod app;
-mod connection;
-mod ui;
+use synergos_gui::app;
 
 use tracing_subscriber::EnvFilter;
 

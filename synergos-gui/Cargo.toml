@@ -33,3 +33,7 @@ thiserror = "2"
 tokio = { version = "1", features = ["full", "test-util"] }
 pretty_assertions = "1"
 assert_matches = "1"
+
+# GUI テストハーネス (Issue #9 PR-13)。ヘッドレスで UI をレンダリングし、
+# 表示内容やクリックの結果を検証する。スナップショット機能は別 feature。
+egui_kittest = "0.31"
