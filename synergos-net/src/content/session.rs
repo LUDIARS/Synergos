@@ -92,7 +92,7 @@ where
                     resps.len()
                 )));
             }
-            for (cid, r) in batch.iter().zip(resps.into_iter()) {
+            for (cid, r) in batch.iter().zip(resps) {
                 let has = matches!(r, BitswapResponse::Have { .. });
                 results.push((cid.clone(), has));
             }
@@ -161,7 +161,7 @@ where
             )));
         }
         let mut out = Vec::with_capacity(cids.len());
-        for (cid, r) in cids.into_iter().zip(resps.into_iter()) {
+        for (cid, r) in cids.into_iter().zip(resps) {
             match r {
                 BitswapResponse::Block {
                     cid: got_cid,
