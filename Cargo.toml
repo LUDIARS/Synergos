@@ -4,6 +4,7 @@ members = [
     "synergos-ipc",
     "synergos-core",
     "synergos-gui",
+    "synergos-relay",
     "ars-plugin-synergos",
 ]
 resolver = "2"
