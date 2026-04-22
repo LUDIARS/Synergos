@@ -3,6 +3,8 @@
 //! NAT を介さない直接接続を確立するためのコンポーネント。
 //! FQDN → IPv6 解決、到達性プローブ、TURN/STUN セッション管理を提供する。
 
+pub mod stun;
+
 use std::net::{Ipv6Addr, SocketAddr, SocketAddrV6};
 use std::time::{Duration, Instant};
 
@@ -287,6 +289,13 @@ impl Mesh {
                 server_uri
             )))
         }
+    }
+
+    /// STUN Binding Discovery で自分の public address を取得する (RFC 5389)。
+    /// NAT 外からどう見えているかを知るためのプローブ。IPv4 / IPv6 両対応。
+    pub async fn discover_public_address(&self, stun_server: SocketAddr) -> Result<SocketAddr> {
+        let timeout = Duration::from_millis(self.config.probe_timeout_ms as u64);
+        stun::discover_public_address(stun_server, timeout).await
     }
 
     /// 期限切れの TURN セッションをクリーンアップ

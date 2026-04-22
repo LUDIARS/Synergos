@@ -2,9 +2,19 @@
 //!
 //! cloudflared プロセスの起動・停止・ヘルスチェックを管理する。
 //! QUIC トランスポート経由でピア接続を中継する。
+//!
+//! ## プロセス supervisor
+//!
+//! `start()` 成功時にバックグラウンドで child を監視するタスクを spawn する:
+//!   - stdout / stderr を 1 行ずつ tracing に流す (最大バッファサイズで切る)
+//!   - 子プロセスが exit したら state を `Error` に遷移
+//!   - `auto_restart=true` のときは指数バックオフで再起動を試みる
+//!     (`restart_base_ms` × 2^N、上限 `restart_max_ms`)
 
-use std::time::Instant;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::RwLock;
 
 use crate::config::TunnelConfig;
@@ -43,6 +53,8 @@ pub struct TunnelManager {
     state: RwLock<TunnelState>,
     /// cloudflared プロセスハンドル
     process: RwLock<Option<tokio::process::Child>>,
+    /// supervisor タスクハンドル (stop で abort する)
+    supervisor: RwLock<Option<tokio::task::JoinHandle<()>>>,
     /// ヘルスチェック結果
     health: RwLock<Option<TunnelHealth>>,
     /// 起動時刻
@@ -56,6 +68,7 @@ impl TunnelManager {
             config: config.clone(),
             state: RwLock::new(TunnelState::Idle),
             process: RwLock::new(None),
+            supervisor: RwLock::new(None),
             health: RwLock::new(None),
             started_at: RwLock::new(None),
         }
@@ -81,8 +94,11 @@ impl TunnelManager {
         }
     }
 
-    /// cloudflared プロセスを起動して Tunnel を確立する
-    pub async fn start(&self) -> Result<String> {
+    /// cloudflared プロセスを起動して Tunnel を確立する。
+    /// 起動成功後、バックグラウンドで supervisor が stdout/stderr を
+    /// tracing に流し、crash したら指数バックオフで再起動する
+    /// (`config.auto_restart` が true の場合)。
+    pub async fn start(self: &Arc<Self>) -> Result<String> {
         {
             let state = self.state.read().await;
             if matches!(&*state, TunnelState::Active { .. } | TunnelState::Starting) {
@@ -95,35 +111,46 @@ impl TunnelManager {
         *self.state.write().await = TunnelState::Starting;
         tracing::info!("Starting Cloudflare Tunnel...");
 
-        // cloudflared プロセスを起動
-        let result = self.spawn_cloudflared().await;
-
-        match result {
-            Ok(tunnel_id) => {
-                *self.started_at.write().await = Some(Instant::now());
-                *self.state.write().await = TunnelState::Active {
-                    tunnel_id: tunnel_id.clone(),
-                    uptime_secs: 0,
-                };
-                tracing::info!(
-                    "Tunnel active: id={}, hostname={}",
-                    tunnel_id,
-                    self.hostname
-                );
-                Ok(tunnel_id)
-            }
+        // 最初の起動を実行
+        let tunnel_id = match self.spawn_cloudflared().await {
+            Ok(id) => id,
             Err(e) => {
                 *self.state.write().await = TunnelState::Error {
                     message: e.to_string(),
                 };
-                Err(e)
+                return Err(e);
             }
-        }
+        };
+
+        *self.started_at.write().await = Some(Instant::now());
+        *self.state.write().await = TunnelState::Active {
+            tunnel_id: tunnel_id.clone(),
+            uptime_secs: 0,
+        };
+        tracing::info!(
+            "Tunnel active: id={}, hostname={}",
+            tunnel_id,
+            self.hostname
+        );
+
+        // supervisor を spawn (stdout 配線 + 自動再起動)
+        let me = self.clone();
+        let supervisor = tokio::spawn(async move {
+            me.supervise().await;
+        });
+        *self.supervisor.write().await = Some(supervisor);
+
+        Ok(tunnel_id)
     }
 
-    /// Tunnel を停止する
+    /// Tunnel を停止する (supervisor も停止)。
     pub async fn stop(&self) -> Result<()> {
         tracing::info!("Stopping Cloudflare Tunnel...");
+
+        // supervisor を先に止めることで再起動ループを断つ
+        if let Some(handle) = self.supervisor.write().await.take() {
+            handle.abort();
+        }
 
         // cloudflared プロセスを終了
         let mut process = self.process.write().await;
@@ -138,6 +165,108 @@ impl TunnelManager {
         *self.health.write().await = None;
 
         Ok(())
+    }
+
+    /// supervisor ループ: stdout/stderr を tracing に流しながら子プロセスを監視。
+    /// 子が exit したら (1) auto_restart 無効なら state を Idle に戻して終了、
+    /// (2) 有効なら指数バックオフで `spawn_cloudflared` を呼び直す。
+    async fn supervise(self: Arc<Self>) {
+        let mut failures: u32 = 0;
+        loop {
+            // 現在の子を取り出し、stdout/stderr をログ配線する
+            let (child_opt, stdout_task, stderr_task) = {
+                let mut guard = self.process.write().await;
+                if let Some(mut child) = guard.take() {
+                    let stdout = child.stdout.take();
+                    let stderr = child.stderr.take();
+                    let st = stdout.map(|out| {
+                        tokio::spawn(async move {
+                            let mut lines = BufReader::new(out).lines();
+                            while let Ok(Some(line)) = lines.next_line().await {
+                                tracing::debug!(target: "cloudflared", "{line}");
+                            }
+                        })
+                    });
+                    let se = stderr.map(|err| {
+                        tokio::spawn(async move {
+                            let mut lines = BufReader::new(err).lines();
+                            while let Ok(Some(line)) = lines.next_line().await {
+                                tracing::warn!(target: "cloudflared", "{line}");
+                            }
+                        })
+                    });
+                    (Some(child), st, se)
+                } else {
+                    (None, None, None)
+                }
+            };
+
+            let Some(mut child) = child_opt else {
+                // simulation mode / child 未保持 — 何もせず終了
+                return;
+            };
+
+            // 子の exit を待つ
+            let exit_status = match child.wait().await {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!("cloudflared wait failed: {e}");
+                    *self.state.write().await = TunnelState::Error {
+                        message: format!("wait failed: {e}"),
+                    };
+                    return;
+                }
+            };
+
+            // stdout/stderr の読取タスクを終わらせる
+            if let Some(h) = stdout_task {
+                h.abort();
+            }
+            if let Some(h) = stderr_task {
+                h.abort();
+            }
+
+            tracing::warn!(
+                "cloudflared exited with status {:?}; auto_restart={}",
+                exit_status.code(),
+                self.config.auto_restart
+            );
+
+            if !self.config.auto_restart {
+                *self.state.write().await = TunnelState::Error {
+                    message: format!("exited with {:?}", exit_status.code()),
+                };
+                return;
+            }
+
+            // 指数バックオフで再起動
+            failures = failures.saturating_add(1);
+            let delay = (self.config.restart_base_ms)
+                .saturating_mul(1u64 << failures.min(20))
+                .min(self.config.restart_max_ms);
+            tracing::info!("cloudflared restart in {}ms (attempt {failures})", delay);
+            tokio::time::sleep(Duration::from_millis(delay)).await;
+
+            match self.spawn_cloudflared().await {
+                Ok(new_id) => {
+                    tracing::info!("cloudflared respawned as {new_id}");
+                    *self.started_at.write().await = Some(Instant::now());
+                    *self.state.write().await = TunnelState::Active {
+                        tunnel_id: new_id,
+                        uptime_secs: 0,
+                    };
+                    // failures = 0; — 即リセットはしない。成功が安定して
+                    // 初めてカウンタを下げるべきだが、supervisor はシンプルに
+                    // バックオフ累積を継続する (連続落ちで早すぎる再起動を防ぐ)
+                }
+                Err(e) => {
+                    tracing::warn!("respawn failed: {e}");
+                    *self.state.write().await = TunnelState::Error {
+                        message: e.to_string(),
+                    };
+                }
+            }
+        }
     }
 
     /// Tunnel のヘルスチェックを実施

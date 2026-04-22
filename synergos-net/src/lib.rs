@@ -13,6 +13,7 @@ pub mod gossip;
 pub mod identity;
 pub mod mesh;
 pub mod quic;
+pub mod relay;
 pub mod transfer;
 pub mod tunnel;
 pub mod types;
