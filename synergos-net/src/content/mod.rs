@@ -15,12 +15,14 @@
 mod bitswap;
 mod block;
 mod chunker;
+mod session;
 mod store;
 
 pub use bitswap::{
-    handle_bitswap_stream, request_block, BitswapRequest, BitswapResponse, BITSWAP_STREAM_MAGIC,
-    MAX_BITSWAP_FRAME,
+    handle_bitswap_stream, request_block, request_many, send_cancel, BitswapRequest,
+    BitswapResponse, BITSWAP_STREAM_MAGIC, MAX_BITSWAP_FRAME, MAX_WANTLIST_LEN,
 };
 pub use block::{cid_for, Block};
 pub use chunker::{add_file, get_file, ChunkDag, ChunkerOptions};
+pub use session::{BitswapSession, FetchOutcome, SESSION_WANTLIST_CHUNK};
 pub use store::{ContentStore, FileContentStore, MemoryContentStore};

@@ -33,6 +33,7 @@ fn make_ctx() -> Arc<ServiceContext> {
         started_at: 0,
         net_config: None,
         catalogs: Arc::new(dashmap::DashMap::new()),
+        content_store: Arc::new(synergos_net::content::MemoryContentStore::new()),
     })
 }
 

@@ -4,7 +4,7 @@ use std::net::SocketAddrV6;
 use serde::{Deserialize, Serialize};
 
 /// ピア識別子
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub struct PeerId(pub String);
 
 impl PeerId {

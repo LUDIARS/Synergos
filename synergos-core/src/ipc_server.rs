@@ -48,6 +48,10 @@ pub struct ServiceContext {
     /// ProjectOpen 時に生成、Close で remove。gossip CatalogUpdate 受信時に
     /// ローカル root_crc と比較して差分を検出する (#26)。
     pub catalogs: Arc<dashmap::DashMap<String, Arc<synergos_net::catalog::CatalogManager>>>,
+    /// Bitswap 用 content-addressed store。`publish_updates` で作った
+    /// RootCatalog スナップショットや DAG blocks はここに入り、相手ピアからの
+    /// BSW1 リクエストで引き出される (#25 + #26)。
+    pub content_store: Arc<synergos_net::content::MemoryContentStore>,
 }
 
 /// IPC サーバー

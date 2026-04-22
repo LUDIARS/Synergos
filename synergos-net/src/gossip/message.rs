@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{Result, SynergosNetError};
 use crate::identity::{self, Identity};
-use crate::types::{Blake3Hash, ChunkId, FileId, MessageId, PeerId};
+use crate::types::{Blake3Hash, ChunkId, Cid, FileId, MessageId, PeerId};
 
 /// 署名付き Gossip メッセージ (S3 対策: FileOffer.sender / PeerStatus.origin が
 /// 無証明だった問題を解消する)。全ての GossipMessage は本封筒に包んで送出され、
@@ -74,9 +74,16 @@ impl SignedGossipMessage {
                     ));
                 }
             }
-            // CatalogUpdate / ConflictAlert は project 全体向けなので
-            // 送信者の明示フィールドは無い。署名検証だけで十分。
-            GossipMessage::CatalogUpdate { .. } | GossipMessage::ConflictAlert { .. } => {}
+            GossipMessage::CatalogUpdate { publisher, .. } => {
+                // `publisher` が旧ピア互換のためゼロ / 空のときはスキップ (序文の署名検証のみ)。
+                if !publisher.0.is_empty() && publisher != &derived {
+                    return Err(SynergosNetError::Identity(
+                        "gossip CatalogUpdate publisher mismatch with signer".into(),
+                    ));
+                }
+            }
+            // ConflictAlert は project 全体向けなので送信者の明示フィールドは無い。
+            GossipMessage::ConflictAlert { .. } => {}
         }
         identity::verify(&pub_bytes, &signing_bytes(&self.message), &sig_bytes)
             .map_err(|_| SynergosNetError::Identity("gossip signature invalid".into()))
@@ -118,6 +125,8 @@ fn signing_bytes(msg: &GossipMessage) -> Vec<u8> {
             root_crc,
             update_count,
             updated_chunks,
+            catalog_cid,
+            publisher,
         } => {
             out.extend_from_slice(b"catalog_update");
             out.extend_from_slice(project_id.as_bytes());
@@ -127,6 +136,11 @@ fn signing_bytes(msg: &GossipMessage) -> Vec<u8> {
                 out.extend_from_slice(c.0.as_bytes());
                 out.push(0);
             }
+            if let Some(cid) = catalog_cid {
+                out.extend_from_slice(cid.0.as_bytes());
+                out.push(0);
+            }
+            out.extend_from_slice(publisher.0.as_bytes());
         }
         GossipMessage::FileWant {
             requester,
@@ -191,6 +205,15 @@ pub enum GossipMessage {
         root_crc: u32,
         update_count: u64,
         updated_chunks: Vec<ChunkId>,
+        /// 発行者側 `ContentStore` に置かれた `RootCatalog` スナップショットの CID。
+        /// 受信側は BitswapSession でこの CID を引いて full diff を計算する。
+        /// 旧ピア互換のため optional で、無いときはドリフト検知のみに留まる。
+        #[serde(default)]
+        catalog_cid: Option<Cid>,
+        /// この CatalogUpdate を発行したピア。BitswapSession の接続先に使う。
+        /// 旧ピア互換のため serde default で空 PeerId を許容する。
+        #[serde(default)]
+        publisher: PeerId,
     },
     /// ファイル更新要求（受信側が「欲しい」と宣言）
     FileWant {
