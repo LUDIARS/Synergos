@@ -147,6 +147,24 @@ impl CoreEvent for ConflictDetectedEvent {
     }
 }
 
+/// Catalog ドリフト検出イベント。gossip CatalogUpdate 受信時、ローカルの
+/// `root_crc`/`update_count` がリモートと一致しないときに emit される (#26)。
+/// 実際のチャンク取得は Bitswap / transfer で別途行う。
+#[derive(Debug, Clone)]
+pub struct CatalogSyncNeededEvent {
+    pub project_id: String,
+    pub remote_root_crc: u32,
+    pub remote_update_count: u64,
+    /// リモート側で変更があったチャンク ID の文字列リスト
+    pub changed_chunks: Vec<String>,
+}
+
+impl CoreEvent for CatalogSyncNeededEvent {
+    fn event_name() -> &'static str {
+        "catalog_sync_needed"
+    }
+}
+
 /// ネットワーク状態更新イベント
 #[derive(Debug, Clone)]
 pub struct NetworkStatusEvent {

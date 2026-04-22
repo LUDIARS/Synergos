@@ -44,6 +44,10 @@ pub struct ServiceContext {
     /// 設定スナップショット (NetworkStatus の max_connections 算出等で使う)。
     /// ホット更新は今のところ未対応なので起動時の値を保持する。
     pub net_config: Option<Arc<synergos_net::config::NetConfig>>,
+    /// 開いているプロジェクトの CatalogManager (project_id → CatalogManager)。
+    /// ProjectOpen 時に生成、Close で remove。gossip CatalogUpdate 受信時に
+    /// ローカル root_crc と比較して差分を検出する (#26)。
+    pub catalogs: Arc<dashmap::DashMap<String, Arc<synergos_net::catalog::CatalogManager>>>,
 }
 
 /// IPC サーバー
@@ -598,21 +602,42 @@ pub async fn dispatch_command(command: IpcCommand, ctx: &ServiceContext) -> IpcR
             project_id,
             root_path,
             display_name,
-        } => match ctx
-            .project_manager
-            .open_project(project_id, root_path, display_name)
-            .await
-        {
-            Ok(()) => IpcResponse::Ok,
-            Err(e) => IpcResponse::Error {
-                code: 1,
-                message: e.to_string(),
-            },
-        },
+        } => {
+            let pid_clone = project_id.clone();
+            match ctx
+                .project_manager
+                .open_project(project_id, root_path, display_name)
+                .await
+            {
+                Ok(()) => {
+                    // CatalogManager を同じ project_id で立ち上げる (#26)。
+                    // chunk_max_files / chain_max_depth は net_config があればそれ、なければ既定値。
+                    let (chunk_max, chain_max) = ctx
+                        .net_config
+                        .as_ref()
+                        .map(|c| (c.catalog.chunk_max_files, c.catalog.chain_max_depth))
+                        .unwrap_or((128, 32));
+                    ctx.catalogs.insert(
+                        pid_clone.clone(),
+                        Arc::new(synergos_net::catalog::CatalogManager::new(
+                            pid_clone, chunk_max, chain_max,
+                        )),
+                    );
+                    IpcResponse::Ok
+                }
+                Err(e) => IpcResponse::Error {
+                    code: 1,
+                    message: e.to_string(),
+                },
+            }
+        }
 
         IpcCommand::ProjectClose { project_id } => {
             match ctx.project_manager.close_project(&project_id).await {
-                Ok(()) => IpcResponse::Ok,
+                Ok(()) => {
+                    ctx.catalogs.remove(&project_id);
+                    IpcResponse::Ok
+                }
                 Err(e) => IpcResponse::Error {
                     code: 1,
                     message: e.to_string(),

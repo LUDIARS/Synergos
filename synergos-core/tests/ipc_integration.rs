@@ -29,6 +29,7 @@ fn make_ctx() -> Arc<ServiceContext> {
         shutdown_tx,
         started_at: 0,
         net_config: None,
+        catalogs: Arc::new(dashmap::DashMap::new()),
     })
 }
 

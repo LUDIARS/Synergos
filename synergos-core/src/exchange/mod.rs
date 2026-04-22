@@ -855,19 +855,37 @@ impl FileSharing for Exchange {
         &self,
         notifications: Vec<PublishNotification>,
     ) -> Result<(), FileSharingError> {
-        tracing::info!("Publishing {} file update(s)", notifications.len());
+        // ──────────────────────────────────────────────────────────────
+        // アセット更新フロー (Issue #26 / "動く auto-update" の中核)
+        //
+        // IPC `PublishUpdate` → `ipc_server` が path 検証 + CRC 計算 +
+        // ProjectManager.register_file まで終えた notifications を渡す。
+        // ここから以下 5 ステップで全経路に反映する:
+        //
+        //   Step 1  transfer ledger に Offer を登録 (want とのマッチ判定)
+        //   Step 2  shared_files に path+meta を記録 (FileWant 着信時に使う)
+        //   Step 3  Gossipsub で FileOffer をブロードキャスト (to all peers)
+        //   Step 4  Gossipsub で CatalogUpdate をブロードキャスト
+        //   Step 5  EventBus に TransferCompleted 様の通知を出す (UI 反映)
+        //
+        // これらは同一プロセス内で順に実行される (I/O は内部で並列可)。
+        // 上位 (GUI / CLI) からは `publish_updates` を呼ぶだけで一気通貫。
+        // ──────────────────────────────────────────────────────────────
+        tracing::info!(
+            "[asset-update] begin: {} file(s) in project {:?}",
+            notifications.len(),
+            notifications.first().map(|n| n.project_id.clone())
+        );
 
         let mut total_crc: u32 = 0;
 
         for notif in &notifications {
-            tracing::debug!(
-                "  - file_id={}, path={}, version={}",
+            tracing::info!(
+                "[asset-update][step 1/4] ledger Offer: file_id={} version={} size={}",
                 notif.file_id,
-                notif.file_path.display(),
-                notif.version
+                notif.version,
+                notif.file_size
             );
-
-            // TransferLedger に各ファイルの Offer を登録
             let offer = OfferEntry {
                 sender: self.local_peer_id.clone(),
                 file_id: notif.file_id.clone(),
@@ -879,7 +897,10 @@ impl FileSharing for Exchange {
             };
             self.ledger.register_offer(offer);
 
-            // 受信した FileWant に自動応答するため shared_files にも登録
+            tracing::info!(
+                "[asset-update][step 2/4] shared_files register: file_id={}",
+                notif.file_id
+            );
             self.shared_files.insert(
                 notif.file_id.clone(),
                 SharedFileRecord {
@@ -891,7 +912,10 @@ impl FileSharing for Exchange {
                 },
             );
 
-            // Gossipsub で FileOffer をブロードキャスト
+            tracing::info!(
+                "[asset-update][step 3/4] gossip FileOffer bcast: file_id={}",
+                notif.file_id
+            );
             self.broadcast_offer(
                 &notif.project_id,
                 &notif.file_id,
@@ -900,14 +924,21 @@ impl FileSharing for Exchange {
                 notif.crc,
             );
 
+            // 連続 publish で root_crc が変わるよう、file CRC を積み上げる
             total_crc = crc32fast::hash(&total_crc.to_le_bytes());
+            total_crc ^= notif.crc;
         }
 
-        // Gossipsub で CatalogUpdate をブロードキャスト
         if let Some(first) = notifications.first() {
+            tracing::info!(
+                "[asset-update][step 4/4] gossip CatalogUpdate bcast: project={} root_crc={total_crc:x} update_count={}",
+                first.project_id,
+                notifications.len()
+            );
             self.broadcast_catalog_update(&first.project_id, total_crc, notifications.len() as u64);
         }
 
+        tracing::info!("[asset-update] done");
         Ok(())
     }
 

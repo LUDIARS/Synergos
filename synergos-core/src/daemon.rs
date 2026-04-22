@@ -171,7 +171,22 @@ impl Daemon {
             shutdown_tx,
             started_at,
             net_config: Some(net.net_config.clone()),
+            catalogs: Arc::new(dashmap::DashMap::new()),
         });
+
+        // 永続化されていた project を restore した後、それぞれの
+        // CatalogManager も同時に立ち上げる。
+        use crate::project::ProjectConfiguration;
+        for info in ProjectConfiguration::list_projects(&*ctx.project_manager) {
+            ctx.catalogs.insert(
+                info.project_id.clone(),
+                Arc::new(synergos_net::catalog::CatalogManager::new(
+                    info.project_id.clone(),
+                    net.net_config.catalog.chunk_max_files,
+                    net.net_config.catalog.chain_max_depth,
+                )),
+            );
+        }
 
         Ok(Self { ctx, net })
     }
@@ -565,11 +580,43 @@ fn spawn_gossip_subscriber(
                         Ok((_topic, GossipMessage::ConflictAlert { file_id, conflicting_nodes, their_versions })) => {
                             ctx.conflict_manager.handle_conflict_alert(file_id, conflicting_nodes, their_versions);
                         }
-                        Ok((_topic, GossipMessage::CatalogUpdate { project_id, root_crc, update_count, .. })) => {
-                            // CatalogManager の本格 merge は別タスク。現状は observability のみ。
-                            tracing::debug!(
-                                "gossip CatalogUpdate: project={project_id} root_crc={root_crc:x} updates={update_count}"
-                            );
+                        Ok((_topic, GossipMessage::CatalogUpdate { project_id, root_crc, update_count, updated_chunks })) => {
+                            // #26: リモートの root_crc とローカルの root_catalog を比較する。
+                            // 異なる場合は CatalogSyncNeededEvent を emit し、更新対象の
+                            // chunk IDs を EventBus 購読者 (GUI / IPC client) に通知する。
+                            // 実際のチャンク取得は Bitswap (#25) か既存の transfer 経路で別途行う。
+                            let local_match = match ctx.catalogs.get(&project_id) {
+                                Some(cm) => {
+                                    let local = cm.root_catalog().await;
+                                    local.catalog_crc == root_crc
+                                        && local.update_count == update_count
+                                }
+                                None => {
+                                    // 未 open のプロジェクトなので対象外
+                                    true
+                                }
+                            };
+                            if !local_match {
+                                tracing::info!(
+                                    "catalog drift detected: project={project_id} remote_crc={root_crc:x} remote_updates={update_count} changed_chunks={}",
+                                    updated_chunks.len()
+                                );
+                                ctx.event_bus.emit(
+                                    crate::event_bus::CatalogSyncNeededEvent {
+                                        project_id: project_id.clone(),
+                                        remote_root_crc: root_crc,
+                                        remote_update_count: update_count,
+                                        changed_chunks: updated_chunks
+                                            .iter()
+                                            .map(|c| c.0.clone())
+                                            .collect(),
+                                    },
+                                );
+                            } else {
+                                tracing::debug!(
+                                    "gossip CatalogUpdate (in sync): project={project_id}"
+                                );
+                            }
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                             tracing::warn!("gossip subscriber lagged; dropped {n} messages");
