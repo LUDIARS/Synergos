@@ -193,6 +193,29 @@ pub struct ProjectManager {
     event_bus: SharedEventBus,
     /// Gossipsub（任意）: プロジェクト開閉時にトピック subscribe/unsubscribe を行う
     gossip: Option<Arc<GossipNode>>,
+    /// プロジェクト状態をディスクに永続化する JSON ファイルパス。
+    /// `None` ならインメモリのみ (テスト用 / 互換用)。`load_state` で
+    /// 読み込み、`open_project` / `close_project` / `update_project` 等の
+    /// 変更操作のあとに save_state が呼ばれる。
+    state_path: Option<PathBuf>,
+}
+
+/// ディスクに保存する ProjectManager の最小スナップショット。
+/// Gossipsub や invite は再起動時に再取得 / 無効化される想定。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+pub struct PersistedState {
+    pub projects: Vec<PersistedProject>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PersistedProject {
+    pub project_id: String,
+    pub root_path: PathBuf,
+    pub display_name: String,
+    pub description: String,
+    pub sync_mode: String,
+    pub max_peers: u16,
+    pub created_at: u64,
 }
 
 impl ProjectManager {
@@ -209,7 +232,78 @@ impl ProjectManager {
             file_paths: DashMap::new(),
             event_bus,
             gossip,
+            state_path: None,
         }
+    }
+
+    /// 永続化パスを付けたコンストラクタ。指定パスに JSON でプロジェクト
+    /// 状態を保存し、起動時に復元する。
+    pub fn with_state_path(
+        event_bus: SharedEventBus,
+        gossip: Option<Arc<GossipNode>>,
+        state_path: PathBuf,
+    ) -> Self {
+        Self {
+            projects: DashMap::new(),
+            invites: DashMap::new(),
+            file_paths: DashMap::new(),
+            event_bus,
+            gossip,
+            state_path: Some(state_path),
+        }
+    }
+
+    /// 永続化ファイルから状態を読み込む。なければ無操作。
+    /// サブスクライバ (gossip) への再 subscribe は呼び出し側で行う必要がある
+    /// — 起動時シーケンスが `ProjectManager::load_state` → `ProjectConfiguration::open_project` の
+    /// 順でプロジェクトを再開するため、副作用は open_project に寄せる。
+    pub async fn load_state(&self) -> Result<Vec<PersistedProject>, ProjectError> {
+        let Some(path) = self.state_path.as_ref() else {
+            return Ok(vec![]);
+        };
+        if !path.exists() {
+            return Ok(vec![]);
+        }
+        let raw = tokio::fs::read_to_string(path)
+            .await
+            .map_err(|e| ProjectError::NotFound(format!("state load: {e}")))?;
+        let state: PersistedState = serde_json::from_str(&raw)
+            .map_err(|e| ProjectError::NotFound(format!("state parse: {e}")))?;
+        Ok(state.projects)
+    }
+
+    /// 現在のプロジェクト状態をディスクへ書き込む。state_path 未設定なら no-op。
+    pub async fn save_state(&self) -> Result<(), ProjectError> {
+        let Some(path) = self.state_path.as_ref() else {
+            return Ok(());
+        };
+        let snapshot = PersistedState {
+            projects: self
+                .projects
+                .iter()
+                .map(|entry| {
+                    let p = entry.value();
+                    PersistedProject {
+                        project_id: p.project_id.clone(),
+                        root_path: p.root_path.clone(),
+                        display_name: p.settings.display_name.clone(),
+                        description: p.settings.description.clone(),
+                        sync_mode: p.settings.sync_mode.as_str().to_string(),
+                        max_peers: p.settings.max_peers,
+                        created_at: p.created_at,
+                    }
+                })
+                .collect(),
+        };
+        if let Some(parent) = path.parent() {
+            let _ = tokio::fs::create_dir_all(parent).await;
+        }
+        let json = serde_json::to_string_pretty(&snapshot)
+            .map_err(|e| ProjectError::NotFound(format!("state serialize: {e}")))?;
+        tokio::fs::write(path, json)
+            .await
+            .map_err(|e| ProjectError::NotFound(format!("state write: {e}")))?;
+        Ok(())
     }
 
     /// ファイル ID をプロジェクト相対パスに紐付けて登録する。
@@ -308,6 +402,8 @@ impl ProjectConfiguration for ProjectManager {
         }
 
         self.projects.insert(project_id, project);
+        // 永続化: state_path があれば JSON に書き出す
+        let _ = self.save_state().await;
         Ok(())
     }
 
@@ -332,6 +428,7 @@ impl ProjectConfiguration for ProjectManager {
                         });
                 }
 
+                let _ = self.save_state().await;
                 Ok(())
             }
             None => Err(ProjectError::NotFound(project_id.to_string())),
@@ -380,6 +477,8 @@ impl ProjectConfiguration for ProjectManager {
                     settings.max_peers = max;
                 }
                 tracing::info!("Updated project settings: {}", project_id);
+                drop(entry);
+                let _ = self.save_state().await;
                 Ok(())
             }
             None => Err(ProjectError::NotFound(project_id.to_string())),

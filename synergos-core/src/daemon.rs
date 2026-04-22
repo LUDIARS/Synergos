@@ -103,10 +103,36 @@ impl Daemon {
 
         // ── サービスレイヤ ──
         let event_bus: SharedEventBus = Arc::new(CoreEventBus::new());
-        let project_manager = Arc::new(ProjectManager::with_gossip(
+        // プロジェクト永続化: identity と同じ dir の下に projects.json
+        let state_path = Identity::default_path()
+            .parent()
+            .map(|p| p.join("projects.json"))
+            .unwrap_or_else(|| std::path::PathBuf::from("projects.json"));
+        let project_manager = Arc::new(ProjectManager::with_state_path(
             event_bus.clone(),
             Some(gossip.clone()),
+            state_path.clone(),
         ));
+        // 既存 state を restore: persisted なプロジェクトを open し直す。
+        if let Ok(persisted) = project_manager.load_state().await {
+            use crate::project::ProjectConfiguration;
+            for p in persisted {
+                if let Err(e) = project_manager
+                    .open_project(
+                        p.project_id.clone(),
+                        p.root_path.clone(),
+                        Some(p.display_name.clone()),
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        "failed to restore project {} from {}: {e}",
+                        p.project_id,
+                        state_path.display()
+                    );
+                }
+            }
+        }
         let mut exchange_inner = Exchange::with_network(
             event_bus.clone(),
             local_peer_id.clone(),
@@ -144,6 +170,7 @@ impl Daemon {
             conflict_manager,
             shutdown_tx,
             started_at,
+            net_config: Some(net.net_config.clone()),
         });
 
         Ok(Self { ctx, net })

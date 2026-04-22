@@ -41,6 +41,9 @@ pub struct ServiceContext {
     pub conflict_manager: Arc<ConflictManager>,
     pub shutdown_tx: broadcast::Sender<()>,
     pub started_at: u64,
+    /// 設定スナップショット (NetworkStatus の max_connections 算出等で使う)。
+    /// ホット更新は今のところ未対応なので起動時の値を保持する。
+    pub net_config: Option<Arc<synergos_net::config::NetConfig>>,
 }
 
 /// IPC サーバー
@@ -618,13 +621,34 @@ pub async fn dispatch_command(command: IpcCommand, ctx: &ServiceContext) -> IpcR
         }
 
         IpcCommand::ProjectList => {
-            let projects = ctx.project_manager.list_projects();
+            let mut projects = ctx.project_manager.list_projects();
+            // ProjectManager は転送の状態を持たないので、ここで
+            // Exchange から補う。Running / Queued 転送数を反映する。
+            let transfers = ctx.exchange.list_transfers(None).await;
+            for p in &mut projects {
+                p.active_transfers = transfers
+                    .iter()
+                    .filter(|t| {
+                        t.project_id == p.project_id
+                            && matches!(t.state, TransferState::Running | TransferState::Queued)
+                    })
+                    .count();
+            }
             IpcResponse::ProjectList(projects)
         }
 
         IpcCommand::ProjectGet { project_id } => {
             match ctx.project_manager.get_project(&project_id).await {
-                Ok(detail) => IpcResponse::ProjectDetail(detail),
+                Ok(mut detail) => {
+                    let transfers = ctx.exchange.list_transfers(Some(&project_id)).await;
+                    detail.active_transfers = transfers
+                        .iter()
+                        .filter(|t| {
+                            matches!(t.state, TransferState::Running | TransferState::Queued)
+                        })
+                        .count();
+                    IpcResponse::ProjectDetail(detail)
+                }
                 Err(e) => IpcResponse::Error {
                     code: 1,
                     message: e.to_string(),
@@ -932,12 +956,29 @@ pub async fn dispatch_command(command: IpcCommand, ctx: &ServiceContext) -> IpcR
                 .map(|r| format!("{:?}", r.kind()))
                 .unwrap_or_else(|| "none".to_string());
 
+            // used_bandwidth: 実行中転送の speed_bps を合算
+            let used_bw: u64 = ctx
+                .exchange
+                .list_transfers(None)
+                .await
+                .iter()
+                .filter(|t| matches!(t.state, TransferState::Running))
+                .map(|t| t.speed_bps)
+                .sum();
+
+            // max_connections: QUIC の max_concurrent_streams (設定由来)
+            let max_connections = ctx
+                .net_config
+                .as_ref()
+                .map(|cfg| cfg.quic.max_concurrent_streams.min(u32::from(u16::MAX)) as u16)
+                .unwrap_or(0);
+
             IpcResponse::NetworkStatus(NetworkStatusInfo {
                 primary_route,
                 total_bandwidth_bps: total_bw,
-                used_bandwidth_bps: 0,
+                used_bandwidth_bps: used_bw,
                 active_connections: connected_peers.len() as u16,
-                max_connections: 0,
+                max_connections,
                 avg_latency_ms: avg_latency,
             })
         }
