@@ -4314,6 +4314,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "synergos-relay"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "dashmap",
+ "futures-util",
+ "rmp-serde",
+ "serde",
+ "serde_json",
+ "synergos-net",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-tungstenite",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "synstructure"
 version = "0.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
