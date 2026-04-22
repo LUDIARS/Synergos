@@ -7,6 +7,7 @@ pub mod catalog;
 pub mod chain;
 pub mod conduit;
 pub mod config;
+pub mod content;
 pub mod dht;
 pub mod error;
 pub mod gossip;
