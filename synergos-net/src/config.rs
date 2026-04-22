@@ -47,6 +47,26 @@ pub struct TunnelConfig {
     /// 開発時のみ `true` を検討する。
     #[serde(default)]
     pub allow_simulation: bool,
+    /// cloudflared プロセスが crash したとき自動再起動するか (supervisor 有効化)。
+    /// 既定 `true`。`false` にすると 1 回起動して exit したらそれで終わり。
+    #[serde(default = "default_true")]
+    pub auto_restart: bool,
+    /// supervisor 再起動の初期バックオフ (ms)。`restart_base_ms × 2^N` で N は連続失敗回数。
+    #[serde(default = "default_restart_base")]
+    pub restart_base_ms: u64,
+    /// supervisor 再起動の最大バックオフ (ms)。
+    #[serde(default = "default_restart_max")]
+    pub restart_max_ms: u64,
+}
+
+fn default_true() -> bool {
+    true
+}
+fn default_restart_base() -> u64 {
+    1_000
+}
+fn default_restart_max() -> u64 {
+    60_000
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -176,6 +196,9 @@ impl Default for NetConfig {
                 api_token_ref: String::new(),
                 hostname: String::new(),
                 allow_simulation: false,
+                auto_restart: true,
+                restart_base_ms: 1_000,
+                restart_max_ms: 60_000,
             },
             mesh: MeshConfig {
                 doh_endpoint: "https://cloudflare-dns.com/dns-query".into(),
