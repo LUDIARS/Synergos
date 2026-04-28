@@ -13,6 +13,7 @@ pub mod error;
 pub mod gossip;
 pub mod identity;
 pub mod mesh;
+pub mod promotion;
 pub mod quic;
 pub mod relay;
 pub mod transfer;
@@ -31,6 +32,7 @@ pub use identity::{
     peer_id_from_public_bytes, verify as verify_signature, Identity, IdentityError,
 };
 pub use mesh::Mesh;
+pub use promotion::{NetCapabilities, PromotionMode, UpnpInfo};
 pub use quic::{CalibratedParams, ConnectionCalibrator, QuicManager, SpeedTestResult};
 pub use tunnel::{TunnelManager, TunnelState};
 pub use types::*;

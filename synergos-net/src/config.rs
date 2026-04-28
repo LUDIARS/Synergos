@@ -386,7 +386,10 @@ mod tests {
         }"#;
         let cfg: NetConfig = serde_json::from_str(legacy).expect("legacy config should parse");
         assert!(!cfg.force_relay_only);
-        assert!(cfg.auto_promote, "legacy config should default auto_promote to true");
+        assert!(
+            cfg.auto_promote,
+            "legacy config should default auto_promote to true"
+        );
 
         // 明示的に true を指定した JSON も読める
         let with_flag = r#"{

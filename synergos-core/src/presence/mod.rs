@@ -117,6 +117,8 @@ pub struct PresenceService {
     dht: Option<Arc<DhtNode>>,
     /// Gossipsub ノード（オプション）
     gossip: Option<Arc<GossipNode>>,
+    /// relay-only モードフラグ。true なら自ノードの Direct route を広告から外す。
+    is_relay_only: bool,
 }
 
 impl PresenceService {
@@ -125,11 +127,25 @@ impl PresenceService {
         Self::with_network(event_bus, None, None)
     }
 
-    /// ネットワーク依存を注入して構築する本番向けコンストラクタ
+    /// ネットワーク依存を注入して構築する本番向けコンストラクタ。
+    /// `is_relay_only` フラグはここでは false 固定。relay-only モードを
+    /// 有効化するには `with_network_and_mode` を使う。
     pub fn with_network(
         event_bus: SharedEventBus,
         dht: Option<Arc<DhtNode>>,
         gossip: Option<Arc<GossipNode>>,
+    ) -> Self {
+        Self::with_network_and_mode(event_bus, dht, gossip, false)
+    }
+
+    /// `is_relay_only=true` で構築すると、自ノードの route 通知から
+    /// `Route::Direct` を **必ず除外** する (匿名性: 自宅 IP を peer に
+    /// 通知しないため)。Tunnel/Relay 経路はそのまま広告する。
+    pub fn with_network_and_mode(
+        event_bus: SharedEventBus,
+        dht: Option<Arc<DhtNode>>,
+        gossip: Option<Arc<GossipNode>>,
+        is_relay_only: bool,
     ) -> Self {
         Self {
             event_bus,
@@ -137,7 +153,25 @@ impl PresenceService {
             local_node: tokio::sync::RwLock::new(None),
             dht,
             gossip,
+            is_relay_only,
         }
+    }
+
+    /// relay-only モードかどうかを参照する (status 表示用)。
+    pub fn is_relay_only(&self) -> bool {
+        self.is_relay_only
+    }
+
+    /// 自ノードが他ピアに広告すべき route だけを残す。relay-only なら
+    /// `Route::Direct` を完全に除外し、Tunnel / Relay のみ通す。
+    fn sanitize_local_routes(&self, routes: Vec<Route>) -> Vec<Route> {
+        if !self.is_relay_only {
+            return routes;
+        }
+        routes
+            .into_iter()
+            .filter(|r| !matches!(r, Route::Direct { .. }))
+            .collect()
     }
 
     /// Gossipsub 経由でピアステータスをブロードキャスト
@@ -245,18 +279,35 @@ impl PresenceService {
 
 #[async_trait]
 impl NodeRegistry for PresenceService {
-    async fn register_self(&self, registration: NodeRegistration) -> Result<(), NodeRegistryError> {
+    async fn register_self(
+        &self,
+        mut registration: NodeRegistration,
+    ) -> Result<(), NodeRegistryError> {
+        // 匿名性: relay-only モードでは Direct route を **必ず外して** 広告する。
+        // 呼出側が誤って Direct を埋めても DHT / gossip / 内部テーブルに直接の
+        // 自宅 IP が漏れない。
+        let original_count = registration.endpoints.len();
+        registration.endpoints = self.sanitize_local_routes(registration.endpoints);
+        let stripped = original_count - registration.endpoints.len();
+
         tracing::info!(
-            "Registering self as '{}' (peer_id={})",
+            "Registering self as '{}' (peer_id={}, relay_only={}, advertised_routes={}{})",
             registration.display_name,
-            registration.peer_id
+            registration.peer_id,
+            self.is_relay_only,
+            registration.endpoints.len(),
+            if stripped > 0 {
+                format!(", stripped Direct={}", stripped)
+            } else {
+                String::new()
+            },
         );
 
-        // ローカルノード情報を保存
+        // ローカルノード情報を保存 (フィルタ済み)
         let mut local = self.local_node.write().await;
         *local = Some(registration.clone());
 
-        // 自分自身も nodes テーブルに登録
+        // 自分自身も nodes テーブルに登録 (フィルタ済み endpoints)
         let node = RegisteredNode {
             peer_id: registration.peer_id.clone(),
             display_name: registration.display_name.clone(),
@@ -269,7 +320,7 @@ impl NodeRegistry for PresenceService {
         };
         self.nodes.insert(registration.peer_id.clone(), node);
 
-        // DHT に announce
+        // DHT に announce (フィルタ済み)
         self.dht_announce(&registration).await;
 
         // Gossipsub でステータスをブロードキャスト

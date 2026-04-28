@@ -54,7 +54,7 @@ which = "7"
 
 # NAT 越え probe (起動時に環境を自動診断)
 if-addrs = "0.13"
-igd-next = "0.16"
+igd-next = { version = "0.16", features = ["aio_tokio"] }
 
 [build-dependencies]
 prost-build = "0.13"

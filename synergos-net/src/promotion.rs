@@ -64,8 +64,10 @@ impl NetCapabilities {
     ) -> Self {
         let ipv6_fut = tokio::time::timeout(per_probe_timeout, probe_ipv6_global());
         let upnp_fut = tokio::time::timeout(per_probe_timeout, probe_upnp());
-        let tunnel_fut =
-            tokio::time::timeout(per_probe_timeout, probe_cloudflared(tunnel_token_configured));
+        let tunnel_fut = tokio::time::timeout(
+            per_probe_timeout,
+            probe_cloudflared(tunnel_token_configured),
+        );
 
         let (ipv6_res, upnp_res, tunnel_res) = tokio::join!(ipv6_fut, upnp_fut, tunnel_fut);
 
@@ -183,7 +185,7 @@ async fn probe_upnp() -> Option<UpnpInfo> {
             return None;
         }
     };
-    let gateway_url = gateway.root_url();
+    let gateway_url = gateway.root_url.to_string();
     Some(UpnpInfo {
         external_ip: external_ip.to_string(),
         gateway_url,
@@ -217,9 +219,7 @@ mod tests {
         assert!(!is_global_ipv6(&"::1".parse::<Ipv6Addr>().unwrap()));
         assert!(!is_global_ipv6(&"fe80::1".parse::<Ipv6Addr>().unwrap()));
         assert!(!is_global_ipv6(&"fc00::1".parse::<Ipv6Addr>().unwrap()));
-        assert!(!is_global_ipv6(
-            &"2001:db8::1".parse::<Ipv6Addr>().unwrap()
-        ));
+        assert!(!is_global_ipv6(&"2001:db8::1".parse::<Ipv6Addr>().unwrap()));
         assert!(!is_global_ipv6(&"::".parse::<Ipv6Addr>().unwrap()));
     }
 
@@ -261,10 +261,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn detect_does_not_panic_on_offline() {
-        // ネットワーク不通でも detect が成立すること (timeout で抜ける)
-        let caps = NetCapabilities::detect(Duration::from_millis(200), false, false).await;
-        // false の組合せで relay_configured も false → RelayOnly
-        assert_eq!(caps.recommended_mode(), PromotionMode::RelayOnly);
+    async fn detect_does_not_panic_on_short_timeout() {
+        // 短い timeout でも detect が完走 (panic なし) すること。
+        // 結果のモードは実行環境依存 (IPv6 global がある PC なら FullNode、
+        // 無ければ RelayOnly)。ここでは「呼んでも落ちない」だけを保証する。
+        let caps = NetCapabilities::detect(Duration::from_millis(100), false, false).await;
+        let _ = caps.recommended_mode();
+        let _ = caps.summary();
     }
 }
