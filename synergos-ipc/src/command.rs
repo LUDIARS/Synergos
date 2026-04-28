@@ -116,9 +116,11 @@ impl IpcCommand {
     /// - 識別子の空文字 (project_id / peer_id / file_id 等)
     /// - 過大な長さ (DoS 防止: 1 KiB を超える文字列はカット)
     /// - PublishUpdate.file_paths は空でないこと、上限 1024 件
+    /// - パスに `..` 等のディレクトリ脱出 component が含まれないこと (CWE-22)
     pub fn validate(&self) -> Result<(), String> {
         const MAX_ID_LEN: usize = 1024;
         const MAX_PATHS_PER_PUBLISH: usize = 1024;
+        const MAX_PATH_LEN: usize = 4096;
 
         let check_id = |label: &str, s: &str| -> Result<(), String> {
             if s.trim().is_empty() {
@@ -130,6 +132,32 @@ impl IpcCommand {
             }
         };
 
+        // PathBuf の component をスキャンし、`..` (ParentDir) を拒否する。
+        // 絶対パス (root_path 等) はそのまま許容、相対パス (publish file_paths) も
+        // OK だが、いずれにせよ親階層への脱出は許さない。
+        let check_path = |label: &str, path: &PathBuf| -> Result<(), String> {
+            if path.as_os_str().is_empty() {
+                return Err(format!("{label} must not be empty"));
+            }
+            let s = path.to_string_lossy();
+            if s.len() > MAX_PATH_LEN {
+                return Err(format!("{label} too long ({} > {MAX_PATH_LEN})", s.len()));
+            }
+            for component in path.components() {
+                if matches!(component, std::path::Component::ParentDir) {
+                    return Err(format!(
+                        "{label} must not contain '..' component: {}",
+                        path.display()
+                    ));
+                }
+            }
+            // 文字列上での `..` 単独 component / `\0` 含みも弾く (Windows / Unix 両方)
+            if s.contains('\0') {
+                return Err(format!("{label} must not contain NUL byte"));
+            }
+            Ok(())
+        };
+
         match self {
             Self::Ping
             | Self::Shutdown
@@ -137,14 +165,28 @@ impl IpcCommand {
             | Self::NetworkStatus
             | Self::ProjectList => Ok(()),
 
-            Self::ProjectOpen { project_id, .. }
-            | Self::ProjectClose { project_id }
+            Self::ProjectOpen {
+                project_id,
+                root_path,
+                ..
+            } => {
+                check_id("project_id", project_id)?;
+                check_path("root_path", root_path)
+            }
+            Self::ProjectClose { project_id }
             | Self::ProjectGet { project_id }
             | Self::ProjectCreateInvite { project_id, .. }
             | Self::PeerList { project_id }
             | Self::ProjectUpdate { project_id, .. } => check_id("project_id", project_id),
 
-            Self::ProjectJoin { invite_token, .. } => check_id("invite_token", invite_token),
+            Self::ProjectJoin {
+                invite_token,
+                root_path,
+                ..
+            } => {
+                check_id("invite_token", invite_token)?;
+                check_path("root_path", root_path)
+            }
 
             Self::PeerConnect {
                 project_id,
@@ -185,6 +227,9 @@ impl IpcCommand {
                         "too many file_paths ({} > {MAX_PATHS_PER_PUBLISH})",
                         file_paths.len()
                     ));
+                }
+                for p in file_paths {
+                    check_path("file_paths[*]", p)?;
                 }
                 Ok(())
             }
