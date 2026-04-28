@@ -88,11 +88,12 @@ impl SynergosNet {
         let quic = Arc::new(QuicManager::new(config.quic.clone(), identity));
         let tunnel = Arc::new(TunnelManager::new(&config.tunnel));
         let mesh = Arc::new(Mesh::new(config.mesh.clone()));
-        let conduit = Conduit::new(
+        let conduit = Conduit::with_relay_only(
             quic.clone(),
             tunnel.clone(),
             mesh.clone(),
             std::time::Duration::from_secs(15),
+            config.force_relay_only,
         );
 
         Self {

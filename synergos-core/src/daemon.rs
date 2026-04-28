@@ -96,11 +96,12 @@ impl Daemon {
         tracing::info!("QUIC listening on {}", actual_addr);
         let tunnel = Arc::new(TunnelManager::new(&net_config.tunnel));
         let mesh = Arc::new(Mesh::new(net_config.mesh.clone()));
-        let conduit = Arc::new(Conduit::new(
+        let conduit = Arc::new(Conduit::with_relay_only(
             quic.clone(),
             tunnel.clone(),
             mesh.clone(),
             Duration::from_secs(15),
+            net_config.force_relay_only,
         ));
 
         let net = Arc::new(NetworkHandles {
