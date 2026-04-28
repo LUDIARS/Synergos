@@ -299,15 +299,158 @@ fn peer_uid_of_fd(_fd: std::os::unix::io::RawFd) -> std::io::Result<libc::uid_t>
 
 /// Windows Named Pipe 接続のハンドリング。Unix 版と共通の dispatch/relay
 /// ロジックをトレイト越しに呼び出すラッパ。
+///
+/// 接続直後に **caller SID と daemon プロセスの owner SID を比較** して、
+/// 同一ユーザでなければ即切断する。Named Pipe は `first_pipe_instance` で
+/// 名前占有はしているが、ACL を細かく設定していないため Windows 上の任意
+/// ユーザが接続できてしまう穴があった (CWE-269)。
 #[cfg(windows)]
 async fn handle_client_windows(
     pipe: tokio::net::windows::named_pipe::NamedPipeServer,
     ctx: Arc<ServiceContext>,
 ) -> Result<(), IpcError> {
+    if let Err(reason) = verify_windows_caller(&pipe) {
+        tracing::warn!("rejecting client (Windows): {reason}");
+        // pipe を drop して接続を切る
+        return Ok(());
+    }
     let (reader, writer) = tokio::io::split(pipe);
     let writer: Arc<Mutex<tokio::io::WriteHalf<tokio::net::windows::named_pipe::NamedPipeServer>>> =
         Arc::new(Mutex::new(writer));
     handle_client_generic(reader, writer, ctx).await
+}
+
+/// 接続中の Named Pipe に対し、caller プロセスの SID が現在の daemon プロセスの
+/// owner SID と一致するか確認する。
+///
+/// 手順:
+///   1. `GetNamedPipeClientProcessId` で caller PID を取得
+///   2. `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` で caller プロセスをオープン
+///   3. `OpenProcessToken(TOKEN_QUERY)` でアクセス token を取得
+///   4. `GetTokenInformation(TokenUser)` で caller の SID を取得
+///   5. 自プロセスでも 2-4 を行い `EqualSid` で比較
+#[cfg(windows)]
+fn verify_windows_caller(
+    pipe: &tokio::net::windows::named_pipe::NamedPipeServer,
+) -> Result<(), String> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::{HANDLE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Security::EqualSid;
+    use windows_sys::Win32::System::Pipes::GetNamedPipeClientProcessId;
+
+    let pipe_handle = pipe.as_raw_handle() as HANDLE;
+    if pipe_handle.is_null() || pipe_handle == INVALID_HANDLE_VALUE {
+        return Err("invalid pipe handle".into());
+    }
+
+    let mut caller_pid: u32 = 0;
+    // SAFETY: pipe_handle は今回のスコープで生きている valid な handle。
+    let ok = unsafe { GetNamedPipeClientProcessId(pipe_handle, &mut caller_pid) };
+    if ok == 0 {
+        return Err(format!(
+            "GetNamedPipeClientProcessId failed: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+
+    let caller_sid = read_process_sid(caller_pid).map_err(|e| format!("caller sid: {e}"))?;
+    let self_sid = read_self_sid().map_err(|e| format!("self sid: {e}"))?;
+
+    // SAFETY: 双方の TOKEN_USER バッファは valid。
+    let equal = unsafe { EqualSid(caller_sid.token_user.User.Sid, self_sid.token_user.User.Sid) };
+
+    if equal == 0 {
+        return Err(format!("caller SID mismatch (pid {caller_pid})"));
+    }
+    Ok(())
+}
+
+/// TOKEN_USER のバッキングストアを保持する RAII。`token_user.User.Sid` は
+/// `_backing` の中を指している。
+#[cfg(windows)]
+struct TokenUserBuf {
+    token_user: windows_sys::Win32::Security::TOKEN_USER,
+    _backing: Vec<u8>,
+}
+
+#[cfg(windows)]
+fn read_process_sid(pid: u32) -> std::io::Result<TokenUserBuf> {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    // SAFETY: PID は信頼できる入力 (Named Pipe 経由で取得済) として扱う。
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if process.is_null() {
+        return Err(std::io::Error::last_os_error());
+    }
+    let res = read_token_user(process);
+    // SAFETY: process はこのスコープで取得した valid handle。
+    unsafe { CloseHandle(process) };
+    res
+}
+
+#[cfg(windows)]
+fn read_self_sid() -> std::io::Result<TokenUserBuf> {
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+    // SAFETY: GetCurrentProcess は擬似ハンドルで close 不要。
+    let h = unsafe { GetCurrentProcess() };
+    read_token_user(h)
+}
+
+/// `OpenProcessToken` + `GetTokenInformation(TokenUser)` の rust ラッパ。
+#[cfg(windows)]
+fn read_token_user(
+    process_handle: windows_sys::Win32::Foundation::HANDLE,
+) -> std::io::Result<TokenUserBuf> {
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::Security::{GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER};
+    use windows_sys::Win32::System::Threading::OpenProcessToken;
+
+    let mut token_handle: HANDLE = std::ptr::null_mut();
+    // SAFETY: process_handle は呼び出し側保証で valid。
+    if unsafe { OpenProcessToken(process_handle, TOKEN_QUERY, &mut token_handle) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+
+    // 1 回目: 必要サイズを取得
+    let mut required: u32 = 0;
+    // SAFETY: 1st call は intentional に NULL/0 を渡してサイズだけ取る。
+    unsafe {
+        GetTokenInformation(
+            token_handle,
+            TokenUser,
+            std::ptr::null_mut(),
+            0,
+            &mut required,
+        );
+    }
+    if required == 0 {
+        let err = std::io::Error::last_os_error();
+        unsafe { CloseHandle(token_handle) };
+        return Err(err);
+    }
+
+    let mut buf = vec![0u8; required as usize];
+    // SAFETY: buf は required 以上のサイズを持つ。
+    let res = unsafe {
+        GetTokenInformation(
+            token_handle,
+            TokenUser,
+            buf.as_mut_ptr() as *mut _,
+            required,
+            &mut required,
+        )
+    };
+    unsafe { CloseHandle(token_handle) };
+    if res == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+
+    // SAFETY: buf 先頭は TOKEN_USER 構造体として WinAPI が書き込んだもの。
+    let token_user = unsafe { *(buf.as_ptr() as *const TOKEN_USER) };
+    Ok(TokenUserBuf {
+        token_user,
+        _backing: buf,
+    })
 }
 
 /// クライアント接続のハンドリング

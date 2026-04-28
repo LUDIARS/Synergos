@@ -29,6 +29,10 @@ rand = "0.8"
 hex = "0.4"
 x509-parser = "0.16"
 
+# Identity at-rest encryption (passphrase 経由で AES-256-GCM + Argon2id)
+aes-gcm = "0.10"
+argon2 = "0.5"
+
 # DNS
 hickory-resolver = { version = "0.24", features = ["dns-over-https-rustls"] }
 
