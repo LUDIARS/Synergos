@@ -39,6 +39,17 @@ pub struct NetConfig {
     /// 中継サーバ経由に強制したいときに有効化する。
     #[serde(default)]
     pub force_relay_only: bool,
+    /// **自動昇格モード**。既定 `true`。
+    /// 起動時に IPv6 / UPnP / Cloudflare Tunnel の到達性を probe し、
+    /// いずれも不可なら effective relay-only として動作する。`force_relay_only`
+    /// が true の場合は probe を実行せず常に relay-only。
+    /// 手動で「probe しない」運用にしたいときだけ false に。
+    #[serde(default = "default_true_auto_promote")]
+    pub auto_promote: bool,
+}
+
+fn default_true_auto_promote() -> bool {
+    true
 }
 
 /// CatalogManager のチューニングパラメータ。
@@ -281,6 +292,7 @@ impl Default for NetConfig {
             peer_info_listen_addr: None,
             bootstrap_urls: Vec::new(),
             force_relay_only: false,
+            auto_promote: true,
         }
     }
 }
@@ -351,6 +363,12 @@ mod tests {
     }
 
     #[test]
+    fn auto_promote_defaults_to_true() {
+        let cfg = NetConfig::default();
+        assert!(cfg.auto_promote);
+    }
+
+    #[test]
     fn force_relay_only_serde_roundtrip() {
         // 旧 config (force_relay_only フィールドが無い JSON) からも読めること。
         // 同様に PR-1〜4 で追加された listen_addr / peer_info_listen_addr /
@@ -368,6 +386,7 @@ mod tests {
         }"#;
         let cfg: NetConfig = serde_json::from_str(legacy).expect("legacy config should parse");
         assert!(!cfg.force_relay_only);
+        assert!(cfg.auto_promote, "legacy config should default auto_promote to true");
 
         // 明示的に true を指定した JSON も読める
         let with_flag = r#"{
@@ -382,7 +401,8 @@ mod tests {
             "monitor": {"snapshot_interval_ms": 1000, "history_size": 3600, "graph_sample_interval_secs": 1},
             "force_relay_only": true
         }"#;
-        let cfg: NetConfig = serde_json::from_str(with_flag).expect("config with flag should parse");
+        let cfg: NetConfig =
+            serde_json::from_str(with_flag).expect("config with flag should parse");
         assert!(cfg.force_relay_only);
     }
 }
