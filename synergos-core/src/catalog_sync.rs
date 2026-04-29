@@ -205,6 +205,7 @@ mod tests {
             idle_timeout_ms: 5_000,
             max_udp_payload_size: 1350,
             enable_0rtt: false,
+            listen_addr: None,
         }
     }
 
