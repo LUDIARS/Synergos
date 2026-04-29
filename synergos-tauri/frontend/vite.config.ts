@@ -6,7 +6,7 @@ export default defineConfig(async () => ({
   plugins: [react()],
   clearScreen: false,
   server: {
-    port: 1420,
+    port: 5173,
     strictPort: true,
     host: "127.0.0.1",
     watch: {
