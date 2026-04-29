@@ -18,6 +18,11 @@ pub struct NetConfig {
     /// `#[serde(default)]` で旧 config からも読める)。
     #[serde(default)]
     pub catalog: CatalogConfig,
+    /// Peer-info HTTP servlet (bootstrap endpoint) を起動する listen アドレス。
+    /// `None` (既定) ではサーブレットを起動しない。AWS 公開ノード等では
+    /// `127.0.0.1:7780` を設定し、Cloudflare Tunnel 等で外部に publish する想定。
+    #[serde(default)]
+    pub peer_info_listen_addr: Option<SocketAddr>,
 }
 
 /// CatalogManager のチューニングパラメータ。
@@ -257,6 +262,7 @@ impl Default for NetConfig {
                 graph_sample_interval_secs: 1,
             },
             catalog: CatalogConfig::default(),
+            peer_info_listen_addr: None,
         }
     }
 }

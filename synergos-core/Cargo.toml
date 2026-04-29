@@ -17,6 +17,9 @@ synergos-ipc = { path = "../synergos-ipc" }
 tokio = { version = "1", features = ["full"] }
 async-trait = "0.1"
 
+# HTTP servlet (peer-info bootstrap endpoint, 将来 auth/API 拡張のホスト)
+axum = { version = "0.7", default-features = false, features = ["http1", "json", "tokio"] }
+
 # QUIC (for transfer stream handling)
 quinn = "0.11"
 

@@ -182,6 +182,13 @@ impl QuicManager {
         Ok(actual_addr)
     }
 
+    /// 現在 bind 済みの QUIC endpoint のローカルアドレスを返す。
+    /// `bind` が成功する前は `None`。peer-info servlet が advertised endpoint
+    /// として返すために使う。
+    pub async fn local_addr(&self) -> Option<SocketAddr> {
+        *self.local_addr.read().await
+    }
+
     /// 指定アドレスに QUIC 接続を確立する。
     ///
     /// `expected_peer_id` は接続先ピアから期待する PeerId。サーバ側から
