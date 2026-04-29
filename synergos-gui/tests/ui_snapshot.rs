@@ -116,6 +116,7 @@ fn peers_lists_rows() {
             rtt_ms: 42,
             bandwidth_bps: 1_000_000,
             state: "Connected".into(),
+            synergos_version: "0.1.0".into(),
         }];
     });
     let mut harness = egui_kittest::Harness::new_ui(|ui| {

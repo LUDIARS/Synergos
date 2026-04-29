@@ -111,6 +111,11 @@ pub struct PeerInfo {
     pub rtt_ms: u32,
     pub bandwidth_bps: u64,
     pub state: String,
+    /// 相手 daemon の `CARGO_PKG_VERSION` (peer-info 経由で学習)。
+    /// 不明な経路の peer (gossip / DHT のみ) は空文字。
+    /// 後方互換のため `#[serde(default)]` で旧 daemon にも追従。
+    #[serde(default)]
+    pub synergos_version: String,
 }
 
 /// 転送情報

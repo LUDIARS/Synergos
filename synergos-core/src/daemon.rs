@@ -352,23 +352,32 @@ impl Daemon {
                     )
                     .await
                     {
-                        Ok(peer_id) => {
+                        Ok(result) => {
                             tracing::info!(
-                                "bootstrap connected to {url}: peer_id={}",
-                                peer_id.short()
+                                "bootstrap connected to {url}: peer_id={} synergos_version={}",
+                                result.peer_id.short(),
+                                if result.synergos_version.is_empty() {
+                                    "unknown"
+                                } else {
+                                    &result.synergos_version
+                                }
                             );
                             let registration = crate::presence::NodeRegistration {
-                                peer_id: peer_id.clone(),
-                                display_name: peer_id.to_string(),
+                                peer_id: result.peer_id.clone(),
+                                display_name: result.peer_id.to_string(),
                                 endpoints: vec![],
                                 project_ids: vec![],
+                                synergos_version: result.synergos_version,
                             };
                             if let Err(e) = presence.register_node(registration).await {
                                 tracing::warn!("bootstrap {url}: register_node failed: {e}");
                                 continue;
                             }
                             let _ = presence
-                                .update_node_state(&peer_id, crate::presence::PeerState::Connected)
+                                .update_node_state(
+                                    &result.peer_id,
+                                    crate::presence::PeerState::Connected,
+                                )
                                 .await;
                         }
                         Err(e) => {

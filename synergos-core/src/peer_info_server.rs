@@ -40,10 +40,18 @@ pub struct PeerInfoResponse {
     pub protocol_version: u32,
     /// オプションのサーバ表示名 (UI 用)。匿名性が要るなら空文字に。
     pub server_name: String,
+    /// このノードの synergos-core build version (`CARGO_PKG_VERSION`)。
+    /// クライアントが互換性確認 / GUI 表示用に使う。古い peer は省略するので
+    /// `#[serde(default)]` で `""` にフォールバック。
+    #[serde(default)]
+    pub synergos_version: String,
 }
 
 /// 現在のプロトコルバージョン (bump はクライアントとの互換性を切るときのみ)
 pub const PEER_INFO_PROTOCOL_VERSION: u32 = 1;
+
+/// このバイナリの synergos-core build version。`Cargo.toml` の `[package].version` 由来。
+pub const SYNERGOS_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// servlet 共有 state。axum の `with_state` で各 handler に注入する。
 #[derive(Clone)]
@@ -73,6 +81,7 @@ async fn handle_peer_info(State(s): State<AppState>) -> Json<PeerInfoResponse> {
         quic_endpoint: endpoint,
         protocol_version: PEER_INFO_PROTOCOL_VERSION,
         server_name: s.server_name.clone(),
+        synergos_version: SYNERGOS_VERSION.to_string(),
     })
 }
 

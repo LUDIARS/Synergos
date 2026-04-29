@@ -22,7 +22,15 @@ use synergos_net::types::PeerId;
 
 use crate::peer_info_server::PEER_INFO_PROTOCOL_VERSION;
 
-/// peer add-url の bootstrap 結果。成功時は確立した peer_id を返す。
+/// peer add-url の bootstrap 結果。成功時は学習した peer_id と相手の synergos
+/// バージョンを返す。
+#[derive(Debug, Clone)]
+pub struct BootstrapResult {
+    pub peer_id: PeerId,
+    /// 相手 daemon の `CARGO_PKG_VERSION`。古い peer から `""` を返されることもある
+    pub synergos_version: String,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum BootstrapError {
     #[error("invalid url: {0}")]
@@ -44,17 +52,20 @@ struct RemotePeerInfo {
     peer_id: String,
     quic_endpoint: Option<String>,
     protocol_version: u32,
+    #[serde(default)]
+    synergos_version: String,
 }
 
 /// URL から peer-info を取得して QUIC 接続を張る。
 ///
-/// 成功時は学習した `PeerId` を返し、`QuicManager` の internal pool に接続が登録された状態。
+/// 成功時は学習した `PeerId` と相手の synergos バージョンを `BootstrapResult` で
+/// 返し、`QuicManager` の internal pool に接続が登録された状態。
 /// 呼び出し側は presence service への登録などを別途行う。
 pub async fn bootstrap_from_url(
     base_url: &str,
     quic: &QuicManager,
     timeout: Duration,
-) -> Result<PeerId, BootstrapError> {
+) -> Result<BootstrapResult, BootstrapError> {
     // 1. URL parse + /peer-info path 付与
     let parsed =
         reqwest::Url::parse(base_url).map_err(|e| BootstrapError::InvalidUrl(format!("{e}")))?;
@@ -110,7 +121,10 @@ pub async fn bootstrap_from_url(
         .await
         .map_err(|e| BootstrapError::QuicConnect(format!("{e}")))?;
 
-    Ok(expected_peer_id)
+    Ok(BootstrapResult {
+        peer_id: expected_peer_id,
+        synergos_version: info.synergos_version,
+    })
 }
 
 fn build_peer_info_url(base: &reqwest::Url) -> reqwest::Url {
