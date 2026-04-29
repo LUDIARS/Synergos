@@ -60,6 +60,10 @@ pub enum IpcCommand {
     PeerConnect { project_id: String, peer_id: String },
     /// 指定ピアを切断
     PeerDisconnect { peer_id: String },
+    /// peer-info HTTP servlet (URL) 経由で bootstrap 情報を取得 → QUIC 直結する。
+    /// `url` は `https://host[:port]` 形式 (path は自動で `/peer-info` を付与)。
+    /// invite token を必要としないクロスマシン peer 追加経路。
+    PeerAddByUrl { project_id: String, url: String },
 
     // ── ファイル転送 ──
     /// ファイル転送リクエスト
@@ -196,6 +200,14 @@ impl IpcCommand {
                 check_id("peer_id", peer_id)
             }
             Self::PeerDisconnect { peer_id } => check_id("peer_id", peer_id),
+            Self::PeerAddByUrl { project_id, url } => {
+                check_id("project_id", project_id)?;
+                check_id("url", url)?;
+                if !(url.starts_with("http://") || url.starts_with("https://")) {
+                    return Err("url must start with http:// or https://".into());
+                }
+                Ok(())
+            }
 
             Self::TransferRequest {
                 project_id,

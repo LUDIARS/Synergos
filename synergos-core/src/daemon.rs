@@ -192,6 +192,7 @@ impl Daemon {
             net_config: Some(net.net_config.clone()),
             catalogs: Arc::new(dashmap::DashMap::new()),
             content_store: shared_content_store,
+            quic: net.quic.clone(),
         });
 
         // 永続化されていた project を restore した後、それぞれの
