@@ -52,6 +52,8 @@ pub struct ServiceContext {
     /// RootCatalog スナップショットや DAG blocks はここに入り、相手ピアからの
     /// BSW1 リクエストで引き出される (#25 + #26)。
     pub content_store: Arc<synergos_net::content::MemoryContentStore>,
+    /// QUIC マネージャ (peer add-url / 直接接続用)。Daemon::new で bind 済み。
+    pub quic: Arc<synergos_net::quic::QuicManager>,
 }
 
 /// IPC サーバー
@@ -934,6 +936,50 @@ pub async fn dispatch_command(command: IpcCommand, ctx: &ServiceContext) -> IpcR
                     message: e.to_string(),
                 },
             }
+        }
+
+        IpcCommand::PeerAddByUrl { project_id, url } => {
+            // プロジェクトが open 済みであることを確認 (URL 経由でも所属が必要)。
+            if ctx.project_manager.project_root(&project_id).is_none() {
+                return IpcResponse::Error {
+                    code: 3,
+                    message: format!("unknown project: {project_id}"),
+                };
+            }
+            // /peer-info GET → QUIC connect (S1 真性認証込み)
+            let peer_id = match crate::peer_bootstrap::bootstrap_from_url(
+                &url,
+                &ctx.quic,
+                std::time::Duration::from_secs(10),
+            )
+            .await
+            {
+                Ok(pid) => pid,
+                Err(e) => {
+                    return IpcResponse::Error {
+                        code: 2,
+                        message: format!("bootstrap failed: {e}"),
+                    };
+                }
+            };
+            // PresenceService に登録 → Connected に遷移
+            let registration = crate::presence::NodeRegistration {
+                peer_id: peer_id.clone(),
+                display_name: peer_id.to_string(),
+                endpoints: vec![],
+                project_ids: vec![project_id],
+            };
+            if let Err(e) = ctx.presence.register_node(registration).await {
+                return IpcResponse::Error {
+                    code: 2,
+                    message: format!("register_node failed: {e}"),
+                };
+            }
+            let _ = ctx
+                .presence
+                .update_node_state(&peer_id, PeerState::Connected)
+                .await;
+            IpcResponse::Ok
         }
 
         // ── ファイル転送 ──

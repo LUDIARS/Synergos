@@ -13,13 +13,26 @@ use synergos_core::ipc_server::ServiceContext;
 use synergos_core::presence::PresenceService;
 use synergos_core::project::ProjectManager;
 use synergos_net::catalog::CatalogManager;
+use synergos_net::config::QuicConfig;
 use synergos_net::gossip::GossipMessage;
+use synergos_net::identity::Identity;
+use synergos_net::quic::QuicManager;
 use synergos_net::types::{ChunkId, PeerId, TopicId};
 use tokio::sync::broadcast;
 
 fn make_ctx() -> Arc<ServiceContext> {
     let event_bus: SharedEventBus = Arc::new(CoreEventBus::new());
     let (shutdown_tx, _) = broadcast::channel(1);
+    let quic = Arc::new(QuicManager::new(
+        QuicConfig {
+            max_concurrent_streams: 8,
+            idle_timeout_ms: 5_000,
+            max_udp_payload_size: 1350,
+            enable_0rtt: false,
+            listen_addr: None,
+        },
+        Arc::new(Identity::generate()),
+    ));
     Arc::new(ServiceContext {
         event_bus: event_bus.clone(),
         project_manager: Arc::new(ProjectManager::new(event_bus.clone())),
@@ -31,6 +44,7 @@ fn make_ctx() -> Arc<ServiceContext> {
         net_config: None,
         catalogs: Arc::new(DashMap::new()),
         content_store: Arc::new(synergos_net::content::MemoryContentStore::new()),
+        quic,
     })
 }
 

@@ -132,6 +132,14 @@ pub enum PeerCommand {
         /// ピアID
         peer: String,
     },
+    /// peer-info HTTP servlet 経由で bootstrap 接続する
+    /// (例: `peer add-url myproj https://node1.example.com`)
+    AddUrl {
+        /// プロジェクトID
+        project: String,
+        /// 相手 daemon の HTTPS URL (path 省略可、自動で /peer-info を付与)
+        url: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -387,6 +395,21 @@ async fn handle_peer(cmd: PeerCommand) -> anyhow::Result<()> {
                 .send(synergos_ipc::IpcCommand::PeerDisconnect { peer_id: peer })
                 .await?;
             println!("Peer disconnected.");
+        }
+        PeerCommand::AddUrl { project, url } => {
+            let resp = client
+                .send(synergos_ipc::IpcCommand::PeerAddByUrl {
+                    project_id: project,
+                    url,
+                })
+                .await?;
+            match resp {
+                synergos_ipc::IpcResponse::Ok => println!("Peer added via URL bootstrap."),
+                synergos_ipc::IpcResponse::Error { message, .. } => {
+                    eprintln!("Error: {}", message);
+                }
+                _ => println!("Unexpected response"),
+            }
         }
     }
     Ok(())
