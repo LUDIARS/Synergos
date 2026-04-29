@@ -108,7 +108,10 @@ impl NetCapabilities {
 }
 
 /// global IPv6 アドレスを列挙する。link-local / loopback / unique-local は除外。
-async fn probe_ipv6_global() -> Vec<Ipv6Addr> {
+///
+/// 公開 helper として `peer_info_server` の auto-advertise や connectivity
+/// probe から呼ばれる。
+pub async fn probe_ipv6_global() -> Vec<Ipv6Addr> {
     // if-addrs は同期 API なので spawn_blocking で逃がす
     tokio::task::spawn_blocking(|| {
         if_addrs::get_if_addrs()

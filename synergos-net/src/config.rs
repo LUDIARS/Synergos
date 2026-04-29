@@ -28,7 +28,15 @@ pub struct NetConfig {
     /// Cloudflare Tunnel が Cloudflare proxied DNS の裏でホストする公開ノードでは、
     /// proxy が UDP/QUIC を通さない (HTTPS のみ) ため、ここに EC2 の **real public
     /// IPv6 / IPv4** を入れて、クライアントがそこに直接 QUIC 接続できるようにする。
-    /// 形式は `host:port` 文字列 (IP:port も hostname:port も可)。
+    ///
+    /// 形式:
+    ///   - `Some("[2406:da14:...]:7777")` — リテラル IP:port
+    ///   - `Some("hostname.example.com:7777")` — hostname:port
+    ///   - `Some("auto")` — **公開 IPv6 を自動検出**。HTTPS echo サービス
+    ///     (`ipv6.icanhazip.com` 等) に問い合わせて NAT/LB 越しでも世界から見える
+    ///     アドレスを取得する。失敗時は OS NIC の global IPv6 列挙にフォールバック。
+    ///     ポートは `quic.listen_addr` のものを使う。Win/Linux/macOS 共通動作
+    ///   - `None` — `quic.local_addr()` (bind addr) をそのまま返す
     #[serde(default)]
     pub quic_advertised_addr: Option<String>,
     /// 起動時に自動 bootstrap する peer-info サーブレット URL 群。

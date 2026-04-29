@@ -58,9 +58,16 @@ struct AppState {
 }
 
 async fn handle_peer_info(State(s): State<AppState>) -> Json<PeerInfoResponse> {
-    let endpoint = match &s.advertised_addr {
-        Some(a) => Some(a.clone()),
-        None => s.quic.local_addr().await.map(|a| a.to_string()),
+    let local = s.quic.local_addr().await;
+    let endpoint = match s.advertised_addr.as_deref() {
+        // "auto" → if-addrs で global IPv6 を 1 件選び、bind ポートと組み合わせる。
+        // 見つからなければ bind addr (= local_addr) を返す safe fallback。
+        Some("auto") => match (auto_advertise_ipv6().await, local) {
+            (Some(v6), Some(la)) => Some(format!("[{}]:{}", v6, la.port())),
+            _ => local.map(|a| a.to_string()),
+        },
+        Some(literal) => Some(literal.to_string()),
+        None => local.map(|a| a.to_string()),
     };
     Json(PeerInfoResponse {
         peer_id: s.peer_id.to_string(),
@@ -68,6 +75,79 @@ async fn handle_peer_info(State(s): State<AppState>) -> Json<PeerInfoResponse> {
         protocol_version: PEER_INFO_PROTOCOL_VERSION,
         server_name: s.server_name.clone(),
     })
+}
+
+/// `quic_advertised_addr = "auto"` 時に呼ばれる。
+///
+/// 戦略:
+///   1. **HTTPS 経由で外部 echo サービスに公開 IP を問い合わせる** (Win/Linux/macOS 共通)。
+///      NAT/LB/CGNAT 越しでも "外から見えるアドレス" が取れる。
+///   2. fallback: ローカル NIC を列挙して global scope IPv6 を採用 (`if-addrs`)。
+///      EC2 のように global IPv6 が直接 NIC に振られている環境向け。
+///   3. どちらも失敗 → `None` (handler 側で local_addr に fallback)。
+async fn auto_advertise_ipv6() -> Option<std::net::Ipv6Addr> {
+    if let Some(v6) = discover_public_ipv6_via_https().await {
+        tracing::info!("auto-advertise: discovered public IPv6 via HTTPS: {}", v6);
+        return Some(v6);
+    }
+    if let Some(v6) = synergos_net::promotion::probe_ipv6_global()
+        .await
+        .into_iter()
+        .next()
+    {
+        tracing::info!(
+            "auto-advertise: HTTPS probe failed, using local NIC IPv6: {}",
+            v6
+        );
+        return Some(v6);
+    }
+    tracing::warn!("auto-advertise: no public IPv6 discoverable; falling back to bind addr");
+    None
+}
+
+/// HTTPS で IP echo サービスに問い合わせる。
+///
+/// IPv6 を強制したいので IPv6-only な hostname を優先 (ipv6.icanhazip.com)。
+/// 1 件でも取れたら即返す。すべて失敗で `None`。
+async fn discover_public_ipv6_via_https() -> Option<std::net::Ipv6Addr> {
+    use std::time::Duration;
+
+    // IPv6-only / dual-stack の echo endpoints。順番に試行。
+    const ENDPOINTS: &[&str] = &[
+        "https://ipv6.icanhazip.com",
+        "https://api6.ipify.org",
+        "https://v6.ident.me",
+    ];
+
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("auto-advertise: reqwest client build failed: {e}");
+            return None;
+        }
+    };
+
+    for url in ENDPOINTS {
+        match client.get(*url).send().await {
+            Ok(resp) if resp.status().is_success() => match resp.text().await {
+                Ok(body) => {
+                    let trimmed = body.trim();
+                    if let Ok(std::net::IpAddr::V6(v6)) = trimmed.parse::<std::net::IpAddr>() {
+                        return Some(v6);
+                    } else {
+                        tracing::debug!("auto-advertise: {url} returned non-IPv6: {trimmed:?}");
+                    }
+                }
+                Err(e) => tracing::debug!("auto-advertise: {url} body read failed: {e}"),
+            },
+            Ok(resp) => tracing::debug!("auto-advertise: {url} status {}", resp.status()),
+            Err(e) => tracing::debug!("auto-advertise: {url} send failed: {e}"),
+        }
+    }
+    None
 }
 
 async fn handle_health() -> (StatusCode, &'static str) {
@@ -244,6 +324,41 @@ mod tests {
         let url = format!("http://{}/peer-info", addr);
         let resp = reqwest_get_json(&url).await;
         assert_eq!(resp.quic_endpoint, Some(advertised));
+    }
+
+    /// `advertised_addr = "auto"` で probe_ipv6_global が hit しないテスト環境
+    /// (CI 等) では fallback で local_addr が返ること。auto でも壊れず安全に
+    /// 動くことの確認。global IPv6 が引ける環境では別 endpoint が返るが、
+    /// 値の確認はそちら側 (probe_ipv6_global の単体テスト) に任せる。
+    #[tokio::test]
+    async fn peer_info_auto_falls_back_to_local_addr_when_no_global_ipv6() {
+        use std::net::Ipv4Addr;
+        let identity = Arc::new(Identity::generate());
+        let peer_id = identity.peer_id().clone();
+        let quic = Arc::new(QuicManager::new(qcfg(), identity));
+        let bound = quic.bind((Ipv4Addr::LOCALHOST, 0).into()).await.unwrap();
+
+        let app = build_router(AppState {
+            peer_id: peer_id.clone(),
+            quic: quic.clone(),
+            server_name: "test".into(),
+            advertised_addr: Some("auto".into()),
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let url = format!("http://{}/peer-info", addr);
+        let resp = reqwest_get_json(&url).await;
+        // auto は global IPv6 を引ければそれを返す。CI runner で持ってない場合は
+        // local_addr (= 127.0.0.1:port) に fallback する。どちらにしても None には
+        // ならない (bind 済みなので) ことだけ確認する。
+        assert!(resp.quic_endpoint.is_some());
+        // ポートは bind ポートと一致していること (auto / fallback どちらでも)
+        let endpoint = resp.quic_endpoint.unwrap();
+        assert!(endpoint.ends_with(&format!(":{}", bound.port())));
     }
 
     /// reqwest を入れたくないので tokio + 手書き HTTP/1.1 で GET する小ヘルパ。
