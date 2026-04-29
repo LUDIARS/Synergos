@@ -255,6 +255,7 @@ mod tests {
                 idle_timeout_ms: 5000,
                 max_udp_payload_size: 1350,
                 enable_0rtt: false,
+                listen_addr: None,
             },
             id.clone(),
         ));
@@ -277,6 +278,7 @@ mod tests {
                 idle_timeout_ms: 5000,
                 max_udp_payload_size: 1350,
                 enable_0rtt: false,
+                listen_addr: None,
             },
             id.clone(),
         ));

@@ -1,3 +1,5 @@
+use std::net::SocketAddr;
+
 use serde::{Deserialize, Serialize};
 
 /// synergos-net の全設定
@@ -108,6 +110,12 @@ pub struct QuicConfig {
     pub max_udp_payload_size: u16,
     /// 0-RTT を有効にするか
     pub enable_0rtt: bool,
+    /// QUIC server がバインドする listen アドレス。
+    /// `None` (既定) は `[::]:0` 相当 (IPv6/IPv4 デュアルスタックでカーネル割当ポート)。
+    /// 公開ノードでは `[::]:7777` 等の固定ポートを設定する。
+    /// 後方互換のため `#[serde(default)]` で旧 config からも読める。
+    #[serde(default)]
+    pub listen_addr: Option<SocketAddr>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -214,6 +222,7 @@ impl Default for NetConfig {
                 // 0-RTT はリプレイ攻撃の余地があるため既定は OFF。
                 // 明示的にリスクを受容する運用のみ true に設定する。
                 enable_0rtt: false,
+                listen_addr: None,
             },
             dht: DhtConfig {
                 k_bucket_size: 20,
@@ -258,5 +267,44 @@ impl NetConfig {
     pub fn validate(&self) -> Result<(), String> {
         self.stream_allocation.validate()?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quic_listen_addr_defaults_to_none() {
+        let cfg = NetConfig::default();
+        assert!(cfg.quic.listen_addr.is_none());
+    }
+
+    #[test]
+    fn quic_listen_addr_serde_roundtrip_explicit() {
+        // listen_addr が指定された QuicConfig は string -> SocketAddr で読み戻せること。
+        let json = r#"{
+            "max_concurrent_streams": 100,
+            "idle_timeout_ms": 30000,
+            "max_udp_payload_size": 1452,
+            "enable_0rtt": false,
+            "listen_addr": "[::]:7777"
+        }"#;
+        let qcfg: QuicConfig = serde_json::from_str(json).expect("json parse");
+        let addr = qcfg.listen_addr.expect("listen_addr present");
+        assert_eq!(addr.to_string(), "[::]:7777");
+    }
+
+    #[test]
+    fn quic_listen_addr_serde_roundtrip_omitted() {
+        // listen_addr フィールドが無い旧 config (serde default) からも読めること。
+        let json = r#"{
+            "max_concurrent_streams": 100,
+            "idle_timeout_ms": 30000,
+            "max_udp_payload_size": 1452,
+            "enable_0rtt": false
+        }"#;
+        let qcfg: QuicConfig = serde_json::from_str(json).expect("json parse");
+        assert!(qcfg.listen_addr.is_none());
     }
 }

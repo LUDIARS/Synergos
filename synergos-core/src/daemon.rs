@@ -2,6 +2,7 @@
 //!
 //! synergos-core デーモンの起動・常駐・シャットダウンを制御する。
 
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -81,6 +82,18 @@ impl Daemon {
             Arc::new(g)
         };
         let quic = Arc::new(QuicManager::new(net_config.quic.clone(), identity.clone()));
+        // QUIC server をバインド (これが無いと accept ループは未開通でピアを受けられない)。
+        // 既定は `[::]:0` (IPv6 デュアルスタックでカーネル割当ポート)。
+        // 公開ノードでは `quic.listen_addr = "[::]:7777"` 等を config で指定する。
+        let bind_addr: SocketAddr = net_config
+            .quic
+            .listen_addr
+            .unwrap_or_else(|| "[::]:0".parse().expect("static literal"));
+        let actual_addr = quic
+            .bind(bind_addr)
+            .await
+            .map_err(|e| anyhow::anyhow!("QUIC bind failed on {bind_addr}: {e}"))?;
+        tracing::info!("QUIC listening on {}", actual_addr);
         let tunnel = Arc::new(TunnelManager::new(&net_config.tunnel));
         let mesh = Arc::new(Mesh::new(net_config.mesh.clone()));
         let conduit = Arc::new(Conduit::new(
