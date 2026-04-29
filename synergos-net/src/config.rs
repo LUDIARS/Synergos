@@ -30,6 +30,26 @@ pub struct NetConfig {
     /// 例: `["https://node1.example.com", "https://node2.example.com"]`
     #[serde(default)]
     pub bootstrap_urls: Vec<String>,
+    /// **Relay-only モード**。`true` のとき:
+    ///   - ピア接続時に IPv6 Direct / Tunnel を試さず、必ず WebSocket Relay
+    ///     (`synergos-relay`) を経由する。
+    ///   - 自ノードは direct 経路を route 通知に含めない (匿名化)。
+    ///
+    /// 自宅 PC が peer 一覧で見えないようにしたい / すべての通信を AWS 等の
+    /// 中継サーバ経由に強制したいときに有効化する。
+    #[serde(default)]
+    pub force_relay_only: bool,
+    /// **自動昇格モード**。既定 `true`。
+    /// 起動時に IPv6 / UPnP / Cloudflare Tunnel の到達性を probe し、
+    /// いずれも不可なら effective relay-only として動作する。`force_relay_only`
+    /// が true の場合は probe を実行せず常に relay-only。
+    /// 手動で「probe しない」運用にしたいときだけ false に。
+    #[serde(default = "default_true_auto_promote")]
+    pub auto_promote: bool,
+}
+
+fn default_true_auto_promote() -> bool {
+    true
 }
 
 /// CatalogManager のチューニングパラメータ。
@@ -271,6 +291,8 @@ impl Default for NetConfig {
             catalog: CatalogConfig::default(),
             peer_info_listen_addr: None,
             bootstrap_urls: Vec::new(),
+            force_relay_only: false,
+            auto_promote: true,
         }
     }
 }
@@ -332,5 +354,58 @@ mod tests {
     fn peer_info_listen_addr_defaults_to_none() {
         let cfg = NetConfig::default();
         assert!(cfg.peer_info_listen_addr.is_none());
+    }
+
+    #[test]
+    fn force_relay_only_defaults_to_false() {
+        let cfg = NetConfig::default();
+        assert!(!cfg.force_relay_only);
+    }
+
+    #[test]
+    fn auto_promote_defaults_to_true() {
+        let cfg = NetConfig::default();
+        assert!(cfg.auto_promote);
+    }
+
+    #[test]
+    fn force_relay_only_serde_roundtrip() {
+        // 旧 config (force_relay_only フィールドが無い JSON) からも読めること。
+        // 同様に PR-1〜4 で追加された listen_addr / peer_info_listen_addr /
+        // bootstrap_urls も `#[serde(default)]` でこの legacy JSON から読めるはず。
+        let legacy = r#"{
+            "tunnel": {"api_token_ref": "", "hostname": ""},
+            "mesh": {"doh_endpoint": "", "dns_servers": [], "turn_servers": [], "stun_servers": [], "probe_timeout_ms": 3000},
+            "quic": {"max_concurrent_streams": 100, "idle_timeout_ms": 30000, "max_udp_payload_size": 1452, "enable_0rtt": false},
+            "dht": {"k_bucket_size": 20, "routing_refresh_secs": 60, "peer_ttl_secs": 120},
+            "gossipsub": {"mesh_n": 6, "mesh_n_low": 4, "mesh_n_high": 12, "heartbeat_interval_ms": 1000, "message_cache_size": 1000},
+            "stream_allocation": {"large_ratio": 60, "medium_ratio": 30, "small_ratio": 10},
+            "speed_test": {"enabled": true, "retest_interval_secs": 300, "probe_count": 10},
+            "peer_selection": {"bandwidth_weight": 0.7, "stability_weight": 0.3, "recalculate_interval_secs": 60},
+            "monitor": {"snapshot_interval_ms": 1000, "history_size": 3600, "graph_sample_interval_secs": 1}
+        }"#;
+        let cfg: NetConfig = serde_json::from_str(legacy).expect("legacy config should parse");
+        assert!(!cfg.force_relay_only);
+        assert!(
+            cfg.auto_promote,
+            "legacy config should default auto_promote to true"
+        );
+
+        // 明示的に true を指定した JSON も読める
+        let with_flag = r#"{
+            "tunnel": {"api_token_ref": "", "hostname": ""},
+            "mesh": {"doh_endpoint": "", "dns_servers": [], "turn_servers": [], "stun_servers": [], "probe_timeout_ms": 3000},
+            "quic": {"max_concurrent_streams": 100, "idle_timeout_ms": 30000, "max_udp_payload_size": 1452, "enable_0rtt": false},
+            "dht": {"k_bucket_size": 20, "routing_refresh_secs": 60, "peer_ttl_secs": 120},
+            "gossipsub": {"mesh_n": 6, "mesh_n_low": 4, "mesh_n_high": 12, "heartbeat_interval_ms": 1000, "message_cache_size": 1000},
+            "stream_allocation": {"large_ratio": 60, "medium_ratio": 30, "small_ratio": 10},
+            "speed_test": {"enabled": true, "retest_interval_secs": 300, "probe_count": 10},
+            "peer_selection": {"bandwidth_weight": 0.7, "stability_weight": 0.3, "recalculate_interval_secs": 60},
+            "monitor": {"snapshot_interval_ms": 1000, "history_size": 3600, "graph_sample_interval_secs": 1},
+            "force_relay_only": true
+        }"#;
+        let cfg: NetConfig =
+            serde_json::from_str(with_flag).expect("config with flag should parse");
+        assert!(cfg.force_relay_only);
     }
 }

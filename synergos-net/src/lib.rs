@@ -13,6 +13,7 @@ pub mod error;
 pub mod gossip;
 pub mod identity;
 pub mod mesh;
+pub mod promotion;
 pub mod quic;
 pub mod relay;
 pub mod transfer;
@@ -31,6 +32,7 @@ pub use identity::{
     peer_id_from_public_bytes, verify as verify_signature, Identity, IdentityError,
 };
 pub use mesh::Mesh;
+pub use promotion::{NetCapabilities, PromotionMode, UpnpInfo};
 pub use quic::{CalibratedParams, ConnectionCalibrator, QuicManager, SpeedTestResult};
 pub use tunnel::{TunnelManager, TunnelState};
 pub use types::*;
@@ -88,11 +90,12 @@ impl SynergosNet {
         let quic = Arc::new(QuicManager::new(config.quic.clone(), identity));
         let tunnel = Arc::new(TunnelManager::new(&config.tunnel));
         let mesh = Arc::new(Mesh::new(config.mesh.clone()));
-        let conduit = Conduit::new(
+        let conduit = Conduit::with_relay_only(
             quic.clone(),
             tunnel.clone(),
             mesh.clone(),
             std::time::Duration::from_secs(15),
+            config.force_relay_only,
         );
 
         Self {

@@ -49,6 +49,9 @@ struct ManagedPeer {
 ///
 /// 各ピアへの最適な接続経路を選択し、接続の確立・維持・切り替えを管理する。
 /// IPv6 Direct → Tunnel → Relay の優先度で接続を試行する。
+///
+/// `force_relay_only` を有効にすると、IPv6 Direct と Tunnel の試行を完全に
+/// スキップし、Relay 経路のみで接続する (案 B 「relay-only モード」)。
 pub struct Conduit {
     /// 管理中のピア（PeerId → ManagedPeer）
     peers: DashMap<PeerId, ManagedPeer>,
@@ -58,6 +61,8 @@ pub struct Conduit {
     tunnel: Arc<TunnelManager>,
     /// Mesh マネージャ (probe_ipv6 等で使う)
     mesh: Arc<Mesh>,
+    /// Relay 経由のみに制限するフラグ
+    force_relay_only: bool,
 }
 
 impl Conduit {
@@ -67,12 +72,30 @@ impl Conduit {
         mesh: Arc<Mesh>,
         _keepalive_interval: Duration,
     ) -> Self {
+        Self::with_relay_only(quic, tunnel, mesh, _keepalive_interval, false)
+    }
+
+    /// `force_relay_only` を明示する版。既存呼び出し互換のため `new` は残し、
+    /// 新規コードは relay 強制したいケースでこちらを使う。
+    pub fn with_relay_only(
+        quic: Arc<QuicManager>,
+        tunnel: Arc<TunnelManager>,
+        mesh: Arc<Mesh>,
+        _keepalive_interval: Duration,
+        force_relay_only: bool,
+    ) -> Self {
         Self {
             peers: DashMap::new(),
             quic,
             tunnel,
             mesh,
+            force_relay_only,
         }
+    }
+
+    /// Relay 強制モードかどうか。route 通知や監視のため外部から参照可。
+    pub fn is_relay_only(&self) -> bool {
+        self.force_relay_only
     }
 
     /// ピアを登録し、経路を検出する
@@ -280,6 +303,24 @@ impl Conduit {
 
     /// 経路を検出する
     async fn detect_route(&self, endpoint: &PeerEndpoint) -> DetectionResult {
+        // Relay-only モードならプローブを完全にスキップ。Direct/Tunnel の到達性は
+        // 「不到達」として扱い、recommended は Relay 固定にする。
+        if self.force_relay_only {
+            return DetectionResult {
+                ipv6: ProbeResult {
+                    reachable: false,
+                    rtt_ms: None,
+                    error: Some("force_relay_only enabled".into()),
+                    addr: None,
+                },
+                tunnel: TunnelProbeResult {
+                    available: false,
+                    rtt_ms: None,
+                },
+                recommended: RouteKind::Relay,
+            };
+        }
+
         // IPv6 と Tunnel のプローブを並列実行
         let ipv6_probe = self.probe_ipv6_route(endpoint);
         let tunnel_probe = self.probe_tunnel_route();
@@ -326,6 +367,23 @@ impl Conduit {
 
     /// 経路の優先度順に接続を試行
     async fn try_connect_routes(&self, peer_id: &PeerId, routes: &[Route]) -> Result<RouteKind> {
+        // Relay-only モードでは Direct / Tunnel をすっ飛ばして Relay のみ試す。
+        if self.force_relay_only {
+            for route in routes {
+                if let Route::Relay { server_url, .. } = route {
+                    tracing::debug!(
+                        "[relay-only] Attempting relay connection to {} via {}",
+                        peer_id.short(),
+                        server_url
+                    );
+                    return Ok(RouteKind::Relay);
+                }
+            }
+            return Err(SynergosNetError::Quic(
+                "force_relay_only enabled but no Route::Relay advertised by peer".into(),
+            ));
+        }
+
         // 1. IPv6 Direct を試行
         for route in routes {
             if let Route::Direct { addr, fqdn } = route {

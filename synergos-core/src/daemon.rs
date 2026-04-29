@@ -18,6 +18,7 @@ use synergos_net::{
     },
     identity::Identity,
     mesh::Mesh,
+    promotion::{NetCapabilities, PromotionMode},
     quic::{QuicManager, StreamType},
     transfer::TRANSFER_STREAM_MAGIC,
     tunnel::TunnelManager,
@@ -96,11 +97,42 @@ impl Daemon {
         tracing::info!("QUIC listening on {}", actual_addr);
         let tunnel = Arc::new(TunnelManager::new(&net_config.tunnel));
         let mesh = Arc::new(Mesh::new(net_config.mesh.clone()));
-        let conduit = Arc::new(Conduit::new(
+
+        // 起動時 NAT 越え probe → effective relay-only を決定する。
+        //   - force_relay_only=true なら問答無用で relay-only
+        //   - auto_promote=true (既定) かつ probe で direct/tunnel いずれも不可
+        //     なら relay-only として起動 (= 「ノード昇格できない」状態を自己診断)
+        //   - それ以外は通常モード (Direct→Tunnel→Relay の優先試行)
+        let effective_relay_only = if net_config.force_relay_only {
+            tracing::info!("force_relay_only=true → relay-only mode (probe skipped)");
+            true
+        } else if net_config.auto_promote {
+            let caps = NetCapabilities::detect(
+                Duration::from_secs(3),
+                !net_config.tunnel.api_token_ref.is_empty(),
+                false, // relay endpoint 設定有無 (現状は判定不能、後続 PR で正確化)
+            )
+            .await;
+            tracing::info!("net capabilities: {}", caps.summary());
+            match caps.recommended_mode() {
+                PromotionMode::FullNode => false,
+                PromotionMode::RelayOnly => {
+                    tracing::warn!(
+                        "auto_promote: no direct/tunnel reachable → starting in relay-only mode"
+                    );
+                    true
+                }
+            }
+        } else {
+            false
+        };
+
+        let conduit = Arc::new(Conduit::with_relay_only(
             quic.clone(),
             tunnel.clone(),
             mesh.clone(),
             Duration::from_secs(15),
+            effective_relay_only,
         ));
 
         let net = Arc::new(NetworkHandles {
@@ -168,10 +200,11 @@ impl Daemon {
         let shared_content_store = Arc::new(synergos_net::content::MemoryContentStore::new());
         exchange_inner.attach_content_store(shared_content_store.clone());
         let exchange = Arc::new(exchange_inner);
-        let presence = Arc::new(PresenceService::with_network(
+        let presence = Arc::new(PresenceService::with_network_and_mode(
             event_bus.clone(),
             Some(dht.clone()),
             Some(gossip.clone()),
+            effective_relay_only,
         ));
         let conflict_manager = Arc::new(ConflictManager::new(event_bus.clone()));
         let (shutdown_tx, _) = broadcast::channel(1);
