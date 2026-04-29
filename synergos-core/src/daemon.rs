@@ -275,6 +275,32 @@ impl Daemon {
             self.ctx.shutdown_tx.subscribe(),
         );
 
+        // Peer-info HTTP servlet (任意): bootstrap 公開ノード用。Cloudflare Tunnel
+        // 経由で /peer-info を外部に publish し、クライアントは GET → quic_endpoint
+        // を学習して直接 QUIC 接続する。`peer_info_listen_addr = None` ならスキップ。
+        let peer_info_task = self
+            .net
+            .net_config
+            .peer_info_listen_addr
+            .map(|listen_addr| {
+                let peer_id = self.net.local_peer_id.clone();
+                let quic = self.net.quic.clone();
+                let shutdown_rx = self.ctx.shutdown_tx.subscribe();
+                tokio::spawn(async move {
+                    if let Err(e) = crate::peer_info_server::run(
+                        listen_addr,
+                        peer_id,
+                        quic,
+                        "synergos-core".into(),
+                        shutdown_rx,
+                    )
+                    .await
+                    {
+                        tracing::warn!("peer-info servlet exited with error: {e}");
+                    }
+                })
+            });
+
         // IPC サーバーを実行（シャットダウンまでブロック）
         ipc_server.run().await?;
 
@@ -286,6 +312,9 @@ impl Daemon {
         gossip_sub_task.abort();
         gossip_fanout_task.abort();
         catalog_sync_task.abort();
+        if let Some(t) = peer_info_task {
+            t.abort();
+        }
 
         // グレースフルシャットダウン
         self.shutdown().await?;

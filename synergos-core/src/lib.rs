@@ -6,6 +6,7 @@ pub mod cli;
 pub mod conflict;
 pub mod event_bus;
 pub mod exchange;
+pub mod peer_info_server;
 pub mod presence;
 pub mod project;
 
