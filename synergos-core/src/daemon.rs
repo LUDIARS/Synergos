@@ -319,6 +319,7 @@ impl Daemon {
             .map(|listen_addr| {
                 let peer_id = self.net.local_peer_id.clone();
                 let quic = self.net.quic.clone();
+                let advertised = self.net.net_config.quic_advertised_addr.clone();
                 let shutdown_rx = self.ctx.shutdown_tx.subscribe();
                 tokio::spawn(async move {
                     if let Err(e) = crate::peer_info_server::run(
@@ -326,6 +327,7 @@ impl Daemon {
                         peer_id,
                         quic,
                         "synergos-core".into(),
+                        advertised,
                         shutdown_rx,
                     )
                     .await

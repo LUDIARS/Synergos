@@ -23,6 +23,14 @@ pub struct NetConfig {
     /// `127.0.0.1:7780` を設定し、Cloudflare Tunnel 等で外部に publish する想定。
     #[serde(default)]
     pub peer_info_listen_addr: Option<SocketAddr>,
+    /// `/peer-info` で告知する QUIC エンドポイント (例 `[2406:da14:...]:7777`)。
+    /// `None` ならサーブレットは `quic.local_addr()` (= bind addr) を返す。
+    /// Cloudflare Tunnel が Cloudflare proxied DNS の裏でホストする公開ノードでは、
+    /// proxy が UDP/QUIC を通さない (HTTPS のみ) ため、ここに EC2 の **real public
+    /// IPv6 / IPv4** を入れて、クライアントがそこに直接 QUIC 接続できるようにする。
+    /// 形式は `host:port` 文字列 (IP:port も hostname:port も可)。
+    #[serde(default)]
+    pub quic_advertised_addr: Option<String>,
     /// 起動時に自動 bootstrap する peer-info サーブレット URL 群。
     /// 各 URL に対して `peer add-url` 相当 (`HTTPS GET /peer-info` → QUIC connect)
     /// を非同期に発火し、成功・失敗とも `tracing::info` / `warn` で記録する。
@@ -290,6 +298,7 @@ impl Default for NetConfig {
             },
             catalog: CatalogConfig::default(),
             peer_info_listen_addr: None,
+            quic_advertised_addr: None,
             bootstrap_urls: Vec::new(),
             force_relay_only: false,
             auto_promote: true,

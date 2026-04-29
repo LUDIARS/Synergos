@@ -51,10 +51,17 @@ struct AppState {
     peer_id: PeerId,
     quic: Arc<QuicManager>,
     server_name: String,
+    /// 明示的に告知する QUIC エンドポイント。`None` なら `quic.local_addr()` を返す。
+    /// Cloudflare proxied DNS の裏で動く公開ノードでは、ここに EC2 の real public
+    /// IPv6/IPv4:port を入れてクライアントに直結させる。
+    advertised_addr: Option<String>,
 }
 
 async fn handle_peer_info(State(s): State<AppState>) -> Json<PeerInfoResponse> {
-    let endpoint = s.quic.local_addr().await.map(|a| a.to_string());
+    let endpoint = match &s.advertised_addr {
+        Some(a) => Some(a.clone()),
+        None => s.quic.local_addr().await.map(|a| a.to_string()),
+    };
     Json(PeerInfoResponse {
         peer_id: s.peer_id.to_string(),
         quic_endpoint: endpoint,
@@ -80,17 +87,23 @@ fn build_router(state: AppState) -> Router {
 /// `listen_addr` は通常 `127.0.0.1:7780` 等のローカル loopback で、Cloudflare
 /// Tunnel 経由で外部に publish される。直接 0.0.0.0 に bind しないこと
 /// (servlet 自体には auth が無いため、生で外に出すと info disclosure になる)。
+///
+/// `advertised_addr` を Some にすると、`/peer-info` は `quic.local_addr()` の代わりに
+/// その値を返す。`Cloudflare proxied DNS` 配下の公開ノードでは EC2 の real public
+/// address を渡してクライアントに直結させる用途。
 pub async fn run(
     listen_addr: SocketAddr,
     peer_id: PeerId,
     quic: Arc<QuicManager>,
     server_name: String,
+    advertised_addr: Option<String>,
     mut shutdown_rx: broadcast::Receiver<()>,
 ) -> anyhow::Result<()> {
     let state = AppState {
         peer_id,
         quic,
         server_name,
+        advertised_addr,
     };
     let app = build_router(state);
 
@@ -141,6 +154,7 @@ mod tests {
             peer_id: peer_id.clone(),
             quic: quic.clone(),
             server_name: "test".into(),
+            advertised_addr: None,
         });
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -170,6 +184,7 @@ mod tests {
             peer_id: peer_id.clone(),
             quic: quic.clone(),
             server_name: "test".into(),
+            advertised_addr: None,
         });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -191,6 +206,7 @@ mod tests {
             peer_id: identity.peer_id().clone(),
             quic,
             server_name: String::new(),
+            advertised_addr: None,
         });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -201,6 +217,33 @@ mod tests {
         let url = format!("http://{}/health", addr);
         let body = reqwest_get_text(&url).await;
         assert_eq!(body, "ok");
+    }
+
+    /// `advertised_addr` を指定するとそれを優先して /peer-info に返す。
+    #[tokio::test]
+    async fn peer_info_uses_advertised_addr_when_set() {
+        use std::net::Ipv4Addr;
+        let identity = Arc::new(Identity::generate());
+        let peer_id = identity.peer_id().clone();
+        let quic = Arc::new(QuicManager::new(qcfg(), identity));
+        let _ = quic.bind((Ipv4Addr::LOCALHOST, 0).into()).await.unwrap();
+
+        let advertised = "[2406:da14:abcd:ef::1]:7777".to_string();
+        let app = build_router(AppState {
+            peer_id: peer_id.clone(),
+            quic: quic.clone(),
+            server_name: "test".into(),
+            advertised_addr: Some(advertised.clone()),
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let url = format!("http://{}/peer-info", addr);
+        let resp = reqwest_get_json(&url).await;
+        assert_eq!(resp.quic_endpoint, Some(advertised));
     }
 
     /// reqwest を入れたくないので tokio + 手書き HTTP/1.1 で GET する小ヘルパ。
