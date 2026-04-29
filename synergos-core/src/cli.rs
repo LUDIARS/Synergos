@@ -103,6 +103,14 @@ pub enum ProjectCommand {
         /// ローカルのプロジェクトルートパス
         path: PathBuf,
     },
+    /// ファイル更新を publish (FileOffer + CatalogUpdate を gossip)
+    Publish {
+        /// プロジェクトID
+        id: String,
+        /// publish するファイル (プロジェクトルート相対 or 絶対)
+        #[arg(required = true)]
+        files: Vec<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -315,6 +323,24 @@ async fn handle_project(cmd: ProjectCommand) -> anyhow::Result<()> {
                 .await?;
             match resp {
                 synergos_ipc::IpcResponse::Ok => println!("Joined project."),
+                synergos_ipc::IpcResponse::Error { message, .. } => {
+                    eprintln!("Error: {}", message);
+                }
+                _ => println!("Unexpected response"),
+            }
+        }
+        ProjectCommand::Publish { id, files } => {
+            let count = files.len();
+            let resp = client
+                .send(synergos_ipc::IpcCommand::PublishUpdate {
+                    project_id: id,
+                    file_paths: files,
+                })
+                .await?;
+            match resp {
+                synergos_ipc::IpcResponse::Ok => {
+                    println!("Published {} file(s).", count);
+                }
                 synergos_ipc::IpcResponse::Error { message, .. } => {
                     eprintln!("Error: {}", message);
                 }
