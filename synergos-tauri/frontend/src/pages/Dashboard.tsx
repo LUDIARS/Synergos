@@ -5,22 +5,28 @@ import {
   daemonStatus,
   peerList,
   projectList,
+  transferList,
+  TransferInfo,
 } from "../lib/tauri";
 import { AddProjectModal } from "../components/AddProjectModal";
 import { AddPeerModal } from "../components/AddPeerModal";
+import { PublishModal } from "../components/PublishModal";
 
 function ProjectsSection({
   selectedId,
   onSelect,
   onAddOpen,
+  onPublishOpen,
 }: {
   selectedId: string | null;
   onSelect: (id: string) => void;
   onAddOpen: () => void;
+  onPublishOpen: (projectId: string, rootPath: string) => void;
 }) {
   const { data, isLoading, error } = useQuery({
     queryKey: ["projects"],
     queryFn: projectList,
+    refetchInterval: 5_000,
   });
   return (
     <section className="section">
@@ -65,6 +71,15 @@ function ProjectsSection({
                       {p.active_transfers} txfr
                     </span>
                   ) : null}
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onPublishOpen(p.project_id, p.root_path);
+                    }}
+                    style={{ padding: "0.25rem 0.6rem", fontSize: "0.75rem" }}
+                  >
+                    Publish…
+                  </button>
                 </div>
               </div>
             ))}
@@ -73,6 +88,88 @@ function ProjectsSection({
       </div>
     </section>
   );
+}
+
+function TransfersSection({ projectId }: { projectId: string | null }) {
+  const { data, isLoading, error } = useQuery({
+    queryKey: ["transfers", projectId],
+    queryFn: () => transferList(projectId ?? undefined),
+    refetchInterval: 3_000,
+  });
+  return (
+    <section className="section">
+      <div className="section-header">
+        <h2>
+          Transfers
+          {projectId ? (
+            <span className="badge gray" style={{ marginLeft: "0.5rem" }}>
+              {projectId}
+            </span>
+          ) : (
+            <span className="badge gray" style={{ marginLeft: "0.5rem" }}>
+              all
+            </span>
+          )}
+        </h2>
+      </div>
+      <div className="section-body">
+        {isLoading ? (
+          <div className="list-empty">Loading…</div>
+        ) : error ? (
+          <div className="alert error">{bridgeMessage(error)}</div>
+        ) : !data || data.length === 0 ? (
+          <div className="list-empty">アクティブ転送なし</div>
+        ) : (
+          <div className="list">
+            {data.map((t) => (
+              <TransferRow key={t.transfer_id} t={t} />
+            ))}
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function TransferRow({ t }: { t: TransferInfo }) {
+  const pct =
+    t.file_size > 0
+      ? Math.min(100, Math.floor((t.bytes_transferred / t.file_size) * 100))
+      : 0;
+  return (
+    <div className="row">
+      <div className="meta">
+        <div className="title">
+          <span style={{ marginRight: "0.5rem" }}>
+            {t.direction === "Send" ? "↑" : "↓"}
+          </span>
+          {t.file_name}
+        </div>
+        <div className="sub">
+          {pct}% · {formatBps(t.speed_bps)} · {formatBytes(t.bytes_transferred)}
+          /{formatBytes(t.file_size)}
+        </div>
+      </div>
+      <div className="actions">
+        <span className={`badge ${transferStateBadge(t.state)}`}>{t.state}</span>
+      </div>
+    </div>
+  );
+}
+
+function transferStateBadge(state: string): string {
+  const s = state.toLowerCase();
+  if (s.includes("complet") || s === "done") return "green";
+  if (s.includes("fail") || s.includes("cancel")) return "red";
+  if (s.includes("transfer") || s.includes("progress")) return "orange";
+  return "gray";
+}
+
+function formatBytes(n: number): string {
+  if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(1)} GB`;
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)} MB`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)} KB`;
+  return `${n} B`;
 }
 
 function PeersSection({
@@ -181,6 +278,10 @@ export function Dashboard() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [addProject, setAddProject] = useState(false);
   const [addPeer, setAddPeer] = useState(false);
+  const [publishCtx, setPublishCtx] = useState<{
+    projectId: string;
+    rootPath: string;
+  } | null>(null);
 
   return (
     <>
@@ -189,11 +290,15 @@ export function Dashboard() {
         selectedId={selectedId}
         onSelect={setSelectedId}
         onAddOpen={() => setAddProject(true)}
+        onPublishOpen={(projectId, rootPath) =>
+          setPublishCtx({ projectId, rootPath })
+        }
       />
       <PeersSection
         projectId={selectedId}
         onAddOpen={() => setAddPeer(true)}
       />
+      <TransfersSection projectId={selectedId} />
       <AddProjectModal
         open={addProject}
         onClose={() => setAddProject(false)}
@@ -202,6 +307,12 @@ export function Dashboard() {
         open={addPeer}
         projectId={selectedId}
         onClose={() => setAddPeer(false)}
+      />
+      <PublishModal
+        open={!!publishCtx}
+        projectId={publishCtx?.projectId ?? null}
+        rootPath={publishCtx?.rootPath ?? null}
+        onClose={() => setPublishCtx(null)}
       />
     </>
   );
