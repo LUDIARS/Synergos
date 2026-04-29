@@ -226,6 +226,14 @@ function PeersSection({
                 <div className="meta">
                   <div className="title">
                     {p.display_name || p.peer_id.slice(0, 12) + "…"}
+                    {p.synergos_version ? (
+                      <span
+                        className="badge gray"
+                        style={{ marginLeft: "0.5rem", fontSize: "0.65rem" }}
+                      >
+                        v{p.synergos_version}
+                      </span>
+                    ) : null}
                   </div>
                   <div className="sub">
                     {p.route} · {p.rtt_ms} ms · {formatBps(p.bandwidth_bps)}

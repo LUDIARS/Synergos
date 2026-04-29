@@ -28,6 +28,8 @@ export type PeerInfo = {
   rtt_ms: number;
   bandwidth_bps: number;
   state: string;
+  /** 相手 daemon の `CARGO_PKG_VERSION` (peer-info 経由で学習)。未学習なら `""` */
+  synergos_version: string;
 };
 
 export type NetworkStatusInfo = {

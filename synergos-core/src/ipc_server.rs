@@ -897,6 +897,7 @@ pub async fn dispatch_command(command: IpcCommand, ctx: &ServiceContext) -> IpcR
                     rtt_ms: n.rtt_ms.unwrap_or(0),
                     bandwidth_bps: n.bandwidth_bps,
                     state: format!("{:?}", n.state),
+                    synergos_version: n.synergos_version,
                 })
                 .collect();
             IpcResponse::PeerList(peers)
@@ -911,6 +912,7 @@ pub async fn dispatch_command(command: IpcCommand, ctx: &ServiceContext) -> IpcR
                 display_name: peer_id.clone(),
                 endpoints: vec![],
                 project_ids: vec![project_id],
+                synergos_version: String::new(),
             };
             match ctx.presence.register_node(registration).await {
                 Ok(_) => {
@@ -947,14 +949,14 @@ pub async fn dispatch_command(command: IpcCommand, ctx: &ServiceContext) -> IpcR
                 };
             }
             // /peer-info GET → QUIC connect (S1 真性認証込み)
-            let peer_id = match crate::peer_bootstrap::bootstrap_from_url(
+            let result = match crate::peer_bootstrap::bootstrap_from_url(
                 &url,
                 &ctx.quic,
                 std::time::Duration::from_secs(10),
             )
             .await
             {
-                Ok(pid) => pid,
+                Ok(r) => r,
                 Err(e) => {
                     return IpcResponse::Error {
                         code: 2,
@@ -962,12 +964,14 @@ pub async fn dispatch_command(command: IpcCommand, ctx: &ServiceContext) -> IpcR
                     };
                 }
             };
+            let peer_id = result.peer_id.clone();
             // PresenceService に登録 → Connected に遷移
             let registration = crate::presence::NodeRegistration {
                 peer_id: peer_id.clone(),
                 display_name: peer_id.to_string(),
                 endpoints: vec![],
                 project_ids: vec![project_id],
+                synergos_version: result.synergos_version,
             };
             if let Err(e) = ctx.presence.register_node(registration).await {
                 return IpcResponse::Error {

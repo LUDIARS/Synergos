@@ -24,6 +24,7 @@ async fn handle_peer_status_updates_registered_node() {
         display_name: "z".into(),
         endpoints: vec![],
         project_ids: vec![],
+        synergos_version: String::new(),
     })
     .await
     .unwrap();
@@ -51,6 +52,7 @@ async fn handle_peer_status_offline_sets_disconnected() {
         display_name: "w".into(),
         endpoints: vec![],
         project_ids: vec![],
+        synergos_version: String::new(),
     })
     .await
     .unwrap();

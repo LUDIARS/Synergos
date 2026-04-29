@@ -46,15 +46,21 @@ pub struct RegisteredNode {
     pub project_ids: Vec<String>,
     pub bandwidth_bps: u64,
     pub last_seen: Instant,
+    /// 相手 daemon の `CARGO_PKG_VERSION` (peer-info 経由で学習)。
+    /// 学習経路が無い peer (gossip / DHT のみ) は空文字。
+    pub synergos_version: String,
 }
 
 /// ノード登録リクエスト
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct NodeRegistration {
     pub peer_id: PeerId,
     pub display_name: String,
     pub endpoints: Vec<Route>,
     pub project_ids: Vec<String>,
+    /// 相手 daemon の `CARGO_PKG_VERSION` (peer-info 経由で取得)。
+    /// 不明な経路で得た peer (gossip 等) は空文字。
+    pub synergos_version: String,
 }
 
 /// ノード登録/削除エラー
@@ -232,6 +238,7 @@ impl PresenceService {
                     project_ids: r.active_projects,
                     bandwidth_bps: 0,
                     last_seen: r.published_at,
+                    synergos_version: String::new(),
                 })
                 .collect()
         } else {
@@ -317,6 +324,7 @@ impl NodeRegistry for PresenceService {
             project_ids: registration.project_ids.clone(),
             bandwidth_bps: 0,
             last_seen: Instant::now(),
+            synergos_version: registration.synergos_version.clone(),
         };
         self.nodes.insert(registration.peer_id.clone(), node);
 
@@ -367,6 +375,7 @@ impl NodeRegistry for PresenceService {
             project_ids: registration.project_ids.clone(),
             bandwidth_bps: 0,
             last_seen: Instant::now(),
+            synergos_version: registration.synergos_version.clone(),
         };
 
         self.nodes.insert(peer_id.clone(), node.clone());
