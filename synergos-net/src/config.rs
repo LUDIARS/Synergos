@@ -23,6 +23,13 @@ pub struct NetConfig {
     /// `127.0.0.1:7780` を設定し、Cloudflare Tunnel 等で外部に publish する想定。
     #[serde(default)]
     pub peer_info_listen_addr: Option<SocketAddr>,
+    /// 起動時に自動 bootstrap する peer-info サーブレット URL 群。
+    /// 各 URL に対して `peer add-url` 相当 (`HTTPS GET /peer-info` → QUIC connect)
+    /// を非同期に発火し、成功・失敗とも `tracing::info` / `warn` で記録する。
+    /// 失敗しても daemon 起動は継続する (best-effort)。
+    /// 例: `["https://node1.example.com", "https://node2.example.com"]`
+    #[serde(default)]
+    pub bootstrap_urls: Vec<String>,
 }
 
 /// CatalogManager のチューニングパラメータ。
@@ -263,6 +270,7 @@ impl Default for NetConfig {
             },
             catalog: CatalogConfig::default(),
             peer_info_listen_addr: None,
+            bootstrap_urls: Vec::new(),
         }
     }
 }
@@ -312,5 +320,17 @@ mod tests {
         }"#;
         let qcfg: QuicConfig = serde_json::from_str(json).expect("json parse");
         assert!(qcfg.listen_addr.is_none());
+    }
+
+    #[test]
+    fn bootstrap_urls_defaults_to_empty() {
+        let cfg = NetConfig::default();
+        assert!(cfg.bootstrap_urls.is_empty());
+    }
+
+    #[test]
+    fn peer_info_listen_addr_defaults_to_none() {
+        let cfg = NetConfig::default();
+        assert!(cfg.peer_info_listen_addr.is_none());
     }
 }

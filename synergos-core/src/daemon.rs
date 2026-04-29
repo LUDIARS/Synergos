@@ -302,6 +302,50 @@ impl Daemon {
                 })
             });
 
+        // bootstrap_urls: 起動時に config 指定の peer-info URL に自動接続する。
+        // 失敗は warn で記録するだけで daemon 起動は継続する (best-effort)。
+        let bootstrap_task = if !self.net.net_config.bootstrap_urls.is_empty() {
+            let urls = self.net.net_config.bootstrap_urls.clone();
+            let quic = self.net.quic.clone();
+            let presence = self.ctx.presence.clone();
+            Some(tokio::spawn(async move {
+                for url in urls {
+                    match crate::peer_bootstrap::bootstrap_from_url(
+                        &url,
+                        &quic,
+                        std::time::Duration::from_secs(10),
+                    )
+                    .await
+                    {
+                        Ok(peer_id) => {
+                            tracing::info!(
+                                "bootstrap connected to {url}: peer_id={}",
+                                peer_id.short()
+                            );
+                            let registration = crate::presence::NodeRegistration {
+                                peer_id: peer_id.clone(),
+                                display_name: peer_id.to_string(),
+                                endpoints: vec![],
+                                project_ids: vec![],
+                            };
+                            if let Err(e) = presence.register_node(registration).await {
+                                tracing::warn!("bootstrap {url}: register_node failed: {e}");
+                                continue;
+                            }
+                            let _ = presence
+                                .update_node_state(&peer_id, crate::presence::PeerState::Connected)
+                                .await;
+                        }
+                        Err(e) => {
+                            tracing::warn!("bootstrap {url} failed: {e}");
+                        }
+                    }
+                }
+            }))
+        } else {
+            None
+        };
+
         // IPC サーバーを実行（シャットダウンまでブロック）
         ipc_server.run().await?;
 
@@ -314,6 +358,9 @@ impl Daemon {
         gossip_fanout_task.abort();
         catalog_sync_task.abort();
         if let Some(t) = peer_info_task {
+            t.abort();
+        }
+        if let Some(t) = bootstrap_task {
             t.abort();
         }
 
