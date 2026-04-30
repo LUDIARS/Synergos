@@ -348,6 +348,22 @@ impl Exchange {
         self.out_path_resolver = Some(resolver);
     }
 
+    /// ローカルピア ID を返す (gossip subscriber が auto-pull の自分宛
+    /// オファー除外に使う)。
+    pub fn local_peer_id(&self) -> &PeerId {
+        &self.local_peer_id
+    }
+
+    /// 指定 file_id を共有マップに登録済か。`shared_files` は publisher 側
+    /// の登録 + 受信完了時の再登録 (handle_incoming_transfer) で埋まる。
+    /// 同じ file_id を持っているなら auto-pull は不要 (送信側 / 既取得済)。
+    pub fn has_shared_file(&self, file_id: &FileId, version: u64) -> bool {
+        self.shared_files
+            .get(file_id)
+            .map(|r| r.version >= version)
+            .unwrap_or(false)
+    }
+
     /// Bitswap 用 ContentStore を注入する。publish_updates 時に
     /// RootCatalog スナップショットをここに put して catalog_cid を advertise する。
     pub fn attach_content_store(&mut self, store: Arc<MemoryContentStore>) {
@@ -534,6 +550,23 @@ impl Exchange {
             tokio::fs::create_dir_all(parent).await.ok();
         }
         tokio::fs::rename(&tmp_path, &final_path).await?;
+
+        // 受信完了したファイルを shared_files にも登録する。これで:
+        //   1. 後続の自身に届く同一 FileOffer を has_shared_file で skip できる
+        //      (auto-pull 重複ループの防止)
+        //   2. このノード経由でさらに別ピアからの FileWant が来た場合に再配布できる
+        //      (将来的なメッシュ伝搬の足がかり)
+        // version はヘッダに乗っていないので 1 を仮置きする (S5 で揃える)。
+        self.shared_files.insert(
+            file_id.clone(),
+            SharedFileRecord {
+                project_id: header.project_id.clone(),
+                file_path: final_path.clone(),
+                file_size: header.total_size,
+                crc: 0,
+                version: 1,
+            },
+        );
 
         // この転送に対応する ActiveTransfer を作り直して complete_transfer する
         let transfer_id = TransferId(header.transfer_id.clone());

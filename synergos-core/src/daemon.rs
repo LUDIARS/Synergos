@@ -22,12 +22,12 @@ use synergos_net::{
     quic::{QuicManager, StreamType},
     transfer::TRANSFER_STREAM_MAGIC,
     tunnel::TunnelManager,
-    types::PeerId,
+    types::{FileId, PeerId},
 };
 
 use crate::conflict::ConflictManager;
 use crate::event_bus::{CoreEventBus, SharedEventBus};
-use crate::exchange::{Exchange, FileSharing};
+use crate::exchange::{Exchange, FetchRequest, FileSharing, TransferPriority};
 use crate::ipc_server::{IpcServer, ServiceContext};
 use crate::presence::{NodeRegistry, PresenceService};
 use crate::project::ProjectManager;
@@ -752,8 +752,38 @@ fn spawn_gossip_subscriber(
                         Ok((_topic, GossipMessage::FileWant { requester, file_id, version })) => {
                             ctx.exchange.handle_file_want(requester, file_id, version);
                         }
-                        Ok((_topic, GossipMessage::FileOffer { sender, file_id, version, size, crc, content_hash: _ })) => {
-                            ctx.exchange.handle_file_offer(sender, file_id, version, size, crc);
+                        Ok((topic, GossipMessage::FileOffer { sender, file_id, version, size, crc, content_hash: _ })) => {
+                            ctx.exchange.handle_file_offer(sender.clone(), file_id.clone(), version, size, crc);
+                            // auto-pull: project が open & 自分の Offer ではない & 未保有なら
+                            // FileWant を発火する。これにより publisher 側 handle_file_want が
+                            // share_and_send → TXFR を起動して実データが流れる。
+                            //
+                            // 受信側の `handle_incoming_transfer` が完了時に shared_files へ
+                            // 登録するので、`has_shared_file` 経由で再 pull は抑止される
+                            // (同一 daemon プロセス内のみ)。
+                            let auto_pull_eligible = sender != *ctx.exchange.local_peer_id()
+                                && !ctx.exchange.has_shared_file(&file_id, version);
+                            if auto_pull_eligible {
+                                if let Some(project_id) = topic.0.strip_prefix("project/").map(|s| s.to_string()) {
+                                    if ctx.project_manager.project_root(&project_id).is_some() {
+                                        let exchange = ctx.exchange.clone();
+                                        let req = FetchRequest {
+                                            project_id,
+                                            file_id: FileId(file_id.0.clone()),
+                                            source_peer: Some(sender.clone()),
+                                            priority: TransferPriority::Interactive,
+                                            version,
+                                        };
+                                        tokio::spawn(async move {
+                                            if let Err(e) = exchange.fetch_file(req).await {
+                                                tracing::debug!(
+                                                    "auto-pull on FileOffer failed: {e}"
+                                                );
+                                            }
+                                        });
+                                    }
+                                }
+                            }
                         }
                         Ok((_topic, GossipMessage::PeerStatus { status, origin, .. })) => {
                             ctx.presence.handle_peer_status(&status, &origin);
