@@ -339,10 +339,17 @@ impl Daemon {
 
         // bootstrap_urls: 起動時に config 指定の peer-info URL に自動接続する。
         // 失敗は warn で記録するだけで daemon 起動は継続する (best-effort)。
+        //
+        // bootstrap した peer は **既に open しているプロジェクト全部** に attach する。
+        // (`peer add-url` は引数 project_id を要求するが、bootstrap_urls はサーバ
+        //  自体の起動時設定なので「現時点で open している全プロジェクトの相手」と
+        //  して登録するのが妥当。これがないと `peer list myproj` に出ず、ユーザは
+        //  ノード接続済みなのに peer が見えない混乱に陥る。)
         let bootstrap_task = if !self.net.net_config.bootstrap_urls.is_empty() {
             let urls = self.net.net_config.bootstrap_urls.clone();
             let quic = self.net.quic.clone();
             let presence = self.ctx.presence.clone();
+            let project_manager = self.ctx.project_manager.clone();
             Some(tokio::spawn(async move {
                 for url in urls {
                     match crate::peer_bootstrap::bootstrap_from_url(
@@ -353,20 +360,28 @@ impl Daemon {
                     .await
                     {
                         Ok(result) => {
+                            let project_ids: Vec<String> =
+                                crate::project::ProjectConfiguration::list_projects(
+                                    &*project_manager,
+                                )
+                                .into_iter()
+                                .map(|info| info.project_id)
+                                .collect();
                             tracing::info!(
-                                "bootstrap connected to {url}: peer_id={} synergos_version={}",
+                                "bootstrap connected to {url}: peer_id={} synergos_version={} attached_projects={}",
                                 result.peer_id.short(),
                                 if result.synergos_version.is_empty() {
                                     "unknown"
                                 } else {
                                     &result.synergos_version
-                                }
+                                },
+                                project_ids.len()
                             );
                             let registration = crate::presence::NodeRegistration {
                                 peer_id: result.peer_id.clone(),
                                 display_name: result.peer_id.to_string(),
                                 endpoints: vec![],
-                                project_ids: vec![],
+                                project_ids,
                                 synergos_version: result.synergos_version,
                             };
                             if let Err(e) = presence.register_node(registration).await {
