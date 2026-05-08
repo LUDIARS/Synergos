@@ -204,6 +204,22 @@ impl CoreEvent for NetworkStatusEvent {
     }
 }
 
+/// 拡張 magic ストリーム受信イベント。 既存 magic (HLO1/DHT1/TXFR/GSP1/BSW1) 以外を
+/// `dispatch_peer_streams` が拾った時に emit される。 上位サービス (例: Susurrus)
+/// が IPC 経由で購読してリアルタイムイベントを配るために使う。
+#[derive(Debug, Clone)]
+pub struct PeerStreamReceivedEvent {
+    pub peer_id: String,
+    pub magic: [u8; 4],
+    pub payload: Vec<u8>,
+}
+
+impl CoreEvent for PeerStreamReceivedEvent {
+    fn event_name() -> &'static str {
+        "peer_stream_received"
+    }
+}
+
 /// EventBus の共有参照型
 pub type SharedEventBus = Arc<CoreEventBus>;
 

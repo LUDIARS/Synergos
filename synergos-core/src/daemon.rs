@@ -581,6 +581,7 @@ fn spawn_quic_accept_loop(
                             let content_store = ctx.content_store.clone();
                             let sender = acc.peer_id.clone();
                             let connection = acc.connection;
+                            let event_bus = ctx.event_bus.clone();
                             tokio::spawn(async move {
                                 dispatch_peer_streams(
                                     connection,
@@ -589,6 +590,7 @@ fn spawn_quic_accept_loop(
                                     gossip,
                                     exchange,
                                     content_store,
+                                    event_bus,
                                 )
                                 .await;
                             });
@@ -617,7 +619,12 @@ async fn dispatch_peer_streams(
     gossip: Arc<GossipNode>,
     exchange: Arc<crate::exchange::Exchange>,
     content_store: Arc<MemoryContentStore>,
+    event_bus: SharedEventBus,
 ) {
+    /// 拡張 magic ストリームの payload 上限 (1 MiB)。 IPC transport の
+    /// MAX_MESSAGE_SIZE と整合。 これ以上来たら drop する。
+    const MAX_EXTENSION_PAYLOAD: usize = 1024 * 1024;
+
     loop {
         let (send, mut recv) = match connection.accept_bi().await {
             Ok(pair) => pair,
@@ -638,6 +645,7 @@ async fn dispatch_peer_streams(
         let exchange = exchange.clone();
         let content_store = content_store.clone();
         let sender_cloned = sender.clone();
+        let event_bus_cloned = event_bus.clone();
         tokio::spawn(async move {
             if &magic == DHT_STREAM_MAGIC {
                 if let Err(e) = handle_dht_stream(dht, send, recv).await {
@@ -657,7 +665,26 @@ async fn dispatch_peer_streams(
                     tracing::debug!("Bitswap stream handler error: {e}");
                 }
             } else {
-                tracing::debug!("unknown stream magic {:?}", magic);
+                // 拡張 magic: 残バイトを (上限付きで) 読み出して PeerStreamReceivedEvent emit。
+                drop(send);
+                let payload = match recv.read_to_end(MAX_EXTENSION_PAYLOAD).await {
+                    Ok(p) => p,
+                    Err(e) => {
+                        tracing::debug!("extension stream {:?} payload read failed: {e}", magic);
+                        return;
+                    }
+                };
+                tracing::trace!(
+                    "extension stream magic {:?} from {}: {} bytes",
+                    magic,
+                    sender_cloned.short(),
+                    payload.len()
+                );
+                event_bus_cloned.emit(crate::event_bus::PeerStreamReceivedEvent {
+                    peer_id: sender_cloned.to_string(),
+                    magic,
+                    payload,
+                });
             }
         });
     }
