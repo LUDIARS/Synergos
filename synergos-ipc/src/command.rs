@@ -281,7 +281,9 @@ impl IpcCommand {
             }
             Self::ConfigUpdate { .. } => Ok(()),
 
-            Self::PeerSendStream { peer_id, payload, .. } => {
+            Self::PeerSendStream {
+                peer_id, payload, ..
+            } => {
                 check_id("peer_id", peer_id)?;
                 // payload 上限 1 MiB (DoS 対策、 transport.MAX_MESSAGE_SIZE と整合)
                 const MAX_PAYLOAD: usize = 1024 * 1024;

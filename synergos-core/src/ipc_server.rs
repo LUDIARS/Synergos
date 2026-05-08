@@ -1296,24 +1296,24 @@ pub async fn dispatch_command(command: IpcCommand, ctx: &ServiceContext) -> IpcR
                 }
             };
             let res = async {
-                let (mut send, _recv) = conn
-                    .open_bi()
-                    .await
-                    .map_err(|e| format!("open_bi: {e}"))?;
+                let (mut send, _recv) =
+                    conn.open_bi().await.map_err(|e| format!("open_bi: {e}"))?;
                 send.write_all(&magic)
                     .await
                     .map_err(|e| format!("write magic: {e}"))?;
                 send.write_all(&payload)
                     .await
                     .map_err(|e| format!("write payload: {e}"))?;
-                send.finish()
-                    .map_err(|e| format!("finish: {e}"))?;
+                send.finish().map_err(|e| format!("finish: {e}"))?;
                 Ok::<_, String>(())
             }
             .await;
             match res {
                 Ok(()) => IpcResponse::Ok,
-                Err(e) => IpcResponse::Error { code: 5, message: e },
+                Err(e) => IpcResponse::Error {
+                    code: 5,
+                    message: e,
+                },
             }
         }
     }

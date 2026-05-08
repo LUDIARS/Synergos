@@ -670,15 +670,15 @@ async fn dispatch_peer_streams(
                 let payload = match recv.read_to_end(MAX_EXTENSION_PAYLOAD).await {
                     Ok(p) => p,
                     Err(e) => {
-                        tracing::debug!(
-                            "extension stream {:?} payload read failed: {e}", magic
-                        );
+                        tracing::debug!("extension stream {:?} payload read failed: {e}", magic);
                         return;
                     }
                 };
                 tracing::trace!(
                     "extension stream magic {:?} from {}: {} bytes",
-                    magic, sender_cloned.short(), payload.len()
+                    magic,
+                    sender_cloned.short(),
+                    payload.len()
                 );
                 event_bus_cloned.emit(crate::event_bus::PeerStreamReceivedEvent {
                     peer_id: sender_cloned.to_string(),
