@@ -577,6 +577,9 @@ where
     let mut rx_transfer_completed = ctx.event_bus.subscribe::<TransferCompletedEvent>();
     let mut rx_conflict = ctx.event_bus.subscribe::<ConflictDetectedEvent>();
     let mut rx_network = ctx.event_bus.subscribe::<NetworkStatusEvent>();
+    let mut rx_peer_stream = ctx
+        .event_bus
+        .subscribe::<crate::event_bus::PeerStreamReceivedEvent>();
 
     loop {
         let event: Option<IpcEvent> = tokio::select! {
@@ -659,6 +662,17 @@ where
                         total_bandwidth_bps: ev.total_bandwidth_bps,
                         used_bandwidth_bps: ev.used_bandwidth_bps,
                         avg_latency_ms: ev.avg_latency_ms,
+                    },
+                ),
+                Err(_) => continue,
+            },
+            r = rx_peer_stream.recv() => match r {
+                Ok(ev) => filter_events(
+                    filters_ref, EventCategory::PeerStream, None,
+                    IpcEvent::PeerStreamReceived {
+                        peer_id: ev.peer_id,
+                        magic: ev.magic,
+                        payload: ev.payload,
                     },
                 ),
                 Err(_) => continue,
@@ -1265,6 +1279,42 @@ pub async fn dispatch_command(command: IpcCommand, ctx: &ServiceContext) -> IpcR
             // デーモンを再起動するかどうかは呼び出し側が決定する。
             tracing::info!("ConfigUpdate received; no hot-swap implemented yet");
             IpcResponse::Ok
+        }
+        IpcCommand::PeerSendStream {
+            peer_id,
+            magic,
+            payload,
+        } => {
+            let pid = PeerId::new(peer_id);
+            let conn = match ctx.quic.raw_connection(&pid) {
+                Some(c) => c,
+                None => {
+                    return IpcResponse::Error {
+                        code: 5,
+                        message: format!("peer {pid} not connected"),
+                    }
+                }
+            };
+            let res = async {
+                let (mut send, _recv) = conn
+                    .open_bi()
+                    .await
+                    .map_err(|e| format!("open_bi: {e}"))?;
+                send.write_all(&magic)
+                    .await
+                    .map_err(|e| format!("write magic: {e}"))?;
+                send.write_all(&payload)
+                    .await
+                    .map_err(|e| format!("write payload: {e}"))?;
+                send.finish()
+                    .map_err(|e| format!("finish: {e}"))?;
+                Ok::<_, String>(())
+            }
+            .await;
+            match res {
+                Ok(()) => IpcResponse::Ok,
+                Err(e) => IpcResponse::Error { code: 5, message: e },
+            }
         }
     }
 }

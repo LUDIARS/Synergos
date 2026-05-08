@@ -72,6 +72,14 @@ pub enum IpcEvent {
         used_bandwidth_bps: u64,
         avg_latency_ms: u32,
     },
+
+    /// 既存 magic 以外の QUIC bidi/uni stream を受信した。 上位層 (例: Susurrus) が
+    /// 自前 magic 集合をディスパッチするためのエスケープハッチ。
+    PeerStreamReceived {
+        peer_id: String,
+        magic: [u8; 4],
+        payload: Vec<u8>,
+    },
 }
 
 /// イベントフィルタ（購読時に指定）
@@ -92,4 +100,6 @@ pub enum EventCategory {
     Transfer,
     Conflict,
     Network,
+    /// 拡張 magic ストリーム ([`IpcEvent::PeerStreamReceived`])
+    PeerStream,
 }

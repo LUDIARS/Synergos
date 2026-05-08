@@ -110,6 +110,20 @@ pub enum IpcCommand {
     Subscribe { events: Vec<EventFilter> },
     /// イベント購読解除
     Unsubscribe { subscription_id: String },
+
+    // ── 拡張ストリーム (#peer-stream-extension) ──
+    /// 任意 magic の uni-directional QUIC stream を 1 本送る。
+    /// upper-layer service (例: Susurrus) がリアルタイムイベントを
+    /// peer に届けるためのエスケープハッチ。
+    ///
+    /// 受信側の magic ディスパッチ:
+    /// - 既存 magic (HLO1/DHT1/TXFR/GSP1/BSW1) は既存のハンドラへ
+    /// - それ以外は `IpcEvent::PeerStreamReceived` として購読クライアントに配信
+    PeerSendStream {
+        peer_id: String,
+        magic: [u8; 4],
+        payload: Vec<u8>,
+    },
 }
 
 impl IpcCommand {
@@ -266,6 +280,19 @@ impl IpcCommand {
                 }
             }
             Self::ConfigUpdate { .. } => Ok(()),
+
+            Self::PeerSendStream { peer_id, payload, .. } => {
+                check_id("peer_id", peer_id)?;
+                // payload 上限 1 MiB (DoS 対策、 transport.MAX_MESSAGE_SIZE と整合)
+                const MAX_PAYLOAD: usize = 1024 * 1024;
+                if payload.len() > MAX_PAYLOAD {
+                    return Err(format!(
+                        "payload too large ({} > {MAX_PAYLOAD})",
+                        payload.len()
+                    ));
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -313,6 +340,26 @@ mod validate_tests {
             project_id: "p".into(),
             file_id: "f".into(),
             peer_id: "x".into(),
+        };
+        cmd.validate().unwrap();
+    }
+
+    #[test]
+    fn peer_send_stream_oversize_rejected() {
+        let cmd = IpcCommand::PeerSendStream {
+            peer_id: "p".into(),
+            magic: *b"SUM1",
+            payload: vec![0u8; 2 * 1024 * 1024], // 2 MiB
+        };
+        assert!(cmd.validate().is_err());
+    }
+
+    #[test]
+    fn peer_send_stream_within_limit_passes() {
+        let cmd = IpcCommand::PeerSendStream {
+            peer_id: "p".into(),
+            magic: *b"SUM1",
+            payload: vec![0u8; 1024], // 1 KiB
         };
         cmd.validate().unwrap();
     }
