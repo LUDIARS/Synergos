@@ -1,0 +1,114 @@
+{
+  "repo": "Synergos",
+  "review_date": "2026-05-13",
+  "reviewer": "Claude Opus 4.7 (1M)",
+  "commit": "088b31a",
+  "branch": "main",
+  "weighted_score": 87.7,
+  "grades": {
+    "design": "A",
+    "vulnerability": "B",
+    "implementation": "A",
+    "missing_features": "B",
+    "quality": "A"
+  },
+  "counts": {
+    "design": 4,
+    "vulnerability": 5,
+    "implementation": 4,
+    "missing_features": 6,
+    "quality": 3,
+    "total": 22
+  },
+  "severity": {
+    "high": 2,
+    "medium": 7,
+    "low": 13
+  },
+  "autofix_count": 0,
+  "autofix_executed": false,
+  "files": [
+    "review/2026-05-13/REVIEW.md",
+    "review/2026-05-13/REVIEW_DESIGN.md",
+    "review/2026-05-13/REVIEW_VULNERABILITY.md",
+    "review/2026-05-13/REVIEW_IMPLEMENTATION.md",
+    "review/2026-05-13/REVIEW_MISSING_FEATURES.md",
+    "review/2026-05-13/REVIEW_QUALITY.md",
+    "review/2026-05-13/AUTOFIX.md",
+    "review/2026-05-13/latest.json"
+  ],
+  "key_findings": [
+    {
+      "id": "V-01",
+      "severity": "high",
+      "title": "/peer-info servlet is completely unauthenticated",
+      "location": "synergos-core/src/peer_info_server.rs:68-86",
+      "summary": "anonymous GET returns peer_id + quic_endpoint + synergos_version (info-disclosure / version fingerprinting)"
+    },
+    {
+      "id": "V-02",
+      "severity": "high",
+      "title": "auto_advertise_addr trusts external HTTPS IP echo services",
+      "location": "synergos-core/src/peer_info_server.rs:107-183",
+      "summary": "ipv6.icanhazip.com / api6.ipify.org / v6.ident.me responses are advertised to peers; DNS hijack of echo path could cause misdirection (TLS verifier still blocks spoof but DoS / op-disruption possible)"
+    },
+    {
+      "id": "V-03",
+      "severity": "medium",
+      "title": "Cloudflare Tunnel UDP-incompat is mitigated by hybrid bootstrap but exposes EC2 real public IPs",
+      "location": "synergos-core/src/peer_info_server.rs:8-13",
+      "summary": "design surfaces EC2 public IPv6/IPv4 to anyone hitting /peer-info; SG must restrict QUIC port"
+    },
+    {
+      "id": "V-04",
+      "severity": "medium",
+      "title": "IPv4 fallback bootstrap allows repeated QUIC handshake attempts",
+      "location": "synergos-core/src/peer_bootstrap.rs:125-150",
+      "summary": "no upper bound on candidates; DNS-injection could amplify handshake CPU usage"
+    },
+    {
+      "id": "V-05",
+      "severity": "low",
+      "title": "Relay room join is unauthenticated",
+      "location": "synergos-relay/src/server.rs:186-200",
+      "summary": "knowing room_id suffices to receive broadcast frames; consider HMAC token"
+    },
+    {
+      "id": "M-01",
+      "severity": "medium",
+      "title": "STUN/TURN client exists but not wired into Conduit",
+      "location": "synergos-net/src/mesh/stun.rs",
+      "summary": "DESIGN.md promises mobile NAT traversal; only WSS Relay fallback currently active"
+    },
+    {
+      "id": "M-02",
+      "severity": "medium",
+      "title": "relay_endpoint_configured hardcoded to false in capability detection",
+      "location": "synergos-core/src/daemon.rs:113",
+      "summary": "NetCapabilities does not consider relay config; minor effect on auto_promote heuristic"
+    },
+    {
+      "id": "M-03",
+      "severity": "medium",
+      "title": "CatalogManager state is not persisted",
+      "location": "synergos-core/src/daemon.rs:230-243",
+      "summary": "root_crc/update_count lives in memory; daemon restart causes one extra catalog sync round"
+    },
+    {
+      "id": "M-04",
+      "severity": "low",
+      "title": "IPC Subscribe filter granularity is category-only",
+      "location": "synergos-ipc/src/event.rs",
+      "summary": "no per-project / per-peer filter; Tauri GUI must filter client-side"
+    }
+  ],
+  "next_step": "Win -> AWS smoke test (manual), then queue M-01 (TURN/STUN wiring) and M-03 (catalog persistence) issues",
+  "rules_compliance": {
+    "source_modifications": false,
+    "autofix_executed": false,
+    "files_under_review_folder": true,
+    "weighted_score_range_2000_4000_chars": true,
+    "grade_a_to_d": true,
+    "file_line_citations": true
+  }
+}
