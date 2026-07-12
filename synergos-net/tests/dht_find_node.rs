@@ -121,7 +121,7 @@ async fn find_peer_local_hit_short_circuits() {
     let transport = MockTransport::new();
     let opts = FindNodeOptions::default();
     let found = node
-        .find_peer_iterative(&target, &transport, opts)
+        .find_peer_iterative("project", &target, &transport, opts)
         .await
         .unwrap();
     assert_eq!(found.peer_id, target);
@@ -155,7 +155,7 @@ async fn find_peer_iterative_returns_exact_hit_from_neighbor() {
         ..Default::default()
     };
     let found = node
-        .find_peer_iterative(&target, &transport, opts)
+        .find_peer_iterative("project", &target, &transport, opts)
         .await
         .expect("target should be resolved via neighbor");
     assert_eq!(found.peer_id, target);
@@ -184,7 +184,7 @@ async fn find_peer_iterative_follows_closest_chain() {
     transport.set_response(n2.clone(), Some(dto(&target)), vec![]);
 
     let found = node
-        .find_peer_iterative(&target, &transport, FindNodeOptions::default())
+        .find_peer_iterative("project", &target, &transport, FindNodeOptions::default())
         .await
         .expect("target should be resolved after 2 hops");
     assert_eq!(found.peer_id, target);
@@ -219,7 +219,9 @@ async fn find_peer_iterative_respects_hop_limit() {
         alpha: 1,
         ..Default::default()
     };
-    let found = node.find_peer_iterative(&target, &transport, opts).await;
+    let found = node
+        .find_peer_iterative("project", &target, &transport, opts)
+        .await;
     assert!(
         found.is_none(),
         "hop limit must prevent resolving target at depth 3"
@@ -253,7 +255,9 @@ async fn find_peer_iterative_timeout_on_slow_peer() {
         ..Default::default()
     };
     let start = Instant::now();
-    let found = node.find_peer_iterative(&target, &transport, opts).await;
+    let found = node
+        .find_peer_iterative("project", &target, &transport, opts)
+        .await;
     assert!(found.is_none(), "slow peer should be timed-out");
     // 500ms 待たずに早期脱出していること
     assert!(start.elapsed() < Duration::from_millis(300));
@@ -267,6 +271,7 @@ async fn handle_request_find_node_returns_local_exact() {
 
     let resp = node
         .handle_request(DhtRequest::FindNode {
+            project_id: "project".into(),
             target: target.clone(),
         })
         .await;
@@ -282,6 +287,10 @@ async fn handle_request_find_node_returns_local_exact() {
 #[tokio::test]
 async fn handle_request_ping_pong() {
     let node = DhtNode::new(PeerId::new("self"), cfg());
-    let resp = node.handle_request(DhtRequest::Ping).await;
+    let resp = node
+        .handle_request(DhtRequest::Ping {
+            project_id: "project".into(),
+        })
+        .await;
     matches!(resp, DhtResponse::Pong);
 }

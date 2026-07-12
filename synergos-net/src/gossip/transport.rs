@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{Result, SynergosNetError};
 use crate::gossip::{GossipNode, SignedGossipMessage};
+use crate::quic::write_project_id;
 use crate::types::{PeerId, TopicId};
 
 /// Gossip ストリーム識別マジック。Daemon のディスパッチャが先頭 4 byte を
@@ -32,6 +33,7 @@ pub const MAX_GOSSIP_FRAME: usize = 256 * 1024;
 /// QUIC 上で送る gossip メッセージの wire 形式。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GossipWireMessage {
+    pub project_id: String,
     pub topic: TopicId,
     pub signed: SignedGossipMessage,
 }
@@ -61,6 +63,7 @@ pub async fn send_gossip(mut send: quinn::SendStream, msg: &GossipWireMessage) -
     send.write_all(GOSSIP_STREAM_MAGIC)
         .await
         .map_err(|e| SynergosNetError::Quic(format!("gossip magic: {e}")))?;
+    write_project_id(&mut send, &msg.project_id).await?;
     let len = (body.len() as u32).to_be_bytes();
     send.write_all(&len)
         .await
@@ -79,6 +82,7 @@ pub async fn handle_gossip_stream(
     gossip: Arc<GossipNode>,
     mut recv: quinn::RecvStream,
     from: PeerId,
+    authorized_project_id: &str,
 ) -> Result<()> {
     let mut len_buf = [0u8; 4];
     recv.read_exact(&mut len_buf)
@@ -98,9 +102,17 @@ pub async fn handle_gossip_stream(
 
     let wire: GossipWireMessage = rmp_serde::from_slice(&body)
         .map_err(|e| SynergosNetError::Serialization(format!("gossip decode: {e}")))?;
+    if wire.project_id != authorized_project_id
+        || wire.signed.project_id != authorized_project_id
+        || wire.topic != TopicId::project(authorized_project_id)
+    {
+        return Err(SynergosNetError::Identity(
+            "gossip project_id does not match authorized stream scope".into(),
+        ));
+    }
 
     // 署名検証 + ローカル deliver。deliver の後で broadcast channel 経由で
     // 購読者 (Exchange, Presence 等) に届く。
-    gossip.on_signed_message_received(&wire.topic, wire.signed, &from);
+    gossip.on_signed_message_received(&wire.topic, authorized_project_id, wire.signed, &from);
     Ok(())
 }

@@ -12,6 +12,8 @@ use crate::types::{Blake3Hash, ChunkId, Cid, FileId, MessageId, PeerId};
 /// 避けるため、wire 上は `Vec<u8>` で保持する。`verify` 時に長さを検証する。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SignedGossipMessage {
+    /// 署名対象に含めるproject scope。
+    pub project_id: String,
     pub message: GossipMessage,
     /// 送信者の ed25519 公開鍵 (32 bytes expected)
     pub sender_public_key: Vec<u8>,
@@ -21,10 +23,11 @@ pub struct SignedGossipMessage {
 
 impl SignedGossipMessage {
     /// 自分の Identity でメッセージを署名する。
-    pub fn sign(message: GossipMessage, identity: &Identity) -> Self {
-        let bytes = signing_bytes(&message);
+    pub fn sign(project_id: String, message: GossipMessage, identity: &Identity) -> Self {
+        let bytes = scoped_signing_bytes(&project_id, &message);
         let signature = identity.sign(&bytes);
         Self {
+            project_id,
             message,
             sender_public_key: identity.public_key_bytes().to_vec(),
             signature: signature.to_vec(),
@@ -85,9 +88,21 @@ impl SignedGossipMessage {
             // ConflictAlert は project 全体向けなので送信者の明示フィールドは無い。
             GossipMessage::ConflictAlert { .. } => {}
         }
-        identity::verify(&pub_bytes, &signing_bytes(&self.message), &sig_bytes)
-            .map_err(|_| SynergosNetError::Identity("gossip signature invalid".into()))
+        identity::verify(
+            &pub_bytes,
+            &scoped_signing_bytes(&self.project_id, &self.message),
+            &sig_bytes,
+        )
+        .map_err(|_| SynergosNetError::Identity("gossip signature invalid".into()))
     }
+}
+
+fn scoped_signing_bytes(project_id: &str, message: &GossipMessage) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(project_id.len() + 1 + 128);
+    bytes.extend_from_slice(project_id.as_bytes());
+    bytes.push(0);
+    bytes.extend_from_slice(&signing_bytes(message));
+    bytes
 }
 
 /// Gossip メッセージの正規バイト列化。

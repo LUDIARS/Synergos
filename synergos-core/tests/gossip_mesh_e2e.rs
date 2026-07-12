@@ -72,7 +72,16 @@ async fn publish_flows_through_quic_gossip_stream_to_remote_subscriber() {
                     continue;
                 }
                 if &magic == GOSSIP_STREAM_MAGIC {
-                    let _ = handle_gossip_stream(gb_clone.clone(), recv, id_a_peer.clone()).await;
+                    let project_id = synergos_net::quic::read_project_id(&mut recv)
+                        .await
+                        .unwrap();
+                    let _ = handle_gossip_stream(
+                        gb_clone.clone(),
+                        recv,
+                        id_a_peer.clone(),
+                        &project_id,
+                    )
+                    .await;
                     break; // 1 メッセージ受けたらテスト用に抜ける
                 }
             }
@@ -110,6 +119,7 @@ async fn publish_flows_through_quic_gossip_stream_to_remote_subscriber() {
         .expect("outbound must arrive quickly")
         .expect("outbound channel open");
     let wire = GossipWireMessage {
+        project_id: outbound.signed.project_id.clone(),
         topic: outbound.topic.clone(),
         signed: outbound.signed.clone(),
     };

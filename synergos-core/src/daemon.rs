@@ -19,7 +19,7 @@ use synergos_net::{
     identity::Identity,
     mesh::Mesh,
     promotion::{NetCapabilities, PromotionMode},
-    quic::{QuicManager, StreamType},
+    quic::{read_project_id, ConnectionSession, QuicManager, StreamType},
     transfer::TRANSFER_STREAM_MAGIC,
     tunnel::TunnelManager,
     types::{FileId, PeerId},
@@ -30,7 +30,7 @@ use crate::event_bus::{CoreEventBus, SharedEventBus};
 use crate::exchange::{Exchange, FetchRequest, FileSharing, TransferPriority};
 use crate::ipc_server::{IpcServer, ServiceContext};
 use crate::presence::{NodeRegistry, PresenceService};
-use crate::project::ProjectManager;
+use crate::project::{ProjectConfiguration, ProjectManager};
 
 /// デーモン設定
 #[derive(Debug, Clone, Default)]
@@ -82,7 +82,11 @@ impl Daemon {
             g.set_identity(identity.clone());
             Arc::new(g)
         };
-        let quic = Arc::new(QuicManager::new(net_config.quic.clone(), identity.clone()));
+        let quic = Arc::new(QuicManager::with_resource_limits(
+            net_config.quic.clone(),
+            net_config.resource_limits.clone(),
+            identity.clone(),
+        ));
         // QUIC server をバインド (これが無いと accept ループは未開通でピアを受けられない)。
         // 既定は `[::]:0` (IPv6 デュアルスタックでカーネル割当ポート)。
         // 公開ノードでは `quic.listen_addr = "[::]:7777"` 等を config で指定する。
@@ -569,30 +573,54 @@ fn spawn_quic_accept_loop(
     mut shutdown_rx: broadcast::Receiver<()>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
+        let concurrency = net.quic.resource_limits().hello_concurrency;
+        let (accepted_tx, mut accepted_rx) = tokio::sync::mpsc::channel(concurrency);
+        let mut workers = Vec::with_capacity(concurrency);
+        for _ in 0..concurrency {
+            let quic = net.quic.clone();
+            let tx = accepted_tx.clone();
+            workers.push(tokio::spawn(async move {
+                loop {
+                    let accepted = quic.accept().await;
+                    let endpoint_closed = matches!(accepted, Ok(None));
+                    if tx.send(accepted).await.is_err() || endpoint_closed {
+                        break;
+                    }
+                }
+            }));
+        }
+        drop(accepted_tx);
+
         loop {
             tokio::select! {
                 _ = shutdown_rx.recv() => break,
-                accepted = net.quic.accept() => {
+                accepted = accepted_rx.recv() => {
+                    let Some(accepted) = accepted else { break; };
                     match accepted {
                         Ok(Some(acc)) => {
-                            let dht = net.dht.clone();
-                            let gossip = net.gossip.clone();
-                            let exchange = ctx.exchange.clone();
-                            let content_store = ctx.content_store.clone();
+                            acc.session.authorize_projects(
+                                ctx.project_manager
+                                    .list_projects()
+                                    .into_iter()
+                                    .map(|project| project.project_id),
+                            );
                             let sender = acc.peer_id.clone();
                             let connection = acc.connection;
-                            let event_bus = ctx.event_bus.clone();
+                            let stream_context = PeerStreamContext {
+                                dht: net.dht.clone(),
+                                gossip: net.gossip.clone(),
+                                exchange: ctx.exchange.clone(),
+                                content_store: ctx.content_store.clone(),
+                                event_bus: ctx.event_bus.clone(),
+                                session: acc.session,
+                                quic: net.quic.clone(),
+                                max_concurrent_streams: net.net_config.quic.max_concurrent_streams as usize,
+                                stream_body_timeout: Duration::from_millis(
+                                    net.net_config.resource_limits.stream_body_timeout_ms,
+                                ),
+                            };
                             tokio::spawn(async move {
-                                dispatch_peer_streams(
-                                    connection,
-                                    sender,
-                                    dht,
-                                    gossip,
-                                    exchange,
-                                    content_store,
-                                    event_bus,
-                                )
-                                .await;
+                                dispatch_peer_streams(connection, sender, stream_context).await;
                             });
                         }
                         Ok(None) => {
@@ -607,7 +635,23 @@ fn spawn_quic_accept_loop(
                 }
             }
         }
+        for worker in workers {
+            worker.abort();
+        }
     })
+}
+
+#[derive(Clone)]
+struct PeerStreamContext {
+    dht: Arc<DhtNode>,
+    gossip: Arc<GossipNode>,
+    exchange: Arc<crate::exchange::Exchange>,
+    content_store: Arc<MemoryContentStore>,
+    event_bus: SharedEventBus,
+    session: Arc<ConnectionSession>,
+    quic: Arc<QuicManager>,
+    max_concurrent_streams: usize,
+    stream_body_timeout: Duration,
 }
 
 /// 1 つの QUIC コネクションから bidi ストリームをループで受け、先頭 magic で
@@ -615,78 +659,126 @@ fn spawn_quic_accept_loop(
 async fn dispatch_peer_streams(
     connection: quinn::Connection,
     sender: PeerId,
-    dht: Arc<DhtNode>,
-    gossip: Arc<GossipNode>,
-    exchange: Arc<crate::exchange::Exchange>,
-    content_store: Arc<MemoryContentStore>,
-    event_bus: SharedEventBus,
+    context: PeerStreamContext,
 ) {
-    /// 拡張 magic ストリームの payload 上限 (1 MiB)。 IPC transport の
-    /// MAX_MESSAGE_SIZE と整合。 これ以上来たら drop する。
-    const MAX_EXTENSION_PAYLOAD: usize = 1024 * 1024;
+    let stream_slots = Arc::new(tokio::sync::Semaphore::new(
+        context.max_concurrent_streams.max(1),
+    ));
 
     loop {
-        let (send, mut recv) = match connection.accept_bi().await {
+        let (send, recv) = match connection.accept_bi().await {
             Ok(pair) => pair,
             Err(e) => {
                 tracing::debug!("connection {} closed: {e}", sender.short());
+                break;
+            }
+        };
+        let permit = match stream_slots.clone().acquire_owned().await {
+            Ok(permit) => permit,
+            Err(_) => break,
+        };
+        let stream_context = context.clone();
+        let stream_sender = sender.clone();
+        let body_timeout = context.stream_body_timeout;
+        tokio::spawn(async move {
+            let _permit = permit;
+            if tokio::time::timeout(
+                body_timeout,
+                handle_peer_stream(send, recv, stream_sender.clone(), stream_context),
+            )
+            .await
+            .is_err()
+            {
+                tracing::warn!(
+                    "stream body deadline exceeded from {}",
+                    stream_sender.short()
+                );
+            }
+        });
+    }
+    context.quic.disconnect(&sender, "connection closed").await;
+}
+
+async fn handle_peer_stream(
+    send: quinn::SendStream,
+    mut recv: quinn::RecvStream,
+    sender: PeerId,
+    context: PeerStreamContext,
+) {
+    const MAX_EXTENSION_PAYLOAD: usize = 1024 * 1024;
+
+    let mut magic = [0u8; 4];
+    if let Err(e) = recv.read_exact(&mut magic).await {
+        tracing::debug!("stream magic read failed from {}: {e}", sender.short());
+        return;
+    }
+
+    let known_protocol = &magic == DHT_STREAM_MAGIC
+        || &magic == TRANSFER_STREAM_MAGIC
+        || &magic == GOSSIP_STREAM_MAGIC
+        || &magic == BITSWAP_STREAM_MAGIC;
+    let project_id = if known_protocol {
+        let project_id = match read_project_id(&mut recv).await {
+            Ok(project_id) => project_id,
+            Err(e) => {
+                tracing::debug!("project scope read failed from {}: {e}", sender.short());
                 return;
             }
         };
-
-        let mut magic = [0u8; 4];
-        if let Err(e) = recv.read_exact(&mut magic).await {
-            tracing::debug!("stream magic read failed from {}: {e}", sender.short());
-            continue;
+        if !context.session.is_authorized(&project_id) {
+            tracing::warn!(
+                "rejected unauthorized project stream from {}",
+                sender.short()
+            );
+            return;
         }
+        Some(project_id)
+    } else {
+        None
+    };
 
-        let dht = dht.clone();
-        let gossip = gossip.clone();
-        let exchange = exchange.clone();
-        let content_store = content_store.clone();
-        let sender_cloned = sender.clone();
-        let event_bus_cloned = event_bus.clone();
-        tokio::spawn(async move {
-            if &magic == DHT_STREAM_MAGIC {
-                if let Err(e) = handle_dht_stream(dht, send, recv).await {
-                    tracing::debug!("DHT stream handler error: {e}");
-                }
-            } else if &magic == TRANSFER_STREAM_MAGIC {
-                if let Err(e) = exchange.handle_incoming_transfer(recv, sender_cloned).await {
-                    tracing::debug!("Transfer stream handler error: {e}");
-                }
-            } else if &magic == GOSSIP_STREAM_MAGIC {
-                drop(send); // gossip は片方向相当 (応答なし)
-                if let Err(e) = handle_gossip_stream(gossip, recv, sender_cloned).await {
-                    tracing::debug!("Gossip stream handler error: {e}");
-                }
-            } else if &magic == BITSWAP_STREAM_MAGIC {
-                if let Err(e) = handle_bitswap_stream(content_store, send, recv).await {
-                    tracing::debug!("Bitswap stream handler error: {e}");
-                }
-            } else {
-                // 拡張 magic: 残バイトを (上限付きで) 読み出して PeerStreamReceivedEvent emit。
-                drop(send);
-                let payload = match recv.read_to_end(MAX_EXTENSION_PAYLOAD).await {
-                    Ok(p) => p,
-                    Err(e) => {
-                        tracing::debug!("extension stream {:?} payload read failed: {e}", magic);
-                        return;
-                    }
-                };
-                tracing::trace!(
-                    "extension stream magic {:?} from {}: {} bytes",
-                    magic,
-                    sender_cloned.short(),
-                    payload.len()
-                );
-                event_bus_cloned.emit(crate::event_bus::PeerStreamReceivedEvent {
-                    peer_id: sender_cloned.to_string(),
-                    magic,
-                    payload,
-                });
+    if &magic == DHT_STREAM_MAGIC {
+        let project_id = project_id.expect("known protocol has project scope");
+        if let Err(e) = handle_dht_stream(context.dht, send, recv, &project_id).await {
+            tracing::debug!("DHT stream handler error: {e}");
+        }
+    } else if &magic == TRANSFER_STREAM_MAGIC {
+        let project_id = project_id.expect("known protocol has project scope");
+        if let Err(e) = context
+            .exchange
+            .handle_incoming_transfer(recv, sender, &project_id)
+            .await
+        {
+            tracing::debug!("Transfer stream handler error: {e}");
+        }
+    } else if &magic == GOSSIP_STREAM_MAGIC {
+        let project_id = project_id.expect("known protocol has project scope");
+        drop(send);
+        if let Err(e) = handle_gossip_stream(context.gossip, recv, sender, &project_id).await {
+            tracing::debug!("Gossip stream handler error: {e}");
+        }
+    } else if &magic == BITSWAP_STREAM_MAGIC {
+        let project_id = project_id.expect("known protocol has project scope");
+        if let Err(e) = handle_bitswap_stream(context.content_store, send, recv, &project_id).await
+        {
+            tracing::debug!("Bitswap stream handler error: {e}");
+        }
+    } else {
+        drop(send);
+        let payload = match recv.read_to_end(MAX_EXTENSION_PAYLOAD).await {
+            Ok(payload) => payload,
+            Err(e) => {
+                tracing::debug!("extension stream {:?} payload read failed: {e}", magic);
+                return;
             }
-        });
+        };
+        context
+            .event_bus
+            .emit(crate::event_bus::PeerStreamReceivedEvent {
+                peer_id: sender.to_string(),
+                magic,
+                payload,
+            });
     }
 }
 
@@ -720,6 +812,7 @@ fn spawn_gossip_fanout(
                             };
                             for peer in peers {
                                 let wire = GossipWireMessage {
+                                    project_id: outbound.signed.project_id.clone(),
                                     topic: outbound.topic.clone(),
                                     signed: outbound.signed.clone(),
                                 };

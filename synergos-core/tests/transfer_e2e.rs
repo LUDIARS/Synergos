@@ -70,7 +70,12 @@ async fn execute_send_and_handle_incoming_roundtrip() {
                     continue;
                 }
                 if &magic == TRANSFER_STREAM_MAGIC {
-                    let _ = ex.handle_incoming_transfer(recv, sender.clone()).await;
+                    let project_id = synergos_net::quic::read_project_id(&mut recv)
+                        .await
+                        .unwrap();
+                    let _ = ex
+                        .handle_incoming_transfer(recv, sender.clone(), &project_id)
+                        .await;
                 }
                 break;
             }

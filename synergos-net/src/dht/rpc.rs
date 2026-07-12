@@ -102,13 +102,27 @@ impl From<&RouteDto> for Route {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum DhtRequest {
     /// 近接ノードの返却を要求
-    FindNode { target: PeerId },
+    FindNode { project_id: String, target: PeerId },
     /// プロジェクトに参加しているピアを要求
     FindProjectPeers { project_id: String },
     /// 自分のレコードを announce
-    Announce { record: PeerRecordDto },
+    Announce {
+        project_id: String,
+        record: PeerRecordDto,
+    },
     /// ヘルスチェック
-    Ping,
+    Ping { project_id: String },
+}
+
+impl DhtRequest {
+    pub fn project_id(&self) -> &str {
+        match self {
+            Self::FindNode { project_id, .. }
+            | Self::FindProjectPeers { project_id }
+            | Self::Announce { project_id, .. }
+            | Self::Ping { project_id } => project_id,
+        }
+    }
 }
 
 /// DHT RPC レスポンス
@@ -184,12 +198,13 @@ mod tests {
     #[test]
     fn encode_decode_request_roundtrip() {
         let req = DhtRequest::FindNode {
+            project_id: "p".into(),
             target: PeerId::new("abc"),
         };
         let bytes = encode(&req).unwrap();
         let back: DhtRequest = decode(&bytes).unwrap();
         match back {
-            DhtRequest::FindNode { target } => assert_eq!(target.0, "abc"),
+            DhtRequest::FindNode { target, .. } => assert_eq!(target.0, "abc"),
             _ => panic!("wrong variant"),
         }
     }

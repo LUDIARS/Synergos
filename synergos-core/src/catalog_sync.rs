@@ -118,6 +118,7 @@ async fn process_sync_event(
     match fetch_root_catalog(
         quic.clone(),
         publisher.clone(),
+        &evt.project_id,
         content_store.clone(),
         &catalog_cid,
     )
@@ -144,6 +145,7 @@ async fn process_sync_event(
 async fn fetch_root_catalog(
     quic: Arc<QuicManager>,
     publisher: PeerId,
+    project_id: &str,
     content_store: Arc<MemoryContentStore>,
     catalog_cid: &Cid,
 ) -> Result<u32, String> {
@@ -152,7 +154,12 @@ async fn fetch_root_catalog(
         return Ok(0);
     }
 
-    let session = BitswapSession::new(quic, publisher, content_store.clone());
+    let session = BitswapSession::new(
+        quic,
+        publisher,
+        project_id.to_string(),
+        content_store.clone(),
+    );
     let outcomes = session
         .fetch_blocks(std::slice::from_ref(catalog_cid))
         .await

@@ -19,20 +19,24 @@
 //!    拒否する。緩和パス (旧 `DevOnlySkipVerify`) は完全に削除した。
 
 pub mod hello;
+mod session;
 mod verifier;
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use dashmap::DashMap;
 use tokio::sync::RwLock;
 
-use crate::config::QuicConfig;
+use crate::config::{QuicConfig, QuicResourceLimits};
 use crate::error::{Result, SynergosNetError};
 use crate::identity::Identity;
+use crate::transfer::TransferLimits;
 use crate::types::{PeerId, TransferId};
 
+pub use session::{read_project_id, write_project_id, ConnectionSession, ProjectId};
 pub use verifier::PeerPinningVerifier;
 
 /// QUIC ストリーム種別
@@ -59,6 +63,8 @@ pub struct QuicConnection {
     pub rtt_ms: u32,
     /// quinn コネクションハンドル
     connection: Option<quinn::Connection>,
+    /// この接続で利用を許可された project の集合。
+    session: Arc<ConnectionSession>,
 }
 
 /// QUIC 接続状態
@@ -135,6 +141,7 @@ impl ConnectionCalibrator {
 /// サーバー（着信接続の受付）とクライアント（発信接続の確立）の両方を担当する。
 pub struct QuicManager {
     config: QuicConfig,
+    resource_limits: QuicResourceLimits,
     /// 自ノードの暗号アイデンティティ (S1 の真性認証で使う)
     identity: Arc<Identity>,
     /// アクティブなコネクション（PeerId → QuicConnection）
@@ -145,19 +152,85 @@ pub struct QuicManager {
     local_addr: RwLock<Option<SocketAddr>>,
     /// コネクションごとの帯域推定値
     bandwidth_estimates: DashMap<PeerId, u64>,
+    pending_connections: Arc<AtomicUsize>,
+    pending_by_ip: Arc<DashMap<IpAddr, usize>>,
 }
 
 impl QuicManager {
     pub fn new(config: QuicConfig, identity: Arc<Identity>) -> Self {
+        Self::with_resource_limits(config, QuicResourceLimits::default(), identity)
+    }
+
+    pub fn with_resource_limits(
+        config: QuicConfig,
+        resource_limits: QuicResourceLimits,
+        identity: Arc<Identity>,
+    ) -> Self {
         install_default_crypto_provider();
         Self {
             config,
+            resource_limits,
             identity,
             connections: DashMap::new(),
             endpoint: RwLock::new(None),
             local_addr: RwLock::new(None),
             bandwidth_estimates: DashMap::new(),
+            pending_connections: Arc::new(AtomicUsize::new(0)),
+            pending_by_ip: Arc::new(DashMap::new()),
         }
+    }
+
+    pub fn resource_limits(&self) -> &QuicResourceLimits {
+        &self.resource_limits
+    }
+
+    pub fn transfer_limits(&self) -> TransferLimits {
+        TransferLimits {
+            max_file_size_bytes: self.resource_limits.max_file_size_bytes,
+            transfer_timeout: Duration::from_millis(self.resource_limits.transfer_timeout_ms),
+        }
+    }
+
+    fn acquire_pending_connection(&self, ip: IpAddr) -> Result<PendingConnectionGuard> {
+        let pending_before = self.pending_connections.fetch_add(1, Ordering::AcqRel);
+        if self.connections.len() + pending_before >= self.resource_limits.max_connections_global {
+            self.pending_connections.fetch_sub(1, Ordering::AcqRel);
+            return Err(SynergosNetError::Quic(
+                "global connection limit exceeded".into(),
+            ));
+        }
+
+        let active_for_ip = self
+            .connections
+            .iter()
+            .filter(|entry| entry.remote_addr.ip() == ip)
+            .count();
+        let mut pending_for_ip = self.pending_by_ip.entry(ip).or_insert(0);
+        if active_for_ip + *pending_for_ip >= self.resource_limits.max_connections_per_ip {
+            drop(pending_for_ip);
+            self.pending_connections.fetch_sub(1, Ordering::AcqRel);
+            return Err(SynergosNetError::Quic(
+                "per-IP connection limit exceeded".into(),
+            ));
+        }
+        *pending_for_ip += 1;
+        drop(pending_for_ip);
+
+        Ok(PendingConnectionGuard {
+            global: self.pending_connections.clone(),
+            by_ip: self.pending_by_ip.clone(),
+            ip,
+        })
+    }
+
+    fn ensure_peer_capacity(&self, peer_id: &PeerId) -> Result<()> {
+        let active = usize::from(self.connections.contains_key(peer_id));
+        if active >= self.resource_limits.max_connections_per_peer {
+            return Err(SynergosNetError::Quic(
+                "per-peer connection limit exceeded".into(),
+            ));
+        }
+        Ok(())
     }
 
     /// QUIC エンドポイントを初期化し、リスンを開始する。
@@ -201,6 +274,8 @@ impl QuicManager {
         addr: SocketAddr,
         server_name: &str,
     ) -> Result<()> {
+        let _pending = self.acquire_pending_connection(addr.ip())?;
+        self.ensure_peer_capacity(&expected_peer_id)?;
         let endpoint = self.endpoint.read().await;
         let endpoint = endpoint
             .as_ref()
@@ -230,9 +305,9 @@ impl QuicManager {
 
         let rtt = connection.rtt().as_millis() as u32;
 
-        // 相互認識のため HLO1 ストリームで自分の署名 Hello を送る。
+        // 相互認識のため HLO2 の server nonce + channel-bound Hello を送る。
         // 失敗しても接続は閉じる (相手にこちらの PeerId を確信させられない)。
-        if let Err(e) = hello::send_hello(&connection, &self.identity).await {
+        if let Err(e) = hello::send_hello2(&connection, &self.identity).await {
             connection.close(0u32.into(), b"hello failed");
             return Err(SynergosNetError::Identity(format!(
                 "hello send failed: {e}"
@@ -246,6 +321,7 @@ impl QuicManager {
             state: QuicConnectionState::Connected,
             rtt_ms: rtt,
             connection: Some(connection),
+            session: Arc::new(ConnectionSession::new(expected_peer_id.clone())),
         };
 
         self.connections.insert(expected_peer_id, quic_conn);
@@ -335,6 +411,21 @@ impl QuicManager {
             .and_then(|e| e.connection.clone())
     }
 
+    /// 認証済み接続の認可sessionを取得する。T6 redeem 成功時の登録先でもある。
+    pub fn connection_session(&self, peer_id: &PeerId) -> Option<Arc<ConnectionSession>> {
+        self.connections
+            .get(peer_id)
+            .map(|entry| entry.session.clone())
+    }
+
+    pub fn authorize_project(&self, peer_id: &PeerId, project_id: ProjectId) -> Result<()> {
+        let session = self
+            .connection_session(peer_id)
+            .ok_or_else(|| SynergosNetError::PeerNotFound(peer_id.to_string()))?;
+        session.authorize_project(project_id);
+        Ok(())
+    }
+
     /// 全接続の情報を取得
     pub fn list_connections(&self) -> Vec<QuicConnectionInfo> {
         self.connections
@@ -364,24 +455,30 @@ impl QuicManager {
             Some(inc) => inc,
             None => return Ok(None),
         };
+        let remote_addr = incoming.remote_address();
+        let _pending = self.acquire_pending_connection(remote_addr.ip())?;
 
         let connection = incoming
             .await
             .map_err(|e| SynergosNetError::Quic(format!("Incoming handshake failed: {e}")))?;
 
-        let remote_addr = connection.remote_address();
         let rtt = connection.rtt().as_millis() as u32;
 
-        // クライアントからの HLO1 Hello を待って peer_id を確定させる。
+        // クライアントと HLO2 challenge を行い peer_id を確定させる。
         // タイムアウト / 不正 Hello ならコネクションを閉じて拒否する。
-        let peer_id = match hello::recv_hello(&connection).await {
+        let peer_id = match hello::recv_hello2(&connection).await {
             Ok(pid) => pid,
             Err(e) => {
                 connection.close(0u32.into(), b"hello rejected");
                 return Err(e);
             }
         };
+        if let Err(error) = self.ensure_peer_capacity(&peer_id) {
+            connection.close(0u32.into(), b"connection limit exceeded");
+            return Err(error);
+        }
 
+        let session = Arc::new(ConnectionSession::new(peer_id.clone()));
         let quic_conn = QuicConnection {
             peer_id: peer_id.clone(),
             remote_addr,
@@ -389,6 +486,7 @@ impl QuicManager {
             state: QuicConnectionState::Connected,
             rtt_ms: rtt,
             connection: Some(connection.clone()),
+            session: session.clone(),
         };
         self.connections.insert(peer_id.clone(), quic_conn);
 
@@ -396,6 +494,7 @@ impl QuicManager {
             peer_id,
             remote_addr,
             connection,
+            session,
         }))
     }
 
@@ -504,6 +603,26 @@ impl QuicManager {
     }
 }
 
+struct PendingConnectionGuard {
+    global: Arc<AtomicUsize>,
+    by_ip: Arc<DashMap<IpAddr, usize>>,
+    ip: IpAddr,
+}
+
+impl Drop for PendingConnectionGuard {
+    fn drop(&mut self) {
+        self.global.fetch_sub(1, Ordering::AcqRel);
+        if let Some(mut count) = self.by_ip.get_mut(&self.ip) {
+            *count = count.saturating_sub(1);
+            let remove = *count == 0;
+            drop(count);
+            if remove {
+                self.by_ip.remove(&self.ip);
+            }
+        }
+    }
+}
+
 /// rustls 0.23 は `ServerConfig::builder()` / `ClientConfig::builder()` が
 /// 既定の `CryptoProvider` を要求する。`rustls` の feature `ring` 有効化と
 /// `aws-lc-rs` 未有効の条件でのみ auto-detect が働くが、依存グラフの都合で
@@ -522,6 +641,7 @@ pub struct AcceptedConnection {
     pub peer_id: PeerId,
     pub remote_addr: SocketAddr,
     pub connection: quinn::Connection,
+    pub session: Arc<ConnectionSession>,
 }
 
 /// rcgen で ed25519 keypair から自己署名証明書を作り、rustls が受け取れる
@@ -565,4 +685,76 @@ pub struct QuicConnectionInfo {
     pub active_streams: u32,
     pub state: QuicConnectionState,
     pub rtt_ms: u32,
+}
+
+#[cfg(test)]
+mod resource_limit_tests {
+    use super::*;
+    use std::net::Ipv4Addr;
+
+    fn config() -> QuicConfig {
+        QuicConfig {
+            max_concurrent_streams: 8,
+            idle_timeout_ms: 5_000,
+            max_udp_payload_size: 1350,
+            enable_0rtt: false,
+            listen_addr: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn slow_hello_does_not_block_another_accept_worker() {
+        let server_identity = Arc::new(Identity::generate());
+        let slow_identity = Arc::new(Identity::generate());
+        let fast_identity = Arc::new(Identity::generate());
+        let server = Arc::new(QuicManager::new(config(), server_identity.clone()));
+        let slow = Arc::new(QuicManager::new(config(), slow_identity));
+        let fast = Arc::new(QuicManager::new(config(), fast_identity));
+        let server_addr = server.bind((Ipv4Addr::LOCALHOST, 0).into()).await.unwrap();
+        slow.bind((Ipv4Addr::LOCALHOST, 0).into()).await.unwrap();
+        fast.bind((Ipv4Addr::LOCALHOST, 0).into()).await.unwrap();
+
+        let slow_accept = tokio::spawn({
+            let server = server.clone();
+            async move { server.accept().await }
+        });
+        tokio::task::yield_now().await;
+
+        let slow_endpoint = slow.endpoint.read().await.as_ref().unwrap().clone();
+        let slow_config = slow
+            .build_client_config_for(server_identity.peer_id().clone())
+            .unwrap();
+        let slow_connection = slow_endpoint
+            .connect_with(slow_config, server_addr, "synergos")
+            .unwrap()
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let fast_accept = tokio::spawn({
+            let server = server.clone();
+            async move { server.accept().await }
+        });
+        let fast_connect = tokio::spawn({
+            let fast = fast.clone();
+            let server_peer = server_identity.peer_id().clone();
+            async move { fast.connect(server_peer, server_addr, "synergos").await }
+        });
+
+        let accepted = tokio::time::timeout(Duration::from_secs(1), fast_accept)
+            .await
+            .expect("second accept must not wait for slow HLO")
+            .unwrap()
+            .unwrap()
+            .expect("connection accepted");
+        fast_connect.await.unwrap().unwrap();
+        assert_eq!(accepted.peer_id, *fast.identity.peer_id());
+        assert!(!slow_accept.is_finished());
+
+        slow_connection.close(0u32.into(), b"test complete");
+        slow_accept.abort();
+        server.shutdown().await;
+        slow.shutdown().await;
+        fast.shutdown().await;
+    }
 }

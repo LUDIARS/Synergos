@@ -12,17 +12,25 @@
 //!   順次送る最小仕様。
 
 use std::path::Path;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::error::{Result, SynergosNetError};
+use crate::quic::write_project_id;
 use crate::types::Blake3Hash;
 
 /// 1 チャンクあたりのバイト数 (64 KiB)。
 /// QUIC の congestion window を越えない範囲で十分大きく、かつ
 /// メモリ確保の一度あたりのサイズを抑える値。
 pub const CHUNK_SIZE: usize = 64 * 1024;
+
+#[derive(Debug, Clone, Copy)]
+pub struct TransferLimits {
+    pub max_file_size_bytes: u64,
+    pub transfer_timeout: Duration,
+}
 
 /// 転送ヘッダ (ストリームの先頭に 1 回だけ送る)。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -109,7 +117,27 @@ where
 
 /// 受信側: `reader` (QUIC bidi の recv side) から読み、検証しながら `out_path`
 /// へ書く。完了時にヘッダと一致する全体ハッシュを返す。
-pub async fn receive_stream<R>(mut reader: R, out_path: &Path) -> Result<TransferHeader>
+pub async fn receive_stream<R>(
+    reader: R,
+    out_path: &Path,
+    limits: TransferLimits,
+) -> Result<TransferHeader>
+where
+    R: AsyncRead + Unpin,
+{
+    tokio::time::timeout(
+        limits.transfer_timeout,
+        receive_stream_inner(reader, out_path, limits.max_file_size_bytes),
+    )
+    .await
+    .map_err(|_| SynergosNetError::Transfer("whole transfer deadline exceeded".into()))?
+}
+
+async fn receive_stream_inner<R>(
+    mut reader: R,
+    out_path: &Path,
+    max_file_size_bytes: u64,
+) -> Result<TransferHeader>
 where
     R: AsyncRead + Unpin,
 {
@@ -121,6 +149,12 @@ where
             ));
         }
     };
+    if header.total_size > max_file_size_bytes {
+        return Err(SynergosNetError::Transfer(format!(
+            "file size {} exceeds configured maximum {}",
+            header.total_size, max_file_size_bytes
+        )));
+    }
 
     // 親ディレクトリが無ければ作成
     if let Some(parent) = out_path.parent() {
@@ -131,11 +165,23 @@ where
     let mut file = tokio::fs::File::create(out_path).await?;
     let mut hasher = blake3::Hasher::new();
     let mut received_chunks: u64 = 0;
+    let mut received_bytes: u64 = 0;
 
     loop {
         let frame = read_frame(&mut reader).await?;
         match frame {
             FrameKind::Chunk(c) => {
+                received_bytes =
+                    received_bytes
+                        .checked_add(c.data.len() as u64)
+                        .ok_or_else(|| {
+                            SynergosNetError::Transfer("received byte count overflow".into())
+                        })?;
+                if received_bytes > header.total_size || received_bytes > max_file_size_bytes {
+                    return Err(SynergosNetError::Transfer(format!(
+                        "received bytes exceed declared/configured size: {received_bytes}"
+                    )));
+                }
                 let expected_hash = Blake3Hash(*blake3::hash(&c.data).as_bytes());
                 if expected_hash != c.hash {
                     return Err(SynergosNetError::Transfer(format!(
@@ -171,6 +217,12 @@ where
                         header.chunk_count, received_chunks
                     )));
                 }
+                if received_bytes != header.total_size {
+                    return Err(SynergosNetError::Transfer(format!(
+                        "total size mismatch: expected {} got {}",
+                        header.total_size, received_bytes
+                    )));
+                }
                 file.flush().await?;
                 return Ok(header);
             }
@@ -200,13 +252,18 @@ where
     send.write_all(TRANSFER_STREAM_MAGIC)
         .await
         .map_err(|e| SynergosNetError::Quic(format!("write magic: {e}")))?;
+    write_project_id(&mut send, &header.project_id).await?;
     send_stream(reader, send, header).await
 }
 
 /// 受信ラッパ: magic は呼び出し側で既に消費済みの前提。QUIC recv half を
 /// そのまま `receive_stream` に渡す。
-pub async fn receive_over_quic(recv: quinn::RecvStream, out_path: &Path) -> Result<TransferHeader> {
-    receive_stream(recv, out_path).await
+pub async fn receive_over_quic(
+    recv: quinn::RecvStream,
+    out_path: &Path,
+    limits: TransferLimits,
+) -> Result<TransferHeader> {
+    receive_stream(recv, out_path, limits).await
 }
 
 /// ディスク上のファイルの全体 Blake3 ハッシュとサイズ + チャンク数を計算する。
@@ -277,6 +334,13 @@ mod tests {
     use super::*;
     use tokio::io::duplex;
 
+    fn limits() -> TransferLimits {
+        TransferLimits {
+            max_file_size_bytes: 1024 * 1024,
+            transfer_timeout: Duration::from_secs(1),
+        }
+    }
+
     #[tokio::test]
     async fn roundtrip_small_file() {
         // 10 KiB のランダムデータをメモリ上の双方向パイプで送受信する。
@@ -305,7 +369,7 @@ mod tests {
         let send_task =
             tokio::spawn(async move { send_stream(src_reader, tx, header.clone()).await });
         let dst_path = tmp_dst.clone();
-        let recv_task = tokio::spawn(async move { receive_stream(rx, &dst_path).await });
+        let recv_task = tokio::spawn(async move { receive_stream(rx, &dst_path, limits()).await });
 
         send_task.await.unwrap().unwrap();
         let recv_header = recv_task.await.unwrap().unwrap();
@@ -326,6 +390,7 @@ mod tests {
             receive_stream(
                 rx,
                 &std::env::temp_dir().join(format!("synergos-tx-tamper-{}", uuid::Uuid::new_v4())),
+                limits(),
             )
             .await
         });
@@ -354,5 +419,106 @@ mod tests {
 
         let err = recv.await.unwrap();
         assert!(err.is_err());
+    }
+
+    #[tokio::test]
+    async fn received_bytes_cannot_exceed_declared_total_size() {
+        let (mut tx, rx) = duplex(64 * 1024);
+        let out =
+            std::env::temp_dir().join(format!("synergos-tx-overrun-{}", uuid::Uuid::new_v4()));
+        let recv = tokio::spawn({
+            let out = out.clone();
+            async move { receive_stream(rx, &out, limits()).await }
+        });
+        let header = TransferHeader {
+            transfer_id: "t".into(),
+            project_id: "p".into(),
+            file_id: "f".into(),
+            total_size: 4,
+            chunk_count: 1,
+            total_hash: Blake3Hash(*blake3::hash(b"hello").as_bytes()),
+        };
+        write_frame(&mut tx, &FrameKind::Header(header))
+            .await
+            .unwrap();
+        write_frame(
+            &mut tx,
+            &FrameKind::Chunk(ChunkFrame {
+                index: 0,
+                hash: Blake3Hash(*blake3::hash(b"hello").as_bytes()),
+                data: b"hello".to_vec(),
+            }),
+        )
+        .await
+        .unwrap();
+        drop(tx);
+
+        assert!(recv.await.unwrap().is_err());
+        let _ = tokio::fs::remove_file(out).await;
+    }
+
+    #[tokio::test]
+    async fn configured_file_size_limit_is_enforced_before_create() {
+        let (mut tx, rx) = duplex(1024);
+        let out =
+            std::env::temp_dir().join(format!("synergos-tx-too-large-{}", uuid::Uuid::new_v4()));
+        write_frame(
+            &mut tx,
+            &FrameKind::Header(TransferHeader {
+                transfer_id: "t".into(),
+                project_id: "p".into(),
+                file_id: "f".into(),
+                total_size: 2,
+                chunk_count: 1,
+                total_hash: Blake3Hash::default(),
+            }),
+        )
+        .await
+        .unwrap();
+        let result = receive_stream(
+            rx,
+            &out,
+            TransferLimits {
+                max_file_size_bytes: 1,
+                transfer_timeout: Duration::from_secs(1),
+            },
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(!out.exists());
+    }
+
+    #[tokio::test]
+    async fn whole_transfer_deadline_is_enforced() {
+        let (mut tx, rx) = duplex(1024);
+        let out =
+            std::env::temp_dir().join(format!("synergos-tx-timeout-{}", uuid::Uuid::new_v4()));
+        write_frame(
+            &mut tx,
+            &FrameKind::Header(TransferHeader {
+                transfer_id: "t".into(),
+                project_id: "p".into(),
+                file_id: "f".into(),
+                total_size: 1,
+                chunk_count: 1,
+                total_hash: Blake3Hash::default(),
+            }),
+        )
+        .await
+        .unwrap();
+        let result = receive_stream(
+            rx,
+            &out,
+            TransferLimits {
+                max_file_size_bytes: 1024,
+                transfer_timeout: Duration::from_millis(10),
+            },
+        )
+        .await;
+        assert!(
+            matches!(result, Err(SynergosNetError::Transfer(message)) if message.contains("deadline"))
+        );
+        drop(tx);
+        let _ = tokio::fs::remove_file(out).await;
     }
 }

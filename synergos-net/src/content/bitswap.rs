@@ -28,6 +28,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Result, SynergosNetError};
+use crate::quic::write_project_id;
 use crate::types::Cid;
 
 use super::block::Block;
@@ -41,18 +42,29 @@ pub const MAX_WANTLIST_LEN: usize = 1024;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum BitswapRequest {
     /// 単一 CID を要求。v1 互換。サーバは `Block` か `NotFound` を 1 フレーム返す。
-    Want { cid: Cid },
+    Want { project_id: String, cid: Cid },
     /// 複数 CID をまとめて要求。
     /// `want_have=false` なら `Block`/`NotFound`、`want_have=true` なら `Have`/`DontHave`
     /// をリクエスト順に 1 フレームずつ返す。
     WantList {
+        project_id: String,
         cids: Vec<Cid>,
         /// true にすると Block 本体ではなくメタ情報 (Have / DontHave) だけ返す。
         #[serde(default)]
         want_have: bool,
     },
     /// 以前送った WANT をキャンセル。応答は返らない (ストリームは即クローズ)。
-    Cancel { cids: Vec<Cid> },
+    Cancel { project_id: String, cids: Vec<Cid> },
+}
+
+impl BitswapRequest {
+    pub fn project_id(&self) -> &str {
+        match self {
+            Self::Want { project_id, .. }
+            | Self::WantList { project_id, .. }
+            | Self::Cancel { project_id, .. } => project_id,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -133,9 +145,11 @@ async fn read_frame_body(recv: &mut quinn::RecvStream, what: &str) -> Result<Opt
 pub async fn request_block(
     send: quinn::SendStream,
     recv: quinn::RecvStream,
+    project_id: &str,
     cid: &Cid,
 ) -> Result<BitswapResponse> {
-    let mut results = request_many(send, recv, std::slice::from_ref(cid), false).await?;
+    let mut results =
+        request_many(send, recv, project_id, std::slice::from_ref(cid), false).await?;
     results
         .pop()
         .ok_or_else(|| SynergosNetError::Serialization("bitswap empty response".into()))
@@ -149,6 +163,7 @@ pub async fn request_block(
 pub async fn request_many(
     mut send: quinn::SendStream,
     mut recv: quinn::RecvStream,
+    project_id: &str,
     cids: &[Cid],
     want_have: bool,
 ) -> Result<Vec<BitswapResponse>> {
@@ -166,13 +181,16 @@ pub async fn request_many(
     send.write_all(BITSWAP_STREAM_MAGIC)
         .await
         .map_err(|e| SynergosNetError::Quic(format!("bitswap write magic: {e}")))?;
+    write_project_id(&mut send, project_id).await?;
     let req = if cids.len() == 1 && !want_have {
         // v1 互換のため単発は Want で送る (旧サーバとも会話できる)。
         BitswapRequest::Want {
+            project_id: project_id.to_string(),
             cid: cids[0].clone(),
         }
     } else {
         BitswapRequest::WantList {
+            project_id: project_id.to_string(),
             cids: cids.to_vec(),
             want_have,
         }
@@ -205,11 +223,17 @@ pub async fn request_many(
 
 /// Cancel リクエストを送るだけの片道呼び出し。サーバは応答を返さずに close する。
 /// 呼び出し側は `recv` を drop すればよい。
-pub async fn send_cancel(mut send: quinn::SendStream, cids: &[Cid]) -> Result<()> {
+pub async fn send_cancel(
+    mut send: quinn::SendStream,
+    project_id: &str,
+    cids: &[Cid],
+) -> Result<()> {
     send.write_all(BITSWAP_STREAM_MAGIC)
         .await
         .map_err(|e| SynergosNetError::Quic(format!("bitswap write magic: {e}")))?;
+    write_project_id(&mut send, project_id).await?;
     let req = BitswapRequest::Cancel {
+        project_id: project_id.to_string(),
         cids: cids.to_vec(),
     };
     let body = rmp_serde::to_vec(&req)
@@ -229,6 +253,7 @@ pub async fn handle_bitswap_stream<S: ContentStore + ?Sized>(
     store: Arc<S>,
     mut send: quinn::SendStream,
     mut recv: quinn::RecvStream,
+    authorized_project_id: &str,
 ) -> Result<()> {
     let body = read_frame_body(&mut recv, "request")
         .await?
@@ -236,6 +261,11 @@ pub async fn handle_bitswap_stream<S: ContentStore + ?Sized>(
 
     let req: BitswapRequest = rmp_serde::from_slice(&body)
         .map_err(|e| SynergosNetError::Serialization(format!("bitswap req decode: {e}")))?;
+    if req.project_id() != authorized_project_id {
+        return Err(SynergosNetError::Identity(
+            "bitswap request project_id does not match authorized stream scope".into(),
+        ));
+    }
 
     // Cancel は応答無し
     if matches!(req, BitswapRequest::Cancel { .. }) {
@@ -252,8 +282,10 @@ pub async fn handle_bitswap_stream<S: ContentStore + ?Sized>(
 
     // リクエスト → フレーム列へ展開
     let (cids, want_have): (Vec<Cid>, bool) = match req {
-        BitswapRequest::Want { cid } => (vec![cid], false),
-        BitswapRequest::WantList { cids, want_have } => (cids, want_have),
+        BitswapRequest::Want { cid, .. } => (vec![cid], false),
+        BitswapRequest::WantList {
+            cids, want_have, ..
+        } => (cids, want_have),
         BitswapRequest::Cancel { .. } => unreachable!(),
     };
 
@@ -294,12 +326,13 @@ mod tests {
     #[test]
     fn request_want_roundtrip_serde() {
         let r = BitswapRequest::Want {
+            project_id: "p".into(),
             cid: Cid("blake3-abc".into()),
         };
         let b = rmp_serde::to_vec(&r).unwrap();
         let back: BitswapRequest = rmp_serde::from_slice(&b).unwrap();
         match back {
-            BitswapRequest::Want { cid } => assert_eq!(cid.0, "blake3-abc"),
+            BitswapRequest::Want { cid, .. } => assert_eq!(cid.0, "blake3-abc"),
             _ => panic!("wrong variant"),
         }
     }
@@ -307,13 +340,16 @@ mod tests {
     #[test]
     fn request_wantlist_roundtrip_serde() {
         let r = BitswapRequest::WantList {
+            project_id: "p".into(),
             cids: vec![Cid("blake3-a".into()), Cid("blake3-b".into())],
             want_have: true,
         };
         let b = rmp_serde::to_vec(&r).unwrap();
         let back: BitswapRequest = rmp_serde::from_slice(&b).unwrap();
         match back {
-            BitswapRequest::WantList { cids, want_have } => {
+            BitswapRequest::WantList {
+                cids, want_have, ..
+            } => {
                 assert_eq!(cids.len(), 2);
                 assert_eq!(cids[0].0, "blake3-a");
                 assert!(want_have);
@@ -325,6 +361,7 @@ mod tests {
     #[test]
     fn request_cancel_roundtrip_serde() {
         let r = BitswapRequest::Cancel {
+            project_id: "p".into(),
             cids: vec![Cid("blake3-x".into())],
         };
         let b = rmp_serde::to_vec(&r).unwrap();

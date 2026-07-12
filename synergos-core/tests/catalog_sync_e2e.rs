@@ -72,9 +72,12 @@ fn spawn_bitswap_server(
                     continue;
                 }
                 if &magic == BITSWAP_STREAM_MAGIC {
+                    let project_id = synergos_net::quic::read_project_id(&mut recv)
+                        .await
+                        .unwrap();
                     let s = store.clone();
                     tokio::spawn(async move {
-                        let _ = handle_bitswap_stream(s, send, recv).await;
+                        let _ = handle_bitswap_stream(s, send, recv, &project_id).await;
                     });
                 }
             }

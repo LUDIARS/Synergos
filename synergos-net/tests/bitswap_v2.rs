@@ -37,9 +37,12 @@ fn spawn_bitswap_server(
                     continue;
                 }
                 if &magic == BITSWAP_STREAM_MAGIC {
+                    let project_id = synergos_net::quic::read_project_id(&mut recv)
+                        .await
+                        .unwrap();
                     let s = store.clone();
                     tokio::spawn(async move {
-                        let _ = handle_bitswap_stream(s, send, recv).await;
+                        let _ = handle_bitswap_stream(s, send, recv, &project_id).await;
                     });
                 }
             }
@@ -78,7 +81,7 @@ async fn wantlist_fetches_multiple_cids_in_one_stream() {
         .unwrap();
 
     let cids = vec![c1.clone(), c2.clone(), c3.clone()];
-    let resps = request_many(send, recv, &cids, false).await.unwrap();
+    let resps = request_many(send, recv, "p", &cids, false).await.unwrap();
     assert_eq!(resps.len(), 3);
     for (cid, r) in cids.iter().zip(resps.iter()) {
         match r {
@@ -124,7 +127,7 @@ async fn wantlist_mixes_block_and_notfound_in_request_order() {
         .unwrap();
 
     let cids = vec![c1.clone(), missing.clone(), c1.clone()];
-    let resps = request_many(send, recv, &cids, false).await.unwrap();
+    let resps = request_many(send, recv, "p", &cids, false).await.unwrap();
     assert_eq!(resps.len(), 3);
     matches!(resps[0], BitswapResponse::Block { .. });
     matches!(resps[1], BitswapResponse::NotFound { .. });
@@ -163,6 +166,7 @@ async fn have_query_returns_have_and_donthave() {
     let session = BitswapSession::new(
         quic_c.clone(),
         server_id.peer_id().clone(),
+        "p".into(),
         Arc::new(MemoryContentStore::new()),
     );
     let res = session
@@ -202,9 +206,13 @@ async fn cancel_closes_stream_without_error() {
         .open_stream(server_id.peer_id(), StreamType::Control)
         .await
         .unwrap();
-    send_cancel(send, &[synergos_net::types::Cid("blake3-whatever".into())])
-        .await
-        .unwrap();
+    send_cancel(
+        send,
+        "p",
+        &[synergos_net::types::Cid("blake3-whatever".into())],
+    )
+    .await
+    .unwrap();
 
     drop(quic_c);
     tokio::time::timeout(Duration::from_millis(300), server_task)
@@ -252,6 +260,7 @@ async fn session_fetch_dag_pulls_root_and_all_chunks() {
     let session = BitswapSession::new(
         quic_c.clone(),
         server_id.peer_id().clone(),
+        "p".into(),
         client_store.clone(),
     )
     .with_max_inflight(4);
