@@ -7,17 +7,19 @@
 //!
 //! 旧 ars-plugin-synergos から synergos-core に移植。Ars 依存を除去。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use dashmap::DashMap;
+use serde::Deserialize;
 use synergos_net::chain::{LedgerAction, LedgerEntryState, OfferEntry, TransferLedger, WantEntry};
 use synergos_net::content::{Block, ContentStore, MemoryContentStore};
 use synergos_net::gossip::{GossipMessage, GossipNode};
 use synergos_net::quic::{QuicManager, StreamType};
-use synergos_net::transfer::{receive_over_quic, send_over_quic, TransferHeader};
+use synergos_net::transfer::{receive_stream, send_over_quic, TransferHeader, CHUNK_SIZE};
 use synergos_net::types::{Blake3Hash, Cid, FileId, PeerId, TopicId, TransferId};
+use tokio::io::{AsyncRead, AsyncReadExt};
 
 use crate::event_bus::{SharedEventBus, TransferCompletedEvent, TransferProgressEvent};
 
@@ -25,6 +27,181 @@ use crate::event_bus::{SharedEventBus, TransferCompletedEvent, TransferProgressE
 /// 最終的な書き込み先 `PathBuf` を返す。通常は ProjectManager 経由で
 /// プロジェクトルート + 相対パスを組み立てる想定。
 pub type OutPathResolver = Arc<dyn Fn(&str, &FileId) -> Option<PathBuf> + Send + Sync + 'static>;
+
+#[derive(Deserialize)]
+enum IncomingTransferFrame {
+    Header(TransferHeader),
+}
+
+/// 受信先を確定するため、既存 transfer frame の先頭 Header だけを読む。
+/// 返した prefix は同じバイト列のまま `receive_stream` に再入力する。
+async fn peek_transfer_header<R>(
+    reader: &mut R,
+) -> Result<(TransferHeader, Vec<u8>), FileSharingError>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut len_buf = [0u8; 4];
+    reader.read_exact(&mut len_buf).await?;
+    let len = u32::from_le_bytes(len_buf) as usize;
+    const MAX_FRAME: usize = CHUNK_SIZE + 1024;
+    if len > MAX_FRAME {
+        return Err(FileSharingError::NetworkError(format!(
+            "transfer frame too large: {len} bytes"
+        )));
+    }
+    let mut payload = vec![0u8; len];
+    reader.read_exact(&mut payload).await?;
+    let IncomingTransferFrame::Header(header) = rmp_serde::from_slice(&payload)
+        .map_err(|e| FileSharingError::NetworkError(format!("transfer header decode: {e}")))?;
+
+    let mut prefix = Vec::with_capacity(4 + len);
+    prefix.extend_from_slice(&len_buf);
+    prefix.extend_from_slice(&payload);
+    Ok((header, prefix))
+}
+
+/// Drop を含む全終了経路で未完成の一時ファイルを除去する。
+struct IncomingTempFile {
+    path: PathBuf,
+    armed: bool,
+}
+
+impl IncomingTempFile {
+    fn adjacent_to(final_path: &Path) -> Option<Self> {
+        let parent = final_path.parent()?;
+        Some(Self {
+            path: parent.join(format!(".synergos-incoming-{}", uuid::Uuid::new_v4())),
+            armed: true,
+        })
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for IncomingTempFile {
+    fn drop(&mut self) {
+        if self.armed {
+            match std::fs::remove_file(&self.path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => tracing::warn!("failed to remove incoming temp file: {error}"),
+            }
+        }
+    }
+}
+
+async fn receive_into_registered_path<R>(
+    mut reader: R,
+    resolver: &OutPathResolver,
+) -> Result<(TransferHeader, PathBuf), FileSharingError>
+where
+    R: AsyncRead + Unpin,
+{
+    let (offered_header, prefix) = peek_transfer_header(&mut reader).await?;
+    let file_id = FileId(offered_header.file_id.clone());
+    let final_path = resolver(&offered_header.project_id, &file_id)
+        .ok_or_else(|| FileSharingError::FileNotFound(offered_header.file_id.clone()))?;
+    let parent = final_path
+        .parent()
+        .ok_or_else(|| FileSharingError::FileNotFound(offered_header.file_id.clone()))?;
+    tokio::fs::create_dir_all(parent).await?;
+
+    let mut temp = IncomingTempFile::adjacent_to(&final_path)
+        .ok_or_else(|| FileSharingError::FileNotFound(offered_header.file_id.clone()))?;
+    let replay = std::io::Cursor::new(prefix).chain(reader);
+    let received_header = receive_stream(replay, &temp.path)
+        .await
+        .map_err(|e| FileSharingError::NetworkError(format!("{e}")))?;
+    tokio::fs::rename(&temp.path, &final_path).await?;
+    temp.disarm();
+    Ok((received_header, final_path))
+}
+
+#[cfg(test)]
+mod incoming_path_tests {
+    use super::*;
+    use synergos_net::transfer::send_stream;
+
+    fn header(file_id: &str, payload: &[u8]) -> TransferHeader {
+        TransferHeader {
+            transfer_id: "transfer-1".into(),
+            project_id: "project-1".into(),
+            file_id: file_id.into(),
+            total_size: payload.len() as u64,
+            chunk_count: u64::from(!payload.is_empty()),
+            total_hash: Blake3Hash(*blake3::hash(payload).as_bytes()),
+        }
+    }
+
+    #[tokio::test]
+    async fn registered_file_lands_inside_project_root() {
+        let root = tempfile::tempdir().unwrap();
+        let final_path = root.path().join("nested/file.bin");
+        let resolved = final_path.clone();
+        let resolver: OutPathResolver = Arc::new(move |project_id, file_id| {
+            (project_id == "project-1" && file_id.0 == "registered-id").then(|| resolved.clone())
+        });
+        let payload = b"registered payload".to_vec();
+        let offered = header("registered-id", &payload);
+        let (writer, reader) = tokio::io::duplex(4096);
+        let send = tokio::spawn({
+            let payload = payload.clone();
+            async move { send_stream(std::io::Cursor::new(payload), writer, offered).await }
+        });
+
+        let (_, received_path) = receive_into_registered_path(reader, &resolver)
+            .await
+            .unwrap();
+        send.await.unwrap().unwrap();
+
+        assert_eq!(received_path, final_path);
+        assert_eq!(tokio::fs::read(final_path).await.unwrap(), payload);
+    }
+
+    #[tokio::test]
+    async fn unregistered_file_is_rejected_before_body_write() {
+        let resolver: OutPathResolver = Arc::new(|_, _| None);
+        let payload = b"must not be written".to_vec();
+        let offered = header("unknown-id", &payload);
+        let (writer, reader) = tokio::io::duplex(4096);
+        let send = tokio::spawn(async move {
+            let _ = send_stream(std::io::Cursor::new(payload), writer, offered).await;
+        });
+
+        let error = receive_into_registered_path(reader, &resolver)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, FileSharingError::FileNotFound(id) if id == "unknown-id"));
+        send.abort();
+    }
+
+    #[tokio::test]
+    async fn interrupted_receive_removes_project_local_temp_file() {
+        let root = tempfile::tempdir().unwrap();
+        let final_path = root.path().join("file.bin");
+        let resolved = final_path.clone();
+        let resolver: OutPathResolver = Arc::new(move |_, _| Some(resolved.clone()));
+        let mut offered = header("registered-id", b"x");
+        offered.total_size = 2;
+        let (writer, reader) = tokio::io::duplex(4096);
+        let send = tokio::spawn(async move {
+            let result = send_stream(std::io::Cursor::new(b"x".to_vec()), writer, offered).await;
+            assert!(result.is_err());
+        });
+
+        assert!(receive_into_registered_path(reader, &resolver)
+            .await
+            .is_err());
+        send.await.unwrap();
+        assert!(!final_path.exists());
+
+        let mut entries = tokio::fs::read_dir(root.path()).await.unwrap();
+        assert!(entries.next_entry().await.unwrap().is_none());
+    }
+}
 
 /// QUIC 送信を進行しつつ 128KiB ごとに読み込んだ累積バイトを
 /// `tokio::sync::mpsc` で投げ出す `AsyncRead` ラッパ。
@@ -533,23 +710,8 @@ impl Exchange {
             FileSharingError::NetworkError("out_path_resolver not attached".into())
         })?;
 
-        // 先にヘッダを覗き見するため、一時バッファに受信せず receive_over_quic を
-        // 呼んで Header → Body → Footer を完結させる。保存先はヘッダから決める。
-        // 保存先を決めるために「ヘッダだけ先読み」したいが、receive_stream が
-        // 内部で一気通貫するので、tmp ファイルに書いたあと移動する。
-        let tmp_path =
-            std::env::temp_dir().join(format!("synergos-incoming-{}", uuid::Uuid::new_v4()));
-        let header = receive_over_quic(recv, &tmp_path)
-            .await
-            .map_err(|e| FileSharingError::NetworkError(format!("{e}")))?;
-
+        let (header, final_path) = receive_into_registered_path(recv, &resolver).await?;
         let file_id = FileId(header.file_id.clone());
-        let final_path = resolver(&header.project_id, &file_id)
-            .ok_or_else(|| FileSharingError::FileNotFound(header.file_id.clone()))?;
-        if let Some(parent) = final_path.parent() {
-            tokio::fs::create_dir_all(parent).await.ok();
-        }
-        tokio::fs::rename(&tmp_path, &final_path).await?;
 
         // 受信完了したファイルを shared_files にも登録する。これで:
         //   1. 後続の自身に届く同一 FileOffer を has_shared_file で skip できる

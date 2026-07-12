@@ -3,7 +3,7 @@
 //! Core デーモンが管理するプロジェクトのライフサイクルを制御する。
 //! ノード（ピア）はプロジェクトに紐づいて管理される。
 
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -314,20 +314,16 @@ impl ProjectManager {
             .insert((project_id.to_string(), file_id), relative);
     }
 
-    /// `project_id` + `file_id` から絶対保存先パスを解決する。
-    /// - 事前に `register_file` で明示的に紐付けられていればそれを優先
-    /// - 無ければ FileId の文字列をプロジェクト相対パスとして扱う (publish
-    ///   経由で登録した場合の既定動作との互換性を保つ)
+    /// `project_id` + `file_id` から、プロジェクトルート配下の登録済み保存先を解決する。
+    /// 未登録の ID と portable path として危険な ID / 登録パスは拒否する。
     pub fn resolve_file_path(&self, project_id: &str, file_id: &FileId) -> Option<PathBuf> {
+        portable_relative_path(Path::new(&file_id.0))?;
         let root = self.project_root(project_id)?;
-        if let Some(rel) = self
+        let rel = self
             .file_paths
             .get(&(project_id.to_string(), file_id.clone()))
-        {
-            return Some(root.join(&*rel));
-        }
-        // fallback: FileId をそのまま相対パスとして扱う
-        Some(root.join(&file_id.0))
+            .map(|entry| entry.clone())?;
+        resolve_under_project_root(&root, &rel)
     }
 
     /// 期限切れ招待トークンを除去
@@ -360,6 +356,57 @@ impl ProjectManager {
             .get(project_id)
             .map(|entry| entry.root_path.clone())
     }
+}
+
+/// Unix/Windows のどちらで受け取っても同じ判定になる相対パス検証。
+/// `std::path` が Unix 上で区切りとみなさない `\` も `/` として検査する。
+fn portable_relative_path(path: &Path) -> Option<PathBuf> {
+    let raw = path.to_str()?;
+    if raw.is_empty()
+        || raw.starts_with('/')
+        || raw.starts_with('\\')
+        || raw
+            .as_bytes()
+            .get(1)
+            .is_some_and(|second| *second == b':' && raw.as_bytes()[0].is_ascii_alphabetic())
+    {
+        return None;
+    }
+
+    let normalized = raw.replace('\\', "/");
+    let mut relative = PathBuf::new();
+    for component in Path::new(&normalized).components() {
+        match component {
+            Component::Normal(part) => relative.push(part),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+    (!relative.as_os_str().is_empty()).then_some(relative)
+}
+
+/// 最深の既存 ancestor を canonicalize し、symlink を含めても root 外へ出ない
+/// 論理パスだけを返す。まだ存在しない末尾成分は検証済みのまま付け直す。
+fn resolve_under_project_root(root: &Path, relative: &Path) -> Option<PathBuf> {
+    let root = root.canonicalize().ok()?;
+    let relative = portable_relative_path(relative)?;
+    let candidate = root.join(relative);
+
+    let mut existing = candidate.as_path();
+    let mut missing = Vec::new();
+    while !existing.exists() {
+        missing.push(existing.file_name()?.to_os_string());
+        existing = existing.parent()?;
+    }
+
+    let mut resolved = existing.canonicalize().ok()?;
+    if !resolved.starts_with(&root) {
+        return None;
+    }
+    for component in missing.iter().rev() {
+        resolved.push(component);
+    }
+    resolved.starts_with(&root).then_some(resolved)
 }
 
 fn now_epoch_secs() -> u64 {
@@ -585,5 +632,71 @@ impl ProjectConfiguration for ProjectManager {
 
     fn count(&self) -> usize {
         self.projects.len()
+    }
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+    use crate::event_bus::CoreEventBus;
+
+    fn manager() -> ProjectManager {
+        ProjectManager::new(Arc::new(CoreEventBus::new()))
+    }
+
+    #[tokio::test]
+    async fn resolve_file_path_requires_safe_registered_mapping() {
+        let root = tempfile::tempdir().unwrap();
+        let manager = manager();
+        manager
+            .open_project("p".into(), root.path().to_path_buf(), None)
+            .await
+            .unwrap();
+
+        let valid = FileId::new("nested/file.bin");
+        manager.register_file("p", valid.clone(), PathBuf::from("nested/file.bin"));
+        assert_eq!(
+            manager.resolve_file_path("p", &valid),
+            Some(root.path().canonicalize().unwrap().join("nested/file.bin"))
+        );
+
+        assert!(manager
+            .resolve_file_path("p", &FileId::new("unregistered.bin"))
+            .is_none());
+
+        for malicious in [
+            "../../../x",
+            "..\\..\\x",
+            "/etc/passwd",
+            "C:\\Windows\\system.ini",
+            "\\\\server\\share\\x",
+        ] {
+            let file_id = FileId::new(malicious);
+            manager.register_file("p", file_id.clone(), PathBuf::from("safe.bin"));
+            assert!(
+                manager.resolve_file_path("p", &file_id).is_none(),
+                "accepted malicious file id: {malicious}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn resolve_file_path_rejects_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        symlink(outside.path(), root.path().join("escape")).unwrap();
+
+        let manager = manager();
+        manager
+            .open_project("p".into(), root.path().to_path_buf(), None)
+            .await
+            .unwrap();
+        let file_id = FileId::new("safe-id");
+        manager.register_file("p", file_id.clone(), PathBuf::from("escape/file.bin"));
+
+        assert!(manager.resolve_file_path("p", &file_id).is_none());
     }
 }
