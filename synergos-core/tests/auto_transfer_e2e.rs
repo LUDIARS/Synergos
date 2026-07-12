@@ -73,8 +73,11 @@ async fn file_want_auto_triggers_share_and_send_over_quic() {
                     continue;
                 }
                 if &magic == TRANSFER_STREAM_MAGIC {
+                    let project_id = synergos_net::quic::read_project_id(&mut recv)
+                        .await
+                        .unwrap();
                     let _ = ex_b_for_task
-                        .handle_incoming_transfer(recv, sender.clone())
+                        .handle_incoming_transfer(recv, sender.clone(), &project_id)
                         .await;
                 }
                 break;

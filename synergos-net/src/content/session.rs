@@ -45,6 +45,7 @@ where
 {
     quic: Arc<QuicManager>,
     peer: PeerId,
+    project_id: String,
     store: Arc<S>,
     /// fetch_blocks / fetch_dag で同時に張る bidi stream の上限。
     max_inflight_streams: usize,
@@ -54,10 +55,11 @@ impl<S> BitswapSession<S>
 where
     S: ContentStore + ?Sized + 'static,
 {
-    pub fn new(quic: Arc<QuicManager>, peer: PeerId, store: Arc<S>) -> Self {
+    pub fn new(quic: Arc<QuicManager>, peer: PeerId, project_id: String, store: Arc<S>) -> Self {
         Self {
             quic,
             peer,
+            project_id,
             store,
             max_inflight_streams: 4,
         }
@@ -84,7 +86,7 @@ where
                 .quic
                 .open_stream(&self.peer, StreamType::Control)
                 .await?;
-            let resps = request_many(send, recv, batch, true).await?;
+            let resps = request_many(send, recv, &self.project_id, batch, true).await?;
             if resps.len() != batch.len() {
                 return Err(SynergosNetError::Serialization(format!(
                     "bitswap have_query: expected {} responses, got {}",
@@ -152,7 +154,7 @@ where
             .quic
             .open_stream(&self.peer, StreamType::Control)
             .await?;
-        let resps = request_many(send, recv, &cids, false).await?;
+        let resps = request_many(send, recv, &self.project_id, &cids, false).await?;
         if resps.len() != cids.len() {
             return Err(SynergosNetError::Serialization(format!(
                 "bitswap fetch_batch: expected {} responses, got {}",
@@ -261,7 +263,7 @@ mod tests {
         ));
         let _ = quic.bind((Ipv4Addr::LOCALHOST, 0).into()).await.unwrap();
         let store: Arc<MemoryContentStore> = Arc::new(MemoryContentStore::new());
-        let session = BitswapSession::new(quic, PeerId::new("nobody"), store);
+        let session = BitswapSession::new(quic, PeerId::new("nobody"), "p".into(), store);
         let out = session.have_query(&[]).await.unwrap();
         assert!(out.is_empty());
     }
@@ -288,7 +290,7 @@ mod tests {
         let cid = block.cid.clone();
         store.put(block).await.unwrap();
 
-        let session = BitswapSession::new(quic, PeerId::new("nobody"), store);
+        let session = BitswapSession::new(quic, PeerId::new("nobody"), "p".into(), store);
         let out = session
             .fetch_blocks(std::slice::from_ref(&cid))
             .await

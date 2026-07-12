@@ -11,7 +11,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::error::{Result, SynergosNetError};
-use crate::quic::{QuicManager, StreamType};
+use crate::quic::{write_project_id, QuicManager, StreamType};
 use crate::types::PeerId;
 
 use super::node::DhtNode;
@@ -39,6 +39,7 @@ impl DhtTransport for QuicDhtTransport {
 
         // ヘッダ + フレーム
         send.write_all(DHT_STREAM_MAGIC).await.map_err(to_err)?;
+        write_project_id(&mut send, req.project_id()).await?;
         let payload = rpc::encode(req)?;
         send.write_all(&payload).await.map_err(to_err)?;
         send.finish()
@@ -82,6 +83,7 @@ pub async fn handle_dht_stream(
     dht: Arc<DhtNode>,
     mut send: quinn::SendStream,
     mut recv: quinn::RecvStream,
+    authorized_project_id: &str,
 ) -> Result<()> {
     let mut len_buf = [0u8; 4];
     recv.read_exact(&mut len_buf).await.map_err(to_err)?;
@@ -98,6 +100,11 @@ pub async fn handle_dht_stream(
     full.extend_from_slice(&len_buf);
     full.extend_from_slice(&body);
     let req: DhtRequest = rpc::decode(&full)?;
+    if req.project_id() != authorized_project_id {
+        return Err(SynergosNetError::Identity(
+            "DHT request project_id does not match authorized stream scope".into(),
+        ));
+    }
 
     let resp = dht.handle_request(req).await;
 

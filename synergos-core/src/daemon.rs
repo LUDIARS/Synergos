@@ -19,7 +19,7 @@ use synergos_net::{
     identity::Identity,
     mesh::Mesh,
     promotion::{NetCapabilities, PromotionMode},
-    quic::{QuicManager, StreamType},
+    quic::{read_project_id, ConnectionSession, QuicManager, StreamType},
     transfer::TRANSFER_STREAM_MAGIC,
     tunnel::TunnelManager,
     types::{FileId, PeerId},
@@ -30,7 +30,7 @@ use crate::event_bus::{CoreEventBus, SharedEventBus};
 use crate::exchange::{Exchange, FetchRequest, FileSharing, TransferPriority};
 use crate::ipc_server::{IpcServer, ServiceContext};
 use crate::presence::{NodeRegistry, PresenceService};
-use crate::project::ProjectManager;
+use crate::project::{ProjectConfiguration, ProjectManager};
 
 /// デーモン設定
 #[derive(Debug, Clone, Default)]
@@ -575,24 +575,24 @@ fn spawn_quic_accept_loop(
                 accepted = net.quic.accept() => {
                     match accepted {
                         Ok(Some(acc)) => {
-                            let dht = net.dht.clone();
-                            let gossip = net.gossip.clone();
-                            let exchange = ctx.exchange.clone();
-                            let content_store = ctx.content_store.clone();
+                            acc.session.authorize_projects(
+                                ctx.project_manager
+                                    .list_projects()
+                                    .into_iter()
+                                    .map(|project| project.project_id),
+                            );
                             let sender = acc.peer_id.clone();
                             let connection = acc.connection;
-                            let event_bus = ctx.event_bus.clone();
+                            let stream_context = PeerStreamContext {
+                                dht: net.dht.clone(),
+                                gossip: net.gossip.clone(),
+                                exchange: ctx.exchange.clone(),
+                                content_store: ctx.content_store.clone(),
+                                event_bus: ctx.event_bus.clone(),
+                                session: acc.session,
+                            };
                             tokio::spawn(async move {
-                                dispatch_peer_streams(
-                                    connection,
-                                    sender,
-                                    dht,
-                                    gossip,
-                                    exchange,
-                                    content_store,
-                                    event_bus,
-                                )
-                                .await;
+                                dispatch_peer_streams(connection, sender, stream_context).await;
                             });
                         }
                         Ok(None) => {
@@ -610,16 +610,21 @@ fn spawn_quic_accept_loop(
     })
 }
 
-/// 1 つの QUIC コネクションから bidi ストリームをループで受け、先頭 magic で
-/// DHT / Gossip / Transfer / Bitswap に振り分ける。コネクションが閉じられたらループを抜ける。
-async fn dispatch_peer_streams(
-    connection: quinn::Connection,
-    sender: PeerId,
+struct PeerStreamContext {
     dht: Arc<DhtNode>,
     gossip: Arc<GossipNode>,
     exchange: Arc<crate::exchange::Exchange>,
     content_store: Arc<MemoryContentStore>,
     event_bus: SharedEventBus,
+    session: Arc<ConnectionSession>,
+}
+
+/// 1 つの QUIC コネクションから bidi ストリームをループで受け、先頭 magic で
+/// DHT / Gossip / Transfer / Bitswap に振り分ける。コネクションが閉じられたらループを抜ける。
+async fn dispatch_peer_streams(
+    connection: quinn::Connection,
+    sender: PeerId,
+    context: PeerStreamContext,
 ) {
     /// 拡張 magic ストリームの payload 上限 (1 MiB)。 IPC transport の
     /// MAX_MESSAGE_SIZE と整合。 これ以上来たら drop する。
@@ -640,28 +645,61 @@ async fn dispatch_peer_streams(
             continue;
         }
 
-        let dht = dht.clone();
-        let gossip = gossip.clone();
-        let exchange = exchange.clone();
-        let content_store = content_store.clone();
+        let known_protocol = &magic == DHT_STREAM_MAGIC
+            || &magic == TRANSFER_STREAM_MAGIC
+            || &magic == GOSSIP_STREAM_MAGIC
+            || &magic == BITSWAP_STREAM_MAGIC;
+        let project_id = if known_protocol {
+            let project_id = match read_project_id(&mut recv).await {
+                Ok(project_id) => project_id,
+                Err(e) => {
+                    tracing::debug!("project scope read failed from {}: {e}", sender.short());
+                    continue;
+                }
+            };
+            if !context.session.is_authorized(&project_id) {
+                tracing::warn!(
+                    "rejected unauthorized project stream from {}",
+                    sender.short()
+                );
+                continue;
+            }
+            Some(project_id)
+        } else {
+            None
+        };
+
+        let dht = context.dht.clone();
+        let gossip = context.gossip.clone();
+        let exchange = context.exchange.clone();
+        let content_store = context.content_store.clone();
         let sender_cloned = sender.clone();
-        let event_bus_cloned = event_bus.clone();
+        let event_bus_cloned = context.event_bus.clone();
         tokio::spawn(async move {
             if &magic == DHT_STREAM_MAGIC {
-                if let Err(e) = handle_dht_stream(dht, send, recv).await {
+                let project_id = project_id.expect("known protocol has project scope");
+                if let Err(e) = handle_dht_stream(dht, send, recv, &project_id).await {
                     tracing::debug!("DHT stream handler error: {e}");
                 }
             } else if &magic == TRANSFER_STREAM_MAGIC {
-                if let Err(e) = exchange.handle_incoming_transfer(recv, sender_cloned).await {
+                let project_id = project_id.expect("known protocol has project scope");
+                if let Err(e) = exchange
+                    .handle_incoming_transfer(recv, sender_cloned, &project_id)
+                    .await
+                {
                     tracing::debug!("Transfer stream handler error: {e}");
                 }
             } else if &magic == GOSSIP_STREAM_MAGIC {
+                let project_id = project_id.expect("known protocol has project scope");
                 drop(send); // gossip は片方向相当 (応答なし)
-                if let Err(e) = handle_gossip_stream(gossip, recv, sender_cloned).await {
+                if let Err(e) = handle_gossip_stream(gossip, recv, sender_cloned, &project_id).await
+                {
                     tracing::debug!("Gossip stream handler error: {e}");
                 }
             } else if &magic == BITSWAP_STREAM_MAGIC {
-                if let Err(e) = handle_bitswap_stream(content_store, send, recv).await {
+                let project_id = project_id.expect("known protocol has project scope");
+                if let Err(e) = handle_bitswap_stream(content_store, send, recv, &project_id).await
+                {
                     tracing::debug!("Bitswap stream handler error: {e}");
                 }
             } else {
@@ -720,6 +758,7 @@ fn spawn_gossip_fanout(
                             };
                             for peer in peers {
                                 let wire = GossipWireMessage {
+                                    project_id: outbound.signed.project_id.clone(),
                                     topic: outbound.topic.clone(),
                                     signed: outbound.signed.clone(),
                                 };

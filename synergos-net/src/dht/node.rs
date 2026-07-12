@@ -133,6 +133,7 @@ impl DhtNode {
     /// `alpha`, `max_hops`, `per_request_timeout` で暴走を防止する。
     pub async fn find_peer_iterative(
         &self,
+        project_id: &str,
         target: &PeerId,
         transport: &dyn DhtTransport,
         opts: FindNodeOptions,
@@ -174,6 +175,7 @@ impl DhtNode {
             for peer in &round {
                 let peer = peer.clone();
                 let req = DhtRequest::FindNode {
+                    project_id: project_id.to_string(),
                     target: target.clone(),
                 };
                 let timeout = opts.per_request_timeout;
@@ -244,8 +246,8 @@ impl DhtNode {
     /// 受信する型を既に判別済みの前提 — トランスポート層から呼ばれる。
     pub async fn handle_request(&self, req: DhtRequest) -> DhtResponse {
         match req {
-            DhtRequest::Ping => DhtResponse::Pong,
-            DhtRequest::FindNode { target } => {
+            DhtRequest::Ping { .. } => DhtResponse::Pong,
+            DhtRequest::FindNode { target, .. } => {
                 let target_node_id = NodeId::from_peer_id(&target);
                 let exact = self.find_peer_local(&target).await.map(|r| r.to_dto());
                 let closest_ids = self.closest_peers(&target_node_id, 20).await;
@@ -267,7 +269,7 @@ impl DhtNode {
                     .collect();
                 DhtResponse::ProjectPeers { peers }
             }
-            DhtRequest::Announce { record } => {
+            DhtRequest::Announce { record, .. } => {
                 let peer_id = record.peer_id.clone();
                 let endpoints = record.endpoints.iter().map(Into::into).collect::<Vec<_>>();
                 self.announce(PeerRecord::from_dto(record)).await;

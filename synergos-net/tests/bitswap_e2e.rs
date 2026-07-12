@@ -51,7 +51,10 @@ async fn bitswap_fetch_single_block_over_quic() {
                     continue;
                 }
                 if &magic == BITSWAP_STREAM_MAGIC {
-                    let _ = handle_bitswap_stream(store_s.clone(), send, recv).await;
+                    let project_id = synergos_net::quic::read_project_id(&mut recv)
+                        .await
+                        .unwrap();
+                    let _ = handle_bitswap_stream(store_s.clone(), send, recv, &project_id).await;
                     break;
                 }
             }
@@ -68,7 +71,7 @@ async fn bitswap_fetch_single_block_over_quic() {
         .await
         .unwrap();
 
-    let resp = request_block(send, recv, &cid).await.unwrap();
+    let resp = request_block(send, recv, "p", &cid).await.unwrap();
     match resp {
         BitswapResponse::Block {
             cid: got_cid,
@@ -106,7 +109,10 @@ async fn bitswap_not_found_for_unknown_cid() {
                     continue;
                 }
                 if &magic == BITSWAP_STREAM_MAGIC {
-                    let _ = handle_bitswap_stream(store_s.clone(), send, recv).await;
+                    let project_id = synergos_net::quic::read_project_id(&mut recv)
+                        .await
+                        .unwrap();
+                    let _ = handle_bitswap_stream(store_s.clone(), send, recv, &project_id).await;
                     break;
                 }
             }
@@ -123,7 +129,7 @@ async fn bitswap_not_found_for_unknown_cid() {
         .unwrap();
 
     let cid = synergos_net::types::Cid("blake3-unknown".into());
-    let resp = request_block(send, recv, &cid).await.unwrap();
+    let resp = request_block(send, recv, "p", &cid).await.unwrap();
     matches!(resp, BitswapResponse::NotFound { .. });
 
     tokio::time::timeout(Duration::from_millis(200), server_task)
@@ -173,9 +179,12 @@ async fn chunker_plus_bitswap_reassembles_file() {
                     continue;
                 }
                 if &magic == BITSWAP_STREAM_MAGIC {
+                    let project_id = synergos_net::quic::read_project_id(&mut recv)
+                        .await
+                        .unwrap();
                     let s = store_s.clone();
                     tokio::spawn(async move {
-                        let _ = handle_bitswap_stream(s, send, recv).await;
+                        let _ = handle_bitswap_stream(s, send, recv, &project_id).await;
                     });
                 }
             }
@@ -195,7 +204,7 @@ async fn chunker_plus_bitswap_reassembles_file() {
         .open_stream(server_id.peer_id(), StreamType::Control)
         .await
         .unwrap();
-    match request_block(send, recv, &root).await.unwrap() {
+    match request_block(send, recv, "p", &root).await.unwrap() {
         BitswapResponse::Block { cid, bytes } => {
             client_store.put(Block { cid, bytes }).await.unwrap();
         }
@@ -210,7 +219,7 @@ async fn chunker_plus_bitswap_reassembles_file() {
             .open_stream(server_id.peer_id(), StreamType::Control)
             .await
             .unwrap();
-        match request_block(send, recv, chunk_cid).await.unwrap() {
+        match request_block(send, recv, "p", chunk_cid).await.unwrap() {
             BitswapResponse::Block { cid, bytes } => {
                 client_store.put(Block { cid, bytes }).await.unwrap();
             }

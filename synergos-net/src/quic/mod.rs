@@ -19,6 +19,7 @@
 //!    拒否する。緩和パス (旧 `DevOnlySkipVerify`) は完全に削除した。
 
 pub mod hello;
+mod session;
 mod verifier;
 
 use std::net::SocketAddr;
@@ -33,6 +34,7 @@ use crate::error::{Result, SynergosNetError};
 use crate::identity::Identity;
 use crate::types::{PeerId, TransferId};
 
+pub use session::{read_project_id, write_project_id, ConnectionSession, ProjectId};
 pub use verifier::PeerPinningVerifier;
 
 /// QUIC ストリーム種別
@@ -59,6 +61,8 @@ pub struct QuicConnection {
     pub rtt_ms: u32,
     /// quinn コネクションハンドル
     connection: Option<quinn::Connection>,
+    /// この接続で利用を許可された project の集合。
+    session: Arc<ConnectionSession>,
 }
 
 /// QUIC 接続状態
@@ -246,6 +250,7 @@ impl QuicManager {
             state: QuicConnectionState::Connected,
             rtt_ms: rtt,
             connection: Some(connection),
+            session: Arc::new(ConnectionSession::new(expected_peer_id.clone())),
         };
 
         self.connections.insert(expected_peer_id, quic_conn);
@@ -335,6 +340,21 @@ impl QuicManager {
             .and_then(|e| e.connection.clone())
     }
 
+    /// 認証済み接続の認可sessionを取得する。T6 redeem 成功時の登録先でもある。
+    pub fn connection_session(&self, peer_id: &PeerId) -> Option<Arc<ConnectionSession>> {
+        self.connections
+            .get(peer_id)
+            .map(|entry| entry.session.clone())
+    }
+
+    pub fn authorize_project(&self, peer_id: &PeerId, project_id: ProjectId) -> Result<()> {
+        let session = self
+            .connection_session(peer_id)
+            .ok_or_else(|| SynergosNetError::PeerNotFound(peer_id.to_string()))?;
+        session.authorize_project(project_id);
+        Ok(())
+    }
+
     /// 全接続の情報を取得
     pub fn list_connections(&self) -> Vec<QuicConnectionInfo> {
         self.connections
@@ -382,6 +402,7 @@ impl QuicManager {
             }
         };
 
+        let session = Arc::new(ConnectionSession::new(peer_id.clone()));
         let quic_conn = QuicConnection {
             peer_id: peer_id.clone(),
             remote_addr,
@@ -389,6 +410,7 @@ impl QuicManager {
             state: QuicConnectionState::Connected,
             rtt_ms: rtt,
             connection: Some(connection.clone()),
+            session: session.clone(),
         };
         self.connections.insert(peer_id.clone(), quic_conn);
 
@@ -396,6 +418,7 @@ impl QuicManager {
             peer_id,
             remote_addr,
             connection,
+            session,
         }))
     }
 
@@ -522,6 +545,7 @@ pub struct AcceptedConnection {
     pub peer_id: PeerId,
     pub remote_addr: SocketAddr,
     pub connection: quinn::Connection,
+    pub session: Arc<ConnectionSession>,
 }
 
 /// rcgen で ed25519 keypair から自己署名証明書を作り、rustls が受け取れる

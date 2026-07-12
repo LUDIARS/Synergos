@@ -71,7 +71,10 @@ async fn find_node_over_quic_resolves_target_via_server_announce() {
             while let Ok((send, mut recv)) = connection.accept_bi().await {
                 let mut magic = [0u8; 4];
                 if recv.read_exact(&mut magic).await.is_ok() && &magic == b"DHT1" {
-                    let _ = handle_dht_stream(sdht.clone(), send, recv).await;
+                    let project_id = synergos_net::quic::read_project_id(&mut recv)
+                        .await
+                        .unwrap();
+                    let _ = handle_dht_stream(sdht.clone(), send, recv, &project_id).await;
                 }
             }
         }
@@ -98,7 +101,7 @@ async fn find_node_over_quic_resolves_target_via_server_announce() {
         k: 20,
     };
     let found = client_dht
-        .find_peer_iterative(&target, transport.as_ref(), opts)
+        .find_peer_iterative("p", &target, transport.as_ref(), opts)
         .await;
     assert!(found.is_some(), "target must be resolvable via server");
     assert_eq!(found.unwrap().peer_id, target);

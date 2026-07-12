@@ -151,15 +151,27 @@ impl GossipNode {
 
     /// 署名付き送信用に現在のメッセージを封筒化する。
     /// Identity が未設定の場合は `None` を返し、呼び出し側は送信をスキップする。
-    pub fn envelope(&self, message: GossipMessage) -> Option<SignedGossipMessage> {
+    pub fn envelope(
+        &self,
+        project_id: &str,
+        message: GossipMessage,
+    ) -> Option<SignedGossipMessage> {
         self.identity
             .as_ref()
-            .map(|id| SignedGossipMessage::sign(message, id))
+            .map(|id| SignedGossipMessage::sign(project_id.to_string(), message, id))
     }
 
     /// 受信した SignedGossipMessage を検証し、内側の GossipMessage を取り出す。
     /// 検証失敗 / 未署名は `None`。
-    pub fn verify_envelope(&self, signed: SignedGossipMessage) -> Option<GossipMessage> {
+    pub fn verify_envelope(
+        &self,
+        expected_project_id: &str,
+        signed: SignedGossipMessage,
+    ) -> Option<GossipMessage> {
+        if signed.project_id != expected_project_id {
+            tracing::warn!("dropped gossip message: project_id scope mismatch");
+            return None;
+        }
         if let Err(e) = signed.verify() {
             tracing::warn!("dropped gossip message: {e}");
             return None;
@@ -200,7 +212,11 @@ impl GossipNode {
 
         // Identity を持っていれば署名して outbound にも流す。
         // Daemon の送信タスクがこれを拾って QUIC で各メッシュピアに配る。
-        if let Some(signed) = self.envelope(message) {
+        let Some(project_id) = topic.0.strip_prefix("project/") else {
+            tracing::warn!("skipped outbound gossip for non-project topic");
+            return peers;
+        };
+        if let Some(signed) = self.envelope(project_id, message) {
             let _ = self.outbound_tx.send(OutboundGossip {
                 topic: topic.clone(),
                 signed,
@@ -215,10 +231,11 @@ impl GossipNode {
     pub fn on_signed_message_received(
         &self,
         topic: &TopicId,
+        expected_project_id: &str,
         signed: SignedGossipMessage,
         _from: &PeerId,
     ) -> bool {
-        match self.verify_envelope(signed) {
+        match self.verify_envelope(expected_project_id, signed) {
             Some(msg) => self.deliver(topic, msg),
             None => false,
         }
@@ -365,5 +382,37 @@ mod tests {
         // Second publish returns empty (duplicate)
         let targets = node.publish(&topic, msg);
         assert!(targets.is_empty());
+    }
+
+    #[test]
+    fn file_want_from_different_project_scope_is_rejected() {
+        let identity = Arc::new(Identity::generate());
+        let mut node = GossipNode::new(
+            identity.peer_id().clone(),
+            GossipsubConfig {
+                mesh_n: 6,
+                mesh_n_low: 4,
+                mesh_n_high: 12,
+                heartbeat_interval_ms: 1000,
+                message_cache_size: 100,
+            },
+        );
+        node.set_identity(identity.clone());
+        let signed = SignedGossipMessage::sign(
+            "project-a".into(),
+            GossipMessage::FileWant {
+                requester: identity.peer_id().clone(),
+                file_id: crate::types::FileId::new("f1"),
+                version: 1,
+            },
+            &identity,
+        );
+
+        assert!(!node.on_signed_message_received(
+            &TopicId::project("project-b"),
+            "project-b",
+            signed,
+            identity.peer_id(),
+        ));
     }
 }

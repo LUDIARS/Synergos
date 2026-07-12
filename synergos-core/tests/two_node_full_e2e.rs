@@ -121,11 +121,20 @@ impl Node {
                         let exchange = exchange.clone();
                         let sender_clone = sender.clone();
                         tokio::spawn(async move {
+                            let Ok(project_id) =
+                                synergos_net::quic::read_project_id(&mut recv).await
+                            else {
+                                return;
+                            };
                             if &magic == GOSSIP_STREAM_MAGIC {
                                 drop(send);
-                                let _ = handle_gossip_stream(gossip, recv, sender_clone).await;
+                                let _ =
+                                    handle_gossip_stream(gossip, recv, sender_clone, &project_id)
+                                        .await;
                             } else if &magic == TRANSFER_STREAM_MAGIC {
-                                let _ = exchange.handle_incoming_transfer(recv, sender_clone).await;
+                                let _ = exchange
+                                    .handle_incoming_transfer(recv, sender_clone, &project_id)
+                                    .await;
                             }
                         });
                     }
@@ -182,6 +191,7 @@ impl Node {
                 };
                 for peer in peers {
                     let wire = GossipWireMessage {
+                        project_id: out.signed.project_id.clone(),
                         topic: out.topic.clone(),
                         signed: out.signed.clone(),
                     };
@@ -263,11 +273,17 @@ async fn two_nodes_auto_transfer_via_gossip_and_quic() {
                 let exchange = exchange.clone();
                 let sender = b_peer.clone();
                 tokio::spawn(async move {
+                    let Ok(project_id) = synergos_net::quic::read_project_id(&mut recv).await
+                    else {
+                        return;
+                    };
                     if &magic == GOSSIP_STREAM_MAGIC {
                         drop(send);
-                        let _ = handle_gossip_stream(gossip, recv, sender).await;
+                        let _ = handle_gossip_stream(gossip, recv, sender, &project_id).await;
                     } else if &magic == TRANSFER_STREAM_MAGIC {
-                        let _ = exchange.handle_incoming_transfer(recv, sender).await;
+                        let _ = exchange
+                            .handle_incoming_transfer(recv, sender, &project_id)
+                            .await;
                     }
                 });
             }

@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::error::{Result, SynergosNetError};
+use crate::quic::write_project_id;
 use crate::types::Blake3Hash;
 
 /// 1 チャンクあたりのバイト数 (64 KiB)。
@@ -200,6 +201,7 @@ where
     send.write_all(TRANSFER_STREAM_MAGIC)
         .await
         .map_err(|e| SynergosNetError::Quic(format!("write magic: {e}")))?;
+    write_project_id(&mut send, &header.project_id).await?;
     send_stream(reader, send, header).await
 }
 

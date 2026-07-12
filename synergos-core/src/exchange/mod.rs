@@ -96,11 +96,17 @@ impl Drop for IncomingTempFile {
 async fn receive_into_registered_path<R>(
     mut reader: R,
     resolver: &OutPathResolver,
+    authorized_project_id: &str,
 ) -> Result<(TransferHeader, PathBuf), FileSharingError>
 where
     R: AsyncRead + Unpin,
 {
     let (offered_header, prefix) = peek_transfer_header(&mut reader).await?;
+    if offered_header.project_id != authorized_project_id {
+        return Err(FileSharingError::NetworkError(
+            "transfer project_id does not match authorized stream scope".into(),
+        ));
+    }
     let file_id = FileId(offered_header.file_id.clone());
     let final_path = resolver(&offered_header.project_id, &file_id)
         .ok_or_else(|| FileSharingError::FileNotFound(offered_header.file_id.clone()))?;
@@ -152,7 +158,7 @@ mod incoming_path_tests {
             async move { send_stream(std::io::Cursor::new(payload), writer, offered).await }
         });
 
-        let (_, received_path) = receive_into_registered_path(reader, &resolver)
+        let (_, received_path) = receive_into_registered_path(reader, &resolver, "project-1")
             .await
             .unwrap();
         send.await.unwrap().unwrap();
@@ -171,10 +177,28 @@ mod incoming_path_tests {
             let _ = send_stream(std::io::Cursor::new(payload), writer, offered).await;
         });
 
-        let error = receive_into_registered_path(reader, &resolver)
+        let error = receive_into_registered_path(reader, &resolver, "project-1")
             .await
             .unwrap_err();
         assert!(matches!(error, FileSharingError::FileNotFound(id) if id == "unknown-id"));
+        send.abort();
+    }
+
+    #[tokio::test]
+    async fn transfer_project_mismatch_is_rejected_before_path_resolution() {
+        let resolver: OutPathResolver =
+            Arc::new(|_, _| panic!("resolver must not run for an unauthorized transfer"));
+        let payload = b"unauthorized".to_vec();
+        let offered = header("registered-id", &payload);
+        let (writer, reader) = tokio::io::duplex(4096);
+        let send = tokio::spawn(async move {
+            let _ = send_stream(std::io::Cursor::new(payload), writer, offered).await;
+        });
+
+        let error = receive_into_registered_path(reader, &resolver, "project-2")
+            .await
+            .unwrap_err();
+        assert!(matches!(error, FileSharingError::NetworkError(_)));
         send.abort();
     }
 
@@ -192,7 +216,7 @@ mod incoming_path_tests {
             assert!(result.is_err());
         });
 
-        assert!(receive_into_registered_path(reader, &resolver)
+        assert!(receive_into_registered_path(reader, &resolver, "project-1")
             .await
             .is_err());
         send.await.unwrap();
@@ -705,12 +729,14 @@ impl Exchange {
         self: &Arc<Self>,
         recv: quinn::RecvStream,
         sender: PeerId,
+        authorized_project_id: &str,
     ) -> Result<(), FileSharingError> {
         let resolver = self.out_path_resolver.clone().ok_or_else(|| {
             FileSharingError::NetworkError("out_path_resolver not attached".into())
         })?;
 
-        let (header, final_path) = receive_into_registered_path(recv, &resolver).await?;
+        let (header, final_path) =
+            receive_into_registered_path(recv, &resolver, authorized_project_id).await?;
         let file_id = FileId(header.file_id.clone());
 
         // 受信完了したファイルを shared_files にも登録する。これで:
