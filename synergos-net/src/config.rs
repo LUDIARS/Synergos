@@ -14,6 +14,9 @@ pub struct NetConfig {
     pub speed_test: SpeedTestConfig,
     pub peer_selection: PeerSelectionConfig,
     pub monitor: MonitorConfig,
+    /// 接続・stream・transferのDoS耐性上限。
+    #[serde(default)]
+    pub resource_limits: QuicResourceLimits,
     /// CatalogManager のチューニング (マジックナンバー解消、後方互換のため
     /// `#[serde(default)]` で旧 config からも読める)。
     #[serde(default)]
@@ -168,6 +171,53 @@ pub struct QuicConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuicResourceLimits {
+    pub max_file_size_bytes: u64,
+    pub transfer_timeout_ms: u64,
+    pub hello_concurrency: usize,
+    pub max_connections_global: usize,
+    pub max_connections_per_ip: usize,
+    pub max_connections_per_peer: usize,
+    pub stream_body_timeout_ms: u64,
+}
+
+impl Default for QuicResourceLimits {
+    fn default() -> Self {
+        Self {
+            max_file_size_bytes: 1024 * 1024 * 1024,
+            transfer_timeout_ms: 5 * 60 * 1000,
+            hello_concurrency: 32,
+            max_connections_global: 1024,
+            max_connections_per_ip: 32,
+            max_connections_per_peer: 1,
+            stream_body_timeout_ms: 30_000,
+        }
+    }
+}
+
+impl QuicResourceLimits {
+    fn validate(&self) -> Result<(), String> {
+        if self.max_file_size_bytes == 0
+            || self.transfer_timeout_ms == 0
+            || self.hello_concurrency == 0
+            || self.max_connections_global == 0
+            || self.max_connections_per_ip == 0
+            || self.max_connections_per_peer == 0
+            || self.stream_body_timeout_ms == 0
+        {
+            return Err("QUIC resource limits must all be greater than zero".into());
+        }
+        if self.max_connections_per_ip > self.max_connections_global {
+            return Err("max_connections_per_ip must not exceed global limit".into());
+        }
+        if self.max_connections_per_peer != 1 {
+            return Err("current QUIC session map requires max_connections_per_peer = 1".into());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DhtConfig {
     /// Kademlia k-bucket サイズ
     pub k_bucket_size: usize,
@@ -305,6 +355,7 @@ impl Default for NetConfig {
                 history_size: 3600,
                 graph_sample_interval_secs: 1,
             },
+            resource_limits: QuicResourceLimits::default(),
             catalog: CatalogConfig::default(),
             peer_info_listen_addr: None,
             quic_advertised_addr: None,
@@ -320,6 +371,7 @@ impl NetConfig {
     /// 個別の知識は各サブ struct の `validate()` に委譲する。
     pub fn validate(&self) -> Result<(), String> {
         self.stream_allocation.validate()?;
+        self.resource_limits.validate()?;
         Ok(())
     }
 }

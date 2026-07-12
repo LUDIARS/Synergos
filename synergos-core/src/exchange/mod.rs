@@ -12,12 +12,14 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use dashmap::DashMap;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use synergos_net::chain::{LedgerAction, LedgerEntryState, OfferEntry, TransferLedger, WantEntry};
 use synergos_net::content::{Block, ContentStore, MemoryContentStore};
 use synergos_net::gossip::{GossipMessage, GossipNode};
 use synergos_net::quic::{QuicManager, StreamType};
-use synergos_net::transfer::{receive_stream, send_over_quic, TransferHeader, CHUNK_SIZE};
+use synergos_net::transfer::{
+    receive_stream, send_over_quic, TransferHeader, TransferLimits, CHUNK_SIZE,
+};
 use synergos_net::types::{Blake3Hash, Cid, FileId, PeerId, TopicId, TransferId};
 use tokio::io::{AsyncRead, AsyncReadExt};
 
@@ -28,7 +30,7 @@ use crate::event_bus::{SharedEventBus, TransferCompletedEvent, TransferProgressE
 /// プロジェクトルート + 相対パスを組み立てる想定。
 pub type OutPathResolver = Arc<dyn Fn(&str, &FileId) -> Option<PathBuf> + Send + Sync + 'static>;
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 enum IncomingTransferFrame {
     Header(TransferHeader),
 }
@@ -97,6 +99,7 @@ async fn receive_into_registered_path<R>(
     mut reader: R,
     resolver: &OutPathResolver,
     authorized_project_id: &str,
+    limits: TransferLimits,
 ) -> Result<(TransferHeader, PathBuf), FileSharingError>
 where
     R: AsyncRead + Unpin,
@@ -118,7 +121,7 @@ where
     let mut temp = IncomingTempFile::adjacent_to(&final_path)
         .ok_or_else(|| FileSharingError::FileNotFound(offered_header.file_id.clone()))?;
     let replay = std::io::Cursor::new(prefix).chain(reader);
-    let received_header = receive_stream(replay, &temp.path)
+    let received_header = receive_stream(replay, &temp.path, limits)
         .await
         .map_err(|e| FileSharingError::NetworkError(format!("{e}")))?;
     tokio::fs::rename(&temp.path, &final_path).await?;
@@ -130,6 +133,13 @@ where
 mod incoming_path_tests {
     use super::*;
     use synergos_net::transfer::send_stream;
+
+    fn limits() -> TransferLimits {
+        TransferLimits {
+            max_file_size_bytes: 1024 * 1024,
+            transfer_timeout: std::time::Duration::from_secs(1),
+        }
+    }
 
     fn header(file_id: &str, payload: &[u8]) -> TransferHeader {
         TransferHeader {
@@ -158,9 +168,10 @@ mod incoming_path_tests {
             async move { send_stream(std::io::Cursor::new(payload), writer, offered).await }
         });
 
-        let (_, received_path) = receive_into_registered_path(reader, &resolver, "project-1")
-            .await
-            .unwrap();
+        let (_, received_path) =
+            receive_into_registered_path(reader, &resolver, "project-1", limits())
+                .await
+                .unwrap();
         send.await.unwrap().unwrap();
 
         assert_eq!(received_path, final_path);
@@ -177,7 +188,7 @@ mod incoming_path_tests {
             let _ = send_stream(std::io::Cursor::new(payload), writer, offered).await;
         });
 
-        let error = receive_into_registered_path(reader, &resolver, "project-1")
+        let error = receive_into_registered_path(reader, &resolver, "project-1", limits())
             .await
             .unwrap_err();
         assert!(matches!(error, FileSharingError::FileNotFound(id) if id == "unknown-id"));
@@ -195,7 +206,7 @@ mod incoming_path_tests {
             let _ = send_stream(std::io::Cursor::new(payload), writer, offered).await;
         });
 
-        let error = receive_into_registered_path(reader, &resolver, "project-2")
+        let error = receive_into_registered_path(reader, &resolver, "project-2", limits())
             .await
             .unwrap_err();
         assert!(matches!(error, FileSharingError::NetworkError(_)));
@@ -216,14 +227,50 @@ mod incoming_path_tests {
             assert!(result.is_err());
         });
 
-        assert!(receive_into_registered_path(reader, &resolver, "project-1")
-            .await
-            .is_err());
+        assert!(
+            receive_into_registered_path(reader, &resolver, "project-1", limits())
+                .await
+                .is_err()
+        );
         send.await.unwrap();
         assert!(!final_path.exists());
 
         let mut entries = tokio::fs::read_dir(root.path()).await.unwrap();
         assert!(entries.next_entry().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn deadline_removes_project_local_temp_file() {
+        use tokio::io::AsyncWriteExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let final_path = root.path().join("file.bin");
+        let resolved = final_path.clone();
+        let resolver: OutPathResolver = Arc::new(move |_, _| Some(resolved.clone()));
+        let offered = header("registered-id", b"x");
+        let payload = rmp_serde::to_vec(&IncomingTransferFrame::Header(offered)).unwrap();
+        let (mut writer, reader) = tokio::io::duplex(4096);
+        writer
+            .write_all(&(payload.len() as u32).to_le_bytes())
+            .await
+            .unwrap();
+        writer.write_all(&payload).await.unwrap();
+
+        let result = receive_into_registered_path(
+            reader,
+            &resolver,
+            "project-1",
+            TransferLimits {
+                max_file_size_bytes: 1024,
+                transfer_timeout: std::time::Duration::from_millis(10),
+            },
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(!final_path.exists());
+        let mut entries = tokio::fs::read_dir(root.path()).await.unwrap();
+        assert!(entries.next_entry().await.unwrap().is_none());
+        drop(writer);
     }
 }
 
@@ -734,9 +781,14 @@ impl Exchange {
         let resolver = self.out_path_resolver.clone().ok_or_else(|| {
             FileSharingError::NetworkError("out_path_resolver not attached".into())
         })?;
+        let limits = self
+            .quic
+            .as_ref()
+            .ok_or_else(|| FileSharingError::NetworkError("QUIC not attached".into()))?
+            .transfer_limits();
 
         let (header, final_path) =
-            receive_into_registered_path(recv, &resolver, authorized_project_id).await?;
+            receive_into_registered_path(recv, &resolver, authorized_project_id, limits).await?;
         let file_id = FileId(header.file_id.clone());
 
         // 受信完了したファイルを shared_files にも登録する。これで:
