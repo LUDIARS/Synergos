@@ -230,9 +230,9 @@ impl QuicManager {
 
         let rtt = connection.rtt().as_millis() as u32;
 
-        // 相互認識のため HLO1 ストリームで自分の署名 Hello を送る。
+        // 相互認識のため HLO2 の server nonce + channel-bound Hello を送る。
         // 失敗しても接続は閉じる (相手にこちらの PeerId を確信させられない)。
-        if let Err(e) = hello::send_hello(&connection, &self.identity).await {
+        if let Err(e) = hello::send_hello2(&connection, &self.identity).await {
             connection.close(0u32.into(), b"hello failed");
             return Err(SynergosNetError::Identity(format!(
                 "hello send failed: {e}"
@@ -372,9 +372,9 @@ impl QuicManager {
         let remote_addr = connection.remote_address();
         let rtt = connection.rtt().as_millis() as u32;
 
-        // クライアントからの HLO1 Hello を待って peer_id を確定させる。
+        // クライアントと HLO2 challenge を行い peer_id を確定させる。
         // タイムアウト / 不正 Hello ならコネクションを閉じて拒否する。
-        let peer_id = match hello::recv_hello(&connection).await {
+        let peer_id = match hello::recv_hello2(&connection).await {
             Ok(pid) => pid,
             Err(e) => {
                 connection.close(0u32.into(), b"hello rejected");
