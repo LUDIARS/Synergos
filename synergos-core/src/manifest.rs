@@ -317,12 +317,7 @@ pub async fn replace_file_atomically(source: &Path, destination: &Path) -> io::R
         let destination = destination.to_path_buf();
         tokio::task::spawn_blocking(move || replace_file_windows(&source, &destination))
             .await
-            .map_err(|error| {
-                io::Error::new(
-                    io::ErrorKind::Other,
-                    format!("replace task failed: {error}"),
-                )
-            })?
+            .map_err(|error| io::Error::other(format!("replace task failed: {error}")))?
     }
 }
 
@@ -371,7 +366,11 @@ fn replace_file_windows(source: &Path, destination: &Path) -> io::Result<()> {
     };
 
     let source: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
-    let destination: Vec<u16> = destination.as_os_str().encode_wide().chain(Some(0)).collect();
+    let destination: Vec<u16> = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
     let result = unsafe {
         MoveFileExW(
             source.as_ptr(),
@@ -440,7 +439,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn safe_join_rejects_symlinked_components() {
-        let root = std::env::temp_dir().join(format!("synergos-safe-root-{}", uuid::Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("synergos-safe-root-{}", uuid::Uuid::new_v4()));
         let outside =
             std::env::temp_dir().join(format!("synergos-safe-outside-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
@@ -450,7 +450,11 @@ mod tests {
         assert!(safe_join_under_root(&root, "linked/payload.bin").is_none());
         assert_eq!(
             safe_join_under_root(&root, "ordinary/payload.bin"),
-            Some(std::fs::canonicalize(&root).unwrap().join("ordinary/payload.bin"))
+            Some(
+                std::fs::canonicalize(&root)
+                    .unwrap()
+                    .join("ordinary/payload.bin")
+            )
         );
 
         let _ = std::fs::remove_dir_all(&root);

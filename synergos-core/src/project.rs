@@ -420,13 +420,7 @@ impl ProjectManager {
             .get(project_id)
             .map(|manifest| manifest.value().clone())
             .unwrap_or_else(|| ProjectManifest::new(project_id));
-        let outcome = snapshot.bump(
-            rel,
-            size,
-            crc,
-            publisher,
-            synergos_net::types::now_ms(),
-        );
+        let outcome = snapshot.bump(rel, size, crc, publisher, synergos_net::types::now_ms());
         if matches!(outcome, BumpOutcome::Bumped(_)) {
             snapshot.save(&root).await?;
             self.manifests.insert(project_id.to_string(), snapshot);
@@ -544,9 +538,7 @@ impl ProjectConfiguration for ProjectManager {
                 .map_err(|error| ProjectError::InvalidRoot(error.to_string()))?,
         );
         if !root_path.is_dir() {
-            return Err(ProjectError::InvalidRoot(
-                "path is not a directory".into(),
-            ));
+            return Err(ProjectError::InvalidRoot("path is not a directory".into()));
         }
         let manifest = ProjectManifest::load(&root_path, &project_id)
             .await

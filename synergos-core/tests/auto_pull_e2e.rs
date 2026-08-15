@@ -171,8 +171,9 @@ impl Node {
                         );
                         // auto-pull (daemon.rs と同じロジック)
                         let mine = sender == *me_sub.exchange.local_peer_id();
-                        let already =
-                            me_sub.exchange.has_shared_file("auto-e2e", &file_id, version);
+                        let already = me_sub
+                            .exchange
+                            .has_shared_file("auto-e2e", &file_id, version);
                         if !mine && !already {
                             if let Some(project_id) =
                                 topic.0.strip_prefix("project/").map(|s| s.to_string())

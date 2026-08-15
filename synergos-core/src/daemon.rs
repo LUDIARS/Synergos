@@ -860,25 +860,22 @@ fn spawn_gossip_subscriber(
                                 continue;
                             }
                             let auto_pull_eligible = sender != *ctx.exchange.local_peer_id()
-                                && !ctx.exchange.has_shared_file(&project_id, &file_id, version);
+                                && !ctx.exchange.has_shared_file(&project_id, &file_id, version)
+                                && ctx.project_manager.project_root(&project_id).is_some();
                             if auto_pull_eligible {
-                                if ctx.project_manager.project_root(&project_id).is_some() {
-                                    let exchange = ctx.exchange.clone();
-                                    let req = FetchRequest {
-                                        project_id,
-                                        file_id: FileId(file_id.0.clone()),
-                                        source_peer: Some(sender.clone()),
-                                        priority: TransferPriority::Interactive,
-                                        version,
-                                    };
-                                    tokio::spawn(async move {
-                                        if let Err(e) = exchange.fetch_file(req).await {
-                                            tracing::debug!(
-                                                "auto-pull on FileOffer failed: {e}"
-                                            );
-                                        }
-                                    });
-                                }
+                                let exchange = ctx.exchange.clone();
+                                let req = FetchRequest {
+                                    project_id,
+                                    file_id: FileId(file_id.0.clone()),
+                                    source_peer: Some(sender.clone()),
+                                    priority: TransferPriority::Interactive,
+                                    version,
+                                };
+                                tokio::spawn(async move {
+                                    if let Err(e) = exchange.fetch_file(req).await {
+                                        tracing::debug!("auto-pull on FileOffer failed: {e}");
+                                    }
+                                });
                             }
                         }
                         Ok((_topic, GossipMessage::PeerStatus { status, origin, .. })) => {

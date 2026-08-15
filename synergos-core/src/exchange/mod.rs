@@ -613,8 +613,7 @@ impl Exchange {
                 FileSharingError::NetworkError("metadata directory has no project root".into())
             })?;
             if requested.file_name() != Some(std::ffi::OsStr::new(crate::manifest::INCOMING_DIR))
-                || metadata_dir.file_name()
-                    != Some(std::ffi::OsStr::new(crate::manifest::META_DIR))
+                || metadata_dir.file_name() != Some(std::ffi::OsStr::new(crate::manifest::META_DIR))
             {
                 return Err(FileSharingError::NetworkError(
                     "incoming directory must be <project>/.synergos/incoming".into(),

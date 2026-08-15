@@ -159,8 +159,7 @@ fn equal_version_content_conflict_is_reported() {
     let local = PeerId::new("local-peer");
     let remote = PeerId::new("remote-peer");
 
-    let conflict =
-        cm.record_version_conflict("project", &file_id, 2, &local, 2, &remote);
+    let conflict = cm.record_version_conflict("project", &file_id, 2, &local, 2, &remote);
 
     assert_eq!(conflict.state, ConflictState::Active);
     assert_eq!(conflict.local_version, 2);

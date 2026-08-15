@@ -22,14 +22,10 @@ pub async fn bootstrap_and_register(
     url: &str,
     expected_peer: Option<&PeerId>,
 ) -> Result<BootstrapResult, String> {
-    let result = bootstrap_from_url_expected(
-        url,
-        &ctx.quic,
-        Duration::from_secs(10),
-        expected_peer,
-    )
-    .await
-    .map_err(|e| format!("bootstrap failed: {e}"))?;
+    let result =
+        bootstrap_from_url_expected(url, &ctx.quic, Duration::from_secs(10), expected_peer)
+            .await
+            .map_err(|e| format!("bootstrap failed: {e}"))?;
     let registration = NodeRegistration {
         peer_id: result.peer_id.clone(),
         display_name: result.peer_id.to_string(),

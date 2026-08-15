@@ -117,9 +117,11 @@ pub fn decode(token: &str, now_epoch_secs: u64) -> Result<InvitePayload, InviteT
             "invalid peer-info URL length".into(),
         ));
     }
-    if payload.display_name.as_ref().is_some_and(|name| {
-        name.len() > MAX_DISPLAY_NAME_LEN || name.chars().any(char::is_control)
-    }) {
+    if payload
+        .display_name
+        .as_ref()
+        .is_some_and(|name| name.len() > MAX_DISPLAY_NAME_LEN || name.chars().any(char::is_control))
+    {
         return Err(InviteTokenError::Malformed("invalid display name".into()));
     }
     let pk_vec = b64()

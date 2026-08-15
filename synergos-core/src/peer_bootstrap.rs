@@ -158,9 +158,7 @@ pub async fn bootstrap_from_url_expected(
             });
         }
     }
-    let expected_peer_id = expected_peer
-        .cloned()
-        .unwrap_or(advertised_peer_id);
+    let expected_peer_id = expected_peer.cloned().unwrap_or(advertised_peer_id);
     let mut last_err: Option<BootstrapError> = None;
     for addr in &candidates {
         tracing::info!(
