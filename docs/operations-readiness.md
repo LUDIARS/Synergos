@@ -20,8 +20,8 @@
 | publish 時に大ファイルを RAM に全読み | ✅ **現行実装** | CRC のために `fs::read` していた → ストリーミング CRC |
 | ネットワーク由来 FileId のパス脱出 (`..`) | ✅ **現行実装** | 受信側 resolver で `..` / 絶対パス / `.synergos/` を拒否 |
 | 転送の整合性検証 | ✅ できている | 64 KiB フレームごと blake3 + 全体 blake3 |
-| CatalogUpdate → CatalogSyncService | ⚠️ 骨格のみ | RootCatalog を Bitswap で取ってくるが**実ファイル同期には使われていない** (実データは FileOffer 経路)。将来の差分転送 (Phase 2) の土台 |
-| Bitswap / ContentStore | ⚠️ メモリのみ | `MemoryContentStore`。再起動で消える。Phase 2 で `.synergos/objects/` に永続化 |
+| CatalogUpdate → CatalogSyncService | ⚠️ 骨格のみ | RootCatalog を Bitswap で取ってくるが**実ファイル同期には使われていない** (実データは FileOffer 経路)。Phase 2 (履歴ノード) では使わない。将来の最適化用に残置 |
+| Bitswap / ContentStore | ⚠️ メモリのみ | `MemoryContentStore`。再起動で消える。Phase 2 の履歴ノード保管庫は別実装 (`.synergos/history/`)、ContentStore は据え置き |
 | 差分転送 (変わった部分だけ) | ❌ 未実装 | 全体転送。設計は [versioning-design.md](versioning-design.md) §3 |
 | 削除 / リネームの伝搬 | ❌ 未実装 | manifest に tombstone を持たせれば可 (P1) |
 | ディレクトリ単位 publish / 自動監視 | ❌ 未実装 | `publish <id> <files...>` のみ。`--all` (作業ツリー走査) は小さい追加 (P1) |
@@ -56,13 +56,13 @@
 | 6 | 転送の再開 (resume) / 並列度制御 | 中 | 数 GB を切断で最初からやり直す。CHUNK/offset を Offer に載せれば可 |
 | 7 | invite の GUI / Tauri 対応 (`peer_info_url` を渡す) | 小 | CLI は済み |
 
-### P2 — 差分転送とチーム規模 (versioning-design.md Phase 2〜3)
+### P2 — 履歴ノードとチーム規模 (versioning-design.md Phase 2〜3、neco 決定 2026-08-16: 差分管理はしない)
 
 | # | 作業 | 規模 |
 |---|---|---|
-| 1 | `MemoryContentStore` → `.synergos/objects/` 永続ストア | 中 |
-| 2 | FastCDC チャンク化 + FileManifest + 欠落チャンクのみ Bitswap 取得 | 大 |
-| 3 | `project checkout` (manifest に作業ツリーを合わせる) / `project gc` | 中 |
+| 1 | `[history]` 設定 (enabled / projects / root / 保持ポリシー) + 保管庫 (objects + index.json、atomic write、meta sidecar) | 中 |
+| 2 | 受信/publish 完了時に履歴ノードが objects へ格納 (ハードリンク or コピー) + 旧版 FileWant への応答 | 中 |
+| 3 | `project checkout` / `project restore --version` / `history ls` / `history gc` | 中 |
 | 4 | 競合検出 (version 分岐) → 退避 + ConflictAlert 発火 | 中 |
 | 5 | manifest / state 分離 (git コミット用と node ローカル用) | 小 |
 | 6 | プロジェクト参加 ACL (招待トークンを認可境界にする: ホスト側で参加要求を検証) | 中 |
@@ -73,5 +73,5 @@
 
 1. **2 台の実機はどれか** — 手順書は LAN と Mesh の両方を書いたが、実機確認はどちらの構成でやるか
    (LAN なら今日から、Mesh なら Cloudflare 側の設定が先)
-2. **versioning-design の案 B (履歴は git、Synergos は差分転送のみ)** で進めてよいか。
-   Phase 2 の着手可否と順序 (P1 を先に潰すか、Phase 2 の永続ストアを先にやるか)
+2. ~~versioning-design の案 B で進めてよいか~~ → **neco 決定 (2026-08-16): 案 D 履歴ノードフラグ**。
+   残る判断は着手順 (P1 を先に潰すか、P2 #1〜#3 を先にやるか)

@@ -7,23 +7,27 @@ git (テキストのバージョン管理) との役割分担。
 
 | 問い | 答え |
 |---|---|
-| Synergos で **履歴 (差分管理)** を持つか | **持たない**。Synergos は「今の資産集合を全ノードに揃える転送層」に徹する。履歴は git 側 (`.synergos/manifest.json` をコミット) に持たせる |
-| バイナリ / 大きいファイルの **差分転送** をするか | **する (Phase 2)**。ただし「バイト差分 (patch)」ではなく **内容アドレスのチャンク重複排除** で実現する。差分"管理"と差分"転送"を分けて考える |
-| git との関係 | **git-LFS の P2P 版**。git はテキスト + `manifest.json` (=ポインタ集合) を管理し、実体 (blob) は Synergos が運ぶ。git にバイナリを入れない |
+| Synergos で **履歴 (差分管理)** を持つか | **差分管理はしない**。履歴の「索引」は git 側 (`.synergos/manifest.json` をコミット)。履歴の「実体」は **フラグを立てた履歴ノード (history node) が版ごとに丸ごと保持**する (Phase 2)。通常ノードは最新版のみ |
+| バイナリ / 大きいファイルの **差分転送** をするか | **しない**。転送は Phase 1 のまま全体転送 (blake3 検証)。差分の検知は `version` + size + CRC で足りる。CDC チャンク重複排除案は neco 決定 (2026-08-16) で取り下げ |
+| git との関係 | **git-LFS の P2P 版**。git はテキスト + `manifest.json` (=ポインタ集合) を管理し、実体 (blob) は Synergos が運ぶ。**履歴ノード = LFS サーバに相当**。git にバイナリを入れない |
 | 競合 | 同じ版番号で内容が違う Offer は **衝突として通知し、ローカル版を保持**。自動マージはしない (バイナリはマージ不能)。退避・選択 UI とロック機構は Phase 3 |
 
-理由: 3 択を LUDIARS の判断 4 軸 (AI 学習量 / 作業コスト / 目的達成度 / 主目的との一致度) で比べると
-下表のようになり、案 B (ポインタ + チャンク重複排除) が主目的「チームでアセットを揃えて
-作業を続ける」に最も一致し、実装コストも既存コード (CID / Block / Bitswap 骨格) の延長で済む。
+理由: 4 択を LUDIARS の判断 4 軸 (AI 学習量 / 作業コスト / 目的達成度 / 主目的との一致度) で比べると
+下表のようになる。当初は案 B (チャンク重複排除) を推していたが、**neco 決定 (2026-08-16) で案 D
+(履歴ノードフラグ) を採用**した。差分の機構を作らなくても「巻き戻せる」「揃う」は満たせ、
+実装は Phase 1 の転送層と manifest の上に薄く載る。
 
 | 案 | 内容 | AI 学習量 | 作業コスト | 目的達成度 | 主目的との一致 |
 |---|---|---|---|---|---|
 | A. 差分管理しない (最新ミラーのみ、現状) | 版番号 + 全体転送。履歴なし | 小 | **済** (現行実装) | 中: 揃うが大容量更新のたび全転送・巻き戻し不可 | 中 |
-| **B. ポインタ + チャンク重複排除 (推奨)** | `manifest.json` を git 管理、blob は CDC チャンクで P2P、差分転送のみ | 中 (CDC / DAG は既存設計の実装) | 中 (Phase 2 で 3〜4 タスク) | **高**: 大容量差分・巻き戻し (git checkout + `synergos checkout`)・重複排除 | **高** |
+| B. ポインタ + チャンク重複排除 (取り下げ) | `manifest.json` を git 管理、blob は CDC チャンクで P2P、差分転送のみ | 中 (CDC / DAG は既存設計の実装) | 中〜大 (Phase 2 で 3〜4 タスク、チャンク化・DAG・GC) | 高: 大容量差分・巻き戻し・重複排除 | 高 |
 | C. Synergos 内蔵の履歴チェーン (DESIGN §14 原案) | ファイルごとの直列チェーン、text diff / binary CID を Synergos が保持・GC | 大 (VCS を作り直す) | 大 | 高だが git と二重管理になり運用が割れる | 低〜中 (主目的は同期であって VCS 再発明ではない) |
+| **D. 履歴ノードフラグ (採用)** | 転送は A のまま。`history.enabled = true` のノードだけが受信/publish した全版の実体を丸ごと保持し、旧版 `FileWant` に応答する | 小 (既存の版付き Want/Offer と manifest の延長) | **小〜中** (保存・索引・応答・checkout/restore・保持ポリシー) | 高: 巻き戻し・喪失防止は満たす。差分転送はしない (帯域は LAN/Mesh で足りる前提) | **高** |
 
 案 C は DESIGN.md §14 に残っている原案だが、**git が既にある場所で第二の履歴系を持つと
-「どちらが正か」が常に問題になる**。Synergos は履歴を持たず、履歴は git に一本化する。
+「どちらが正か」が常に問題になる**。Synergos は「何が何版か」の履歴を持たず、それは git に一本化する。
+案 D の履歴ノードが持つのは **版の実体だけ**で、索引の正は依然 git 側の manifest にある
+(履歴ノードは「消えた実体を取り直せる倉庫」であって、第二の履歴系ではない)。
 
 ---
 
@@ -31,11 +35,12 @@ git (テキストのバージョン管理) との役割分担。
 
 | 用語 | 意味 | Synergos での扱い |
 |---|---|---|
-| **差分管理 (delta storage / history)** | 旧版を復元できるように差分や旧版を保存すること | **しない** (git に委ねる) |
-| **差分転送 (delta transfer)** | 変わった部分だけ送ること | **する** (Phase 2: チャンク重複排除) |
-| **重複排除 (dedup)** | 同じ内容を二度持たない/送らない | チャンクの blake3 で行う。差分転送はこの副産物 |
+| **差分管理 (delta storage)** | 旧版を差分として保存すること | **しない** |
+| **履歴の実体保持 (history retention)** | 旧版を丸ごと保存すること | **履歴ノードだけがする** (Phase 2、フラグで指定)。索引は git の manifest |
+| **差分転送 (delta transfer)** | 変わった部分だけ送ること | **しない** (全体転送のまま。差分検知は version + size + CRC) |
+| **重複排除 (dedup)** | 同じ内容を二度持たない/送らない | 履歴ノードの保管庫でファイル全体の blake3 で行う (同じ内容の版は 1 回しか置かない) |
 | **バージョン (version)** | 「同じパスの内容が何回変わったか」の単調増加番号 | `manifest.json` の `version`。転送の要否判定に使う (§2) |
-| **ポインタ / ロック** | パス → 内容ハッシュ (+size, version) の表 | `manifest.json` そのもの。git にコミットすると「そのコミット時点の資産集合」が固定される |
+| **ポインタ / ロック** | パス → version / size / CRC の表 | `manifest.json` そのもの。git にコミットすると「そのコミット時点の資産集合」が固定される |
 
 ---
 
@@ -70,82 +75,128 @@ git (テキストのバージョン管理) との役割分担。
   *.bin
   # Synergos の作業領域 (manifest.json だけはコミットする)
   .synergos/incoming/
-  .synergos/objects/
+  .synergos/history/
   .synergos/state.json
 ```
 
 - テキスト (コード / .meta / prefab など git で diff できるもの) → **git**
 - バイナリ・大容量 → **Synergos** (`project publish`)。git には `.gitignore` で入れない
 - `manifest.json` を **コミットする**と「このコミットの時点で assets/big.bin は v3 (crc …)」が残る。
-  巻き戻しは Phase 2 の `synergos project checkout` (§3.4) で実現。Phase 1 では
-  記録としてだけ使う (人が「v3 に戻して」と依頼する材料)
+  巻き戻しは Phase 2 の `synergos project checkout` / `restore` (§3.4) で、履歴ノードから
+  実体を取り直して実現。Phase 1 では記録としてだけ使う (人が「v3 に戻して」と依頼する材料)
 
 ---
 
-## 3. Phase 2: チャンク重複排除による差分転送 (推奨案 B の本体)
+## 3. Phase 2: 履歴ノード (history node) — 実体の履歴を持つノードをフラグで指定
 
-### 3.1 データモデル
+neco 決定 (2026-08-16): 差分管理 (CDC チャンク化・差分転送) は**やらない**。代わりに、
+設定フラグを立てたノードが publish / 受信した **各 version の実体を丸ごと保持**し、
+他ノードからの旧版要求に応答する。差分の検知は Phase 1 の `version` + size + CRC で行う。
+
+### 3.1 役割
+
+| ノード種別 | 作業ツリー | 保持する実体 | 応答する FileWant |
+|---|---|---|---|
+| 通常ノード (既定) | 最新版 | 最新版のみ (Phase 1 のまま) | 手元の manifest と一致する version だけ |
+| **履歴ノード** (`history.enabled = true`) | 最新版 (同じ) | 対象プロジェクトの **全 version** (保持ポリシー内) | **任意の version** (保管庫にあれば) |
+
+- 少人数チームでは **常駐ノード 1 台 (例: AWS Linux) を履歴ノード**にする。git-LFS サーバに相当する
+- 履歴ノードは複数あってよい (全部が保持する = 冗長化)。相互の同期はしない (各自が見た版を持つ)。
+  取り逃した版は、保持している別の履歴ノードから取得する。どの履歴ノードも保持していなければ、
+  通常ノードだけでは旧版を復元できない
+- 履歴ノードが 1 台も無い構成は Phase 1 と同じ挙動 (旧版は誰も持たない)。動くが巻き戻せない
+
+### 3.2 設定 (フラグ)
+
+daemon 設定 (`synergos.toml`) に `[history]` セクションを追加。**既定は無効**。
+
+```toml
+[history]
+enabled = true                # このノードを履歴ノードにする
+projects = ["*"]              # 対象プロジェクト (既定 "*" = 参加中すべて)
+root = ".synergos/history"    # 保管庫 (プロジェクト root 相対。別ドライブを指す絶対パスも可)
+max_versions_per_file = 0     # 0 = 無制限。N なら path ごとに新しい N 版を残す
+max_age_days = 0              # 0 = 無制限
+max_bytes = 0                 # 0 = 無制限。超えたら古い順に削る (manifest から参照中の版は削らない)
+```
+
+- 有効化/無効化は再起動で反映。無効化しても保管庫は消さない (`synergos history gc --purge` で明示削除)
+- `projects` に無いプロジェクトの版は保持しない (通常ノードとして振る舞う)
+
+### 3.3 保管庫のデータモデル
 
 ```
-File (path)  ──►  FileManifest { chunks: [ChunkRef], total_hash, size, version }
-                          │
-                          └─► ChunkRef { hash: blake3, offset, len }
-                                        │
-                                        └─► Object store  .synergos/objects/<hh>/<hash>
+<root>/
+  objects/<hh>/<blake3 hex>            # 実体。ファイル全体の blake3 で内容アドレス (同じ内容は 1 回)
+  objects/<hh>/<blake3 hex>.meta.json  # 復旧用 sidecar (refs: project / path / version / size / stored_at)
+  index.json                            # (project_id, path, version) -> ObjectRef
 ```
 
-- **チャンク分割は Content-Defined Chunking (FastCDC)**: 平均 1 MiB (min 256 KiB / max 4 MiB)。
-  固定長だと先頭に 1 バイト挿入されただけで全チャンクがずれるので、境界は内容で決める。
-  PSD / FBX / 音声 / 圧縮済み .png のような「一部だけ変わる大ファイル」に効く
-- **チャンク ID = blake3(内容)** (既存 `Cid` / `Block` をそのまま使う)
-- **Object store はプロジェクト内 `.synergos/objects/`**。git ignore 対象。
-  同じ内容のチャンクはパスが違っても 1 回しか持たない (重複排除)
-- `manifest.json` の各エントリに `content_hash` (ファイル全体の blake3) と
-  `chunks` の要約 (件数・マニフェスト blob の CID) を追加。**format: 2**
-- git にコミットして意味がある値 (path → version / size / content_hash) と、ノード固有の値
-  (`publisher`, `updated_at`, 受信時刻) を **`manifest.json` と `.synergos/state.json` に分ける**。
-  Phase 1 の manifest は両方を 1 ファイルに持っているので、コミットすると A と B で
-  `publisher` の差分ノイズが出る (Phase 2 で分離、format 2 への移行時に自動変換)
+```json
+{ "format": 1,
+  "entries": {
+    "myproj": {
+      "assets/big.bin": {
+        "3": { "hash": "b3:…", "size": 524288000, "crc": 2894113452,
+               "stored_at": 1755250000000, "publisher": "peer-abcd…", "source": "received" },
+        "2": { "hash": "b3:…", "size": 0, "stored_at": 0, "source": "published" }
+      }
+    }
+  }
+}
+```
 
-### 3.2 転送
+- 版の実体は **チャンク化しない**。ファイル全体を objects に置く。重複排除はファイル単位のみ
+- 同一内容は複数の project / path / version から参照され得るため、sidecar の `refs` にはそれぞれの
+  index エントリを列挙する。`index.json` は atomic write (tmp + rename)。破損時は objects の
+  `.meta.json` を走査して再構築する
+- 作業ツリー側は Phase 1 と同じ (最新版が置かれる)。履歴ノードは受信/publish 完了時に
+  **作業ツリーへの反映と同時に objects へハードリンク or コピー**する (同一ボリュームならハードリンク)
+- Phase 1 の manifest.json は変更しない (format 1 のまま)。履歴ノードの索引は node ローカルの
+  `<root>/index.json` (既定では `.synergos/history/index.json`) で、git には**入れない**
+  (`.gitignore` に `.synergos/history/`)
 
-1. publisher: publish 時にチャンク分割 → objects に無いチャンクだけ書く → FileManifest を作り
-   `FileOffer{ version, content_hash, manifest_cid }` を gossip
-2. receiver: 手元の旧版 FileManifest と突合し **無いチャンクだけ** Bitswap で要求 (`want` = chunk hash 一覧)
-3. 受信したチャンクを objects に置き、旧版のチャンク + 新チャンクから
-   `.synergos/incoming/<uuid>.part` を組み立て → blake3 全体検証 → rename
-4. 期待効果: 500 MB のファイルの 10 % 更新 → 送るのは ~50 MB + マニフェスト
+### 3.4 転送と git 統合コマンド
 
-既存コードとの対応: `synergos-net/src/content/` (Block / Cid / MemoryContentStore / BitswapSession) は
-このためのもの。**MemoryContentStore を `.synergos/objects/` 永続ストアに差し替える**のが最初の一歩。
+転送プロトコルは Phase 1 のまま (`FileOffer{version}` / `FileWant{version}` / 全体転送 + blake3)。
+変わるのは **誰が旧版 FileWant に応答するか**だけ:
 
-### 3.3 GC
-
-- objects は「現在の manifest から参照されているチャンク」+「直近 N 世代 (既定 2) の
-  FileManifest が参照するチャンク」だけ残し、他は `synergos project gc` で削除
-- 直近 N 世代を残す理由: 巻き戻し (§3.4) と、書き戻し途中の再送を安くするため。
-  それ以上の履歴は git がポインタを持ち、実体は **publisher か常駐ノードが持っていれば取り直せる**
-  (誰も持っていなければ取れない = git-LFS サーバが消えたのと同じ。常駐ノード運用が前提)
-
-### 3.4 git との統合コマンド
+1. 通常ノードは手元 manifest の version と一致する FileWant にだけ応答 (現状)
+2. 履歴ノードは `index.json` に (project, path, version) があれば応答し、objects から送る
+3. 要求側は最初に返ってきた Offer から受信 (Phase 1 と同じ)。ハッシュ検証で真正性を確認
 
 | コマンド | 動作 |
 |---|---|
-| `synergos project publish <id> <files...>` | (既存) チャンク化 + manifest 更新 + Offer |
+| `synergos project publish <id> <files...>` | (既存) manifest 更新 + Offer。履歴ノードなら自分の publish 版も objects に置く |
 | `synergos project status <id>` | manifest と作業ツリーの差 (変更 / 未 publish / 未取得) を表示 — `git status` 相当 |
-| `synergos project checkout <id> [--manifest <path>]` | 指定 manifest (既定: 作業ツリーの `.synergos/manifest.json`、= `git checkout` 後の状態) に**作業ツリーを合わせる**。足りないチャンクはピアから取得。これで「そのコミット時点のアセット」が復元できる |
-| `synergos project gc <id>` | §3.3 |
+| `synergos project checkout <id> [--manifest <path>]` | 指定 manifest (既定: 作業ツリーの `.synergos/manifest.json`、= `git checkout` 後の状態) に**作業ツリーを合わせる**。手元に無い版は FileWant(version) を出し、その版を保持する履歴ノードから取る |
+| `synergos project restore <id> <path> --version N` | 1 ファイルだけ指定版に戻す (manifest も N に書き戻す) |
+| `synergos history ls <id> [<path>]` | 履歴ノード上の保持版一覧 (version / size / stored_at / source) |
+| `synergos history gc [--purge] [--keep-manifest <path>...]` | §3.5 の保持ポリシーを適用。`--purge` は保管庫全消去 |
 
 想定フロー: `git pull` → `manifest.json` が更新される → `synergos project checkout myproj` →
-アセットが揃う。逆に、アセットを publish したら `manifest.json` が変わるので
-**それをコミットして push** する (テキストの変更と同じ PR に載る)。
+アセットが揃う (新しい版は publisher から、古い版に戻す場合は履歴ノードから)。逆に、
+アセットを publish したら `manifest.json` が変わるので**それをコミットして push** する。
 
-### 3.5 なぜ text diff (unified patch) をやらないか
+### 3.5 保持ポリシー (GC)
 
-DESIGN §14.2 の「テキストは git diff をチェーンに書く」は捨てる。テキストは git が
-既に完璧に扱うし、Synergos 側でパッチ適用を持つと **git と二重の真実**になる。
-テキストを Synergos で運びたい場面 (git を使わない相手 / 生成物) でも、
-チャンク重複排除で十分小さくなる (テキストは小さい)。
+履歴ノードだけが対象。通常ノードには GC 対象がない。
+
+- 削除候補 = `max_versions_per_file` / `max_age_days` / `max_bytes` のいずれかを超えた版
+- **削らない版**: 手元 manifest が参照する最新版、および `--keep-manifest <path>` で渡された
+  manifest (例: git の各リリースタグ時点) が参照する版
+- objects はどの index エントリからも参照されなくなったら削除 (参照カウントは index を走査して数える)
+
+### 3.6 なぜ差分 (CDC / text diff) をやらないか
+
+- 主目的は「チームでアセットを揃えて作業を続ける」で、**巻き戻せる・消えない**が満たせれば足りる。
+  差分転送は帯域の最適化であり、LAN / Cloudflare Mesh の帯域では必須ではない
+- CDC + DAG + チャンク GC は実装・検証とも重く、壊れたときの調査が難しい。履歴ノードは
+  「ファイルを丸ごと置いてあるだけ」なので、最悪 index が壊れても objects を見れば復旧できる
+- テキストは git が既に完璧に扱う。Synergos 側でパッチ適用を持つと **git と二重の真実**になる
+  (DESIGN §14.2 の text diff チェーンは捨てる)
+- 将来「大容量の一部更新が頻繁で帯域が足りない」が実測で出たら、履歴ノードの objects を
+  チャンク化する形で案 B を**履歴ノードの内側だけに**後付けできる (通常ノードの挙動は変えない)
 
 ---
 
@@ -165,12 +216,13 @@ DESIGN §14.2 の「テキストは git diff をチェーンに書く」は捨�
 
 ## 5. 決めごとまとめ (実装者向け)
 
-1. Synergos は履歴を持たない。`.synergos/manifest.json` が唯一の状態で、git がそれを版管理する
-2. `manifest.json` は **git にコミットする**、`.synergos/objects/` `.synergos/incoming/` は **ignore**
-3. version は path ごとの単調増加。転送要否は version と content_hash で決める (時刻は使わない)
-4. 差分転送はチャンク重複排除 (CDC + blake3)。バイト差分 / パッチは作らない
-5. テキストの diff は git の仕事。Synergos は種別を区別せず全部チャンクとして運ぶ
+1. Synergos は「何が何版か」の履歴を持たない。`.synergos/manifest.json` が唯一の状態で、git がそれを版管理する
+2. `manifest.json` は **git にコミットする**、`.synergos/history/` `.synergos/incoming/` は **ignore**
+3. version は path ごとの単調増加。転送要否は version・size・CRC で決める (時刻は使わない)
+4. 差分管理・差分転送はしない。**履歴の実体は `history.enabled = true` のノードだけが版ごとに丸ごと保持**し、旧版 FileWant に応答する
+5. テキストの diff は git の仕事。Synergos は種別を区別せず全部ファイル単位で運ぶ
 6. 競合は通知してローカル版を保持する。Phase 3 で別名退避と手動選択を追加し、自動マージはしない
+7. 履歴ノードの保管庫は content-addressed (ファイル全体 blake3) + node ローカル index。git には入れない
 
 ---
 
@@ -179,3 +231,4 @@ DESIGN §14.2 の「テキストは git diff をチェーンに書く」は捨�
 - 現状の完成度と残作業: [operations-readiness.md](operations-readiness.md)
 - 2 台で動かす手順: [two-node-operations.md](two-node-operations.md)
 - 原案 (チェーン / Want-Offer 台帳): [../DESIGN.md](../DESIGN.md) §14–§16 (本設計で §14.2/§14.3 は置き換え)
+- 決定履歴: 2026-08-15 案 B (CDC 差分転送) を推奨 → 2026-08-16 neco 決定で案 D (履歴ノードフラグ) に変更
