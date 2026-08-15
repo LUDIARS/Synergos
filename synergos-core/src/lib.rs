@@ -4,6 +4,7 @@
 pub mod catalog_sync;
 pub mod cli;
 pub mod conflict;
+pub mod control_heartbeat;
 pub mod event_bus;
 pub mod exchange;
 pub mod invite_token;

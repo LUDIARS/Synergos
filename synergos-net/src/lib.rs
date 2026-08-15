@@ -13,6 +13,7 @@ pub mod error;
 pub mod gossip;
 pub mod identity;
 pub mod mesh;
+pub mod mesh_ip;
 pub mod promotion;
 pub mod quic;
 pub mod relay;

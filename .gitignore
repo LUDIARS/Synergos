@@ -1,1 +1,8 @@
 /target
+
+# synergos-control のレジストリ (組織メンバーのメール / node key ハッシュを含む)
+# と、そこから生成される一時ファイル・実運用設定をリポジトリに入れない。
+synergos-control-store.json
+synergos-control-store.*.tmp
+/control.toml
+/.revisor-version

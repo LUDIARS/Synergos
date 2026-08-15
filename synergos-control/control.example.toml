@@ -1,0 +1,21 @@
+# synergos-control 設定サンプル
+#
+# 秘密情報はここに書かない。以下の環境変数で渡す:
+#   SYNERGOS_CONTROL_ADMIN_TOKEN : 管理 API の bearer トークン (32 bytes 以上のランダム文字列)
+#   CLOUDFLARE_API_TOKEN         : Cloudflare API token
+#     必要権限: Account > Cloudflare Tunnel:Edit, Account > Zero Trust:Edit,
+#               Account > Device Posture:Read (registrations 参照)
+
+# 管理 API の bind 先。管理面は loopback 固定を推奨 (外部公開しない)。
+# daemon heartbeat を受ける場合のみ Mesh から到達できる必要があるが、
+# その場合も 0.0.0.0 ではなく管制サーバー自身の Mesh IP に限定すること
+# (管理 API も同じリスナー上にあり、管理トークンが唯一の防壁になる)。
+bind_addr = "127.0.0.1:4250"
+
+# レジストリ永続化先 (JSON)。node key のハッシュを含むため、
+# 実運用では管制サーバー専用ユーザのみ読める権限に置く。
+store_path = "synergos-control-store.json"
+
+[cloudflare]
+# Cloudflare dashboard → 対象アカウントの Account ID
+account_id = ""

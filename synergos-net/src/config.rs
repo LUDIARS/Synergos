@@ -70,10 +70,52 @@ pub struct NetConfig {
     /// 手動で「probe しない」運用にしたいときだけ false に。
     #[serde(default = "default_true_auto_promote")]
     pub auto_promote: bool,
+    /// 管制サーバー (synergos-control) への heartbeat 報告。
+    /// `heartbeat_url` が空 (既定) なら無効。設定した場合は node_id と
+    /// node key (環境変数) が必須で、欠けていると起動を拒否する (fail-fast)。
+    #[serde(default)]
+    pub control: ControlReportConfig,
 }
 
 fn default_true_auto_promote() -> bool {
     true
+}
+
+/// 管制サーバーへの heartbeat 報告設定。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ControlReportConfig {
+    /// 管制サーバーの heartbeat エンドポイント
+    /// (例 `http://100.96.0.10:4250/v1/heartbeat`)。空なら報告しない。
+    #[serde(default)]
+    pub heartbeat_url: String,
+    /// 管制サーバーが発行したノード ID。
+    #[serde(default)]
+    pub node_id: String,
+    /// ノード認証キーを格納した環境変数名。キー本体は設定ファイルに書かない。
+    #[serde(default = "default_node_key_env")]
+    pub node_key_env: String,
+    /// heartbeat 送信間隔 (秒)。
+    #[serde(default = "default_heartbeat_interval_secs")]
+    pub interval_secs: u64,
+}
+
+impl Default for ControlReportConfig {
+    fn default() -> Self {
+        Self {
+            heartbeat_url: String::new(),
+            node_id: String::new(),
+            node_key_env: default_node_key_env(),
+            interval_secs: default_heartbeat_interval_secs(),
+        }
+    }
+}
+
+fn default_node_key_env() -> String {
+    "SYNERGOS_NODE_KEY".to_string()
+}
+
+fn default_heartbeat_interval_secs() -> u64 {
+    60
 }
 
 /// CatalogManager のチューニングパラメータ。
@@ -319,6 +361,7 @@ impl Default for NetConfig {
             bootstrap_urls: Vec::new(),
             force_relay_only: false,
             auto_promote: true,
+            control: ControlReportConfig::default(),
         }
     }
 }

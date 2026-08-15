@@ -6525,6 +6525,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "synergos-control"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "blake3",
+ "clap",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml 0.8.2",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "synergos-core"
 version = "0.1.0"
 dependencies = [

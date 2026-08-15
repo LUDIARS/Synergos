@@ -17,6 +17,7 @@ Synergos は **4つのレイヤ** で構成されます:
 | **Core Daemon** | `synergos-core` | **常駐バイナリ** | EventBus・IPCサーバー・CLI制御・ファイル転送・プレゼンス管理 |
 | **GUI Application** | `synergos-gui` | **GUIバイナリ** | ネットワークモニター・転送管理・ピア管理（SourceTree的な専用GUI） |
 | **Ars Plugin** | `ars-plugin-synergos` | ライブラリ | IPC経由でcoreに接続する薄いアダプタ。Ars EventBus ↔ IPC ブリッジ |
+| **Control Plane** | `synergos-control` | **常駐バイナリ** | 管制サーバー。組織別ノードレジストリ + Cloudflare Mesh 自動化 + dark node 検出 ([docs/mesh-operations.md](docs/mesh-operations.md)) |
 
 ### git ↔ SourceTree モデル
 

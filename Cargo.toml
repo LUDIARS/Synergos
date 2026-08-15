@@ -5,6 +5,7 @@ members = [
     "synergos-core",
     "synergos-gui",
     "synergos-relay",
+    "synergos-control",
     "ars-plugin-synergos",
     "synergos-tauri/src-tauri",
 ]

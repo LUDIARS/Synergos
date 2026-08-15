@@ -296,6 +296,14 @@ impl Daemon {
 
         let ipc_server = IpcServer::new(self.ctx.clone());
 
+        // 設定不備はバックグラウンドタスクを起動する前に検出する。
+        // 起動後に `?` で戻ると、既に spawn 済みのタスクをクリーンアップできない。
+        let control_heartbeat_reporter =
+            crate::control_heartbeat::HeartbeatReporter::from_config(
+                &self.net.net_config.control,
+                self.net.local_peer_id.clone(),
+            )?;
+
         let shutdown_tx = self.ctx.shutdown_tx.clone();
 
         // OS シグナルハンドラを設定
@@ -375,6 +383,11 @@ impl Daemon {
                     }
                 })
             });
+
+        // 管制サーバーへの heartbeat (opt-in)。peer_id と Mesh IP を定期報告し、
+        // synergos-control 側で peer_id ↔ Mesh IP の照合に使われる。
+        let control_heartbeat_task = control_heartbeat_reporter
+            .map(|reporter| reporter.spawn(self.ctx.shutdown_tx.subscribe()));
 
         // bootstrap_urls: 起動時に config 指定の peer-info URL に自動接続する。
         // 失敗は warn で記録するだけで daemon 起動は継続する (best-effort)。
@@ -456,6 +469,9 @@ impl Daemon {
         gossip_fanout_task.abort();
         catalog_sync_task.abort();
         if let Some(t) = peer_info_task {
+            t.abort();
+        }
+        if let Some(t) = control_heartbeat_task {
             t.abort();
         }
         if let Some(t) = bootstrap_task {
