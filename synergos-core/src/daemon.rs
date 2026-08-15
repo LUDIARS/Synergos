@@ -194,12 +194,50 @@ impl Daemon {
                 Arc::new(move |project_id, file_id| pm.resolve_file_path(project_id, file_id));
             exchange_inner.attach_quic(net.quic.clone(), resolver);
         }
+        // 受信一時ディレクトリ (プロジェクト内) と受信完了フック (マニフェスト記録)
+        {
+            let pm = project_manager.clone();
+            let incoming: crate::exchange::IncomingDirResolver = Arc::new(move |project_id| {
+                pm.project_root(project_id).map(|root| {
+                    root.join(crate::manifest::META_DIR)
+                        .join(crate::manifest::INCOMING_DIR)
+                })
+            });
+            let pm = project_manager.clone();
+            let received: crate::exchange::ReceivedHook =
+                Arc::new(move |project_id, file_id, version, size, crc, sender| {
+                    let pm = pm.clone();
+                    Box::pin(async move {
+                        if let Err(e) = pm
+                            .record_received_file(
+                                &project_id,
+                                &file_id.0,
+                                version,
+                                size,
+                                crc,
+                                &sender.0,
+                            )
+                            .await
+                        {
+                            tracing::warn!(
+                                "manifest record failed for {}/{}: {e}",
+                                project_id,
+                                file_id
+                            );
+                        }
+                    })
+                });
+            exchange_inner.attach_receive_hooks(incoming, received);
+        }
         // Bitswap 用 ContentStore: ServiceContext と同じインスタンスを
         // Exchange にも流して、publish_updates 時に RootCatalog snapshot を
         // put → BSW1 経路で相手が引けるようにする (#25/#26)。
         let shared_content_store = Arc::new(synergos_net::content::MemoryContentStore::new());
         exchange_inner.attach_content_store(shared_content_store.clone());
         let exchange = Arc::new(exchange_inner);
+        // 起動時復元: 各プロジェクトのマニフェストから shared_files を再構築する
+        // (publisher 再起動後も FileWant に応答でき、受信側は既取得分を再 pull しない)。
+        crate::restore::restore_shared_files_from_manifests(&project_manager, &exchange).await;
         let presence = Arc::new(PresenceService::with_network_and_mode(
             event_bus.clone(),
             Some(dht.clone()),
@@ -226,6 +264,7 @@ impl Daemon {
             catalogs: Arc::new(dashmap::DashMap::new()),
             content_store: shared_content_store,
             quic: net.quic.clone(),
+            identity: Some(net.identity.clone()),
         });
 
         // 永続化されていた project を restore した後、それぞれの
@@ -776,10 +815,20 @@ fn spawn_gossip_subscriber(
                 _ = shutdown_rx.recv() => break,
                 msg = rx.recv() => {
                     match msg {
-                        Ok((_topic, GossipMessage::FileWant { requester, file_id, version })) => {
-                            ctx.exchange.handle_file_want(requester, file_id, version);
+                        Ok((topic, GossipMessage::FileWant { requester, file_id, version })) => {
+                            if let Some(project_id) = topic.0.strip_prefix("project/") {
+                                ctx.exchange
+                                    .handle_file_want(project_id, requester, file_id, version);
+                            }
                         }
                         Ok((topic, GossipMessage::FileOffer { sender, file_id, version, size, crc, content_hash: _ })) => {
+                            let Some(project_id) = topic.0.strip_prefix("project/").map(str::to_string) else {
+                                tracing::warn!(
+                                    "ignoring FileOffer on non-project topic {}",
+                                    topic.0
+                                );
+                                continue;
+                            };
                             ctx.exchange.handle_file_offer(sender.clone(), file_id.clone(), version, size, crc);
                             // auto-pull: project が open & 自分の Offer ではない & 未保有なら
                             // FileWant を発火する。これにより publisher 側 handle_file_want が
@@ -788,27 +837,47 @@ fn spawn_gossip_subscriber(
                             // 受信側の `handle_incoming_transfer` が完了時に shared_files へ
                             // 登録するので、`has_shared_file` 経由で再 pull は抑止される
                             // (同一 daemon プロセス内のみ)。
+                            let local = ctx.exchange.shared_file_record(&project_id, &file_id);
+                            let content_conflict = local.as_ref().is_some_and(|record| {
+                                record.version == version
+                                    && (record.file_size != size || record.crc != crc)
+                            });
+                            if content_conflict {
+                                ctx.conflict_manager.record_version_conflict(
+                                    &project_id,
+                                    &file_id,
+                                    version,
+                                    ctx.exchange.local_peer_id(),
+                                    version,
+                                    &sender,
+                                );
+                                tracing::warn!(
+                                    "conflicting FileOffer retained local content: project={} file={} version={}",
+                                    project_id,
+                                    file_id,
+                                    version
+                                );
+                                continue;
+                            }
                             let auto_pull_eligible = sender != *ctx.exchange.local_peer_id()
-                                && !ctx.exchange.has_shared_file(&file_id, version);
+                                && !ctx.exchange.has_shared_file(&project_id, &file_id, version);
                             if auto_pull_eligible {
-                                if let Some(project_id) = topic.0.strip_prefix("project/").map(|s| s.to_string()) {
-                                    if ctx.project_manager.project_root(&project_id).is_some() {
-                                        let exchange = ctx.exchange.clone();
-                                        let req = FetchRequest {
-                                            project_id,
-                                            file_id: FileId(file_id.0.clone()),
-                                            source_peer: Some(sender.clone()),
-                                            priority: TransferPriority::Interactive,
-                                            version,
-                                        };
-                                        tokio::spawn(async move {
-                                            if let Err(e) = exchange.fetch_file(req).await {
-                                                tracing::debug!(
-                                                    "auto-pull on FileOffer failed: {e}"
-                                                );
-                                            }
-                                        });
-                                    }
+                                if ctx.project_manager.project_root(&project_id).is_some() {
+                                    let exchange = ctx.exchange.clone();
+                                    let req = FetchRequest {
+                                        project_id,
+                                        file_id: FileId(file_id.0.clone()),
+                                        source_peer: Some(sender.clone()),
+                                        priority: TransferPriority::Interactive,
+                                        version,
+                                    };
+                                    tokio::spawn(async move {
+                                        if let Err(e) = exchange.fetch_file(req).await {
+                                            tracing::debug!(
+                                                "auto-pull on FileOffer failed: {e}"
+                                            );
+                                        }
+                                    });
                                 }
                             }
                         }

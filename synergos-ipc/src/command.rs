@@ -46,6 +46,11 @@ pub enum IpcCommand {
         project_id: String,
         /// トークンの有効期限（秒）。None の場合は無期限
         expires_in_secs: Option<u64>,
+        /// 自己完結型トークンに埋める、この daemon の `/peer-info` URL
+        /// (例 `http://100.96.0.5:7780`)。None なら config
+        /// (`peer_info_advertised_url`) → 導出 → 従来型 (同一 daemon 内限定) の順。
+        #[serde(default)]
+        peer_info_url: Option<String>,
     },
     /// 招待トークンでプロジェクトに参加
     ProjectJoin {

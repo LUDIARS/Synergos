@@ -86,12 +86,14 @@ GUI 不要。同じ CLI バイナリを別サブコマンドで呼ぶと IPC 経
 ## 最小の 2 ノード動作手順
 
 ローカル検証用。片方がファイルを公開 → もう片方が自動で追従することを確認します。
+**別マシン 2 台** で行う場合は firewall / listen 設定 / `invite --url` が要るので
+[two-node-operations.md](two-node-operations.md) を先に読んでください。
 
 ```bash
 # ── マシン A ──
 ./target/release/synergos-core start                              # 1. daemon 起動
 ./target/release/synergos-core project open myproj /path/to/A     # 2. プロジェクト作成
-./target/release/synergos-core project invite myproj              # 3. 招待トークン発行
+./target/release/synergos-core project invite myproj --url http://<A>:7780   # 3. 招待トークン発行
 # → 出力されたトークンを B に渡す
 
 # ── マシン B ──
@@ -119,7 +121,8 @@ GUI 不要。同じ CLI バイナリを別サブコマンドで呼ぶと IPC 経
 |---|---|
 | `synergos-gui` が "failed to connect" | daemon が起動していない。`synergos-core start` を先に。 |
 | `synergos-core status` が無応答 | IPC ソケットの uid チェックに失敗している可能性。daemon を起動したユーザと同じ UID で呼ぶこと。 |
-| 2 ノードが `peer list` でお互いを見ない | Cloudflare Tunnel / cloudflared バイナリが PATH にあるか確認。ローカルネットワークなら DHT/gossip の propagation を数秒待つ。 |
+| 2 ノードが `peer list` でお互いを見ない | A 側の QUIC (UDP) / peer-info (TCP) ポートが firewall で開いているか、`invite --url` の URL が B から届くか。詳細は [two-node-operations.md §5](two-node-operations.md)。 |
+| `project join` が `invalid invite token` | トークンが `syn1.` で始まっていない (発行 daemon 内限定の従来型)。ホストで `--url` 付きで再発行。 |
 | `project open` が "invalid path" | 絶対パス or 存在するディレクトリを渡す必要あり。`-n` で表示名を付けると List で識別しやすい。 |
 
 より詳細な CLI リファレンスは [projects-and-peers.md](projects-and-peers.md)、

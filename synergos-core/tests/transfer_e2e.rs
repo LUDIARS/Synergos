@@ -113,6 +113,7 @@ async fn execute_send_and_handle_incoming_roundtrip() {
         total_size,
         chunk_count,
         total_hash,
+        version: 1,
     };
 
     // クライアント側でも ActiveTransfer を用意しておく (execute_send が更新する対象)

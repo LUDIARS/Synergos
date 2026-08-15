@@ -46,6 +46,7 @@ clap = { version = "4", features = ["derive"] }
 dashmap = "6"
 uuid = { version = "1", features = ["v4"] }
 crc32fast = "1"
+base64 = "0.22"
 thiserror = "2"
 anyhow = "1"
 
@@ -60,6 +61,7 @@ libc = "0.2"
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_Security",
+    "Win32_Storage_FileSystem",
     "Win32_System_Pipes",
     "Win32_System_Threading",
 ] }

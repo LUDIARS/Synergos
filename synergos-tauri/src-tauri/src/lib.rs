@@ -108,6 +108,7 @@ async fn project_invite(
     let cmd = IpcCommand::ProjectCreateInvite {
         project_id,
         expires_in_secs,
+        peer_info_url: None,
     };
     match call_daemon(cmd).await? {
         IpcResponse::InviteToken { token, expires_at } => Ok(InviteToken { token, expires_at }),

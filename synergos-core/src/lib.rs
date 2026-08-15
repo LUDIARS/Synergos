@@ -6,10 +6,14 @@ pub mod cli;
 pub mod conflict;
 pub mod event_bus;
 pub mod exchange;
+pub mod invite_token;
 pub mod peer_bootstrap;
 pub mod peer_info_server;
+pub mod peer_join;
 pub mod presence;
 pub mod project;
 
 pub mod daemon;
 pub mod ipc_server;
+pub mod manifest;
+pub mod restore;

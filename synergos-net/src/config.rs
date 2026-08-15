@@ -23,6 +23,13 @@ pub struct NetConfig {
     /// `127.0.0.1:7780` を設定し、Cloudflare Tunnel 等で外部に publish する想定。
     #[serde(default)]
     pub peer_info_listen_addr: Option<SocketAddr>,
+    /// 他ノードから見た、この daemon の `/peer-info` サーブレット URL
+    /// (例 `http://100.96.0.5:7780`, `https://node1.example.com`)。
+    /// 自己完結型招待トークン (`project invite`) に埋め込まれる。未設定なら
+    /// `peer_info_listen_addr` が具体 IP のときだけそこから導出し、
+    /// それも無理なら従来型 (同一 daemon 内でしか使えない) トークンになる。
+    #[serde(default)]
+    pub peer_info_advertised_url: Option<String>,
     /// `/peer-info` で告知する QUIC エンドポイント (例 `[2406:da14:...]:7777`)。
     /// 通常は **未設定 (= auto)** で十分。Cloudflare Tunnel が Cloudflare proxied
     /// DNS の裏でホストする公開ノードでは、proxy が UDP/QUIC を通さない (HTTPS のみ)
@@ -307,6 +314,7 @@ impl Default for NetConfig {
             },
             catalog: CatalogConfig::default(),
             peer_info_listen_addr: None,
+            peer_info_advertised_url: None,
             quic_advertised_addr: None,
             bootstrap_urls: Vec::new(),
             force_relay_only: false,

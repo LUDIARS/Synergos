@@ -15,6 +15,9 @@ use synergos_net::gossip::GossipNode;
 use synergos_net::types::{FileId, TopicId};
 
 use crate::event_bus::SharedEventBus;
+use crate::manifest::{
+    normalize_rel_path, safe_join_under_root, BumpOutcome, ManifestEntry, ProjectManifest,
+};
 
 // ── 型定義 ──
 
@@ -108,6 +111,14 @@ pub enum ProjectError {
     InvalidInvite,
     #[error("invite token expired")]
     InviteExpired,
+    #[error("invite expiration is too large")]
+    InvalidInviteExpiration,
+    #[error("invalid project root: {0}")]
+    InvalidRoot(String),
+    #[error("manifest error: {0}")]
+    Manifest(String),
+    #[error("invalid project id")]
+    InvalidProjectId,
     /// max_peers 検査が実装された時に使用される (現状未使用)。
     #[error("max peers reached for project: {0}")]
     MaxPeersReached(String),
@@ -190,6 +201,12 @@ pub struct ProjectManager {
     /// (`out_path_resolver`) に使われる。FileId の中身が relative path
     /// そのままでなくても動くよう、名前解決はこちら経由に寄せる。
     file_paths: DashMap<(String, FileId), PathBuf>,
+    /// project_id → 読み込み済みマニフェスト (`<root>/.synergos/manifest.json`)。
+    /// open_project 時に読み込み、publish / 受信完了のたびに更新 + 保存する。
+    manifests: DashMap<String, ProjectManifest>,
+    /// project_id ごとのマニフェスト更新ロック。メモリ更新から原子的保存までを
+    /// 直列化し、古いスナップショットによる後勝ち上書きを防ぐ。
+    manifest_locks: DashMap<String, Arc<tokio::sync::Mutex<()>>>,
     event_bus: SharedEventBus,
     /// Gossipsub（任意）: プロジェクト開閉時にトピック subscribe/unsubscribe を行う
     gossip: Option<Arc<GossipNode>>,
@@ -230,6 +247,8 @@ impl ProjectManager {
             projects: DashMap::new(),
             invites: DashMap::new(),
             file_paths: DashMap::new(),
+            manifests: DashMap::new(),
+            manifest_locks: DashMap::new(),
             event_bus,
             gossip,
             state_path: None,
@@ -247,6 +266,8 @@ impl ProjectManager {
             projects: DashMap::new(),
             invites: DashMap::new(),
             file_paths: DashMap::new(),
+            manifests: DashMap::new(),
+            manifest_locks: DashMap::new(),
             event_bus,
             gossip,
             state_path: Some(state_path),
@@ -320,14 +341,17 @@ impl ProjectManager {
     ///   経由で登録した場合の既定動作との互換性を保つ)
     pub fn resolve_file_path(&self, project_id: &str, file_id: &FileId) -> Option<PathBuf> {
         let root = self.project_root(project_id)?;
-        if let Some(rel) = self
+        let rel = if let Some(rel) = self
             .file_paths
             .get(&(project_id.to_string(), file_id.clone()))
         {
-            return Some(root.join(&*rel));
-        }
-        // fallback: FileId をそのまま相対パスとして扱う
-        Some(root.join(&file_id.0))
+            normalize_rel_path(&rel)
+        } else {
+            file_id.0.clone()
+        };
+        // FileId はネットワーク由来。字句的な脱出に加えて、既存の symlink / junction
+        // を経由してプロジェクト外へ出るパスも拒否する。
+        safe_join_under_root(&root, &rel)
     }
 
     /// 期限切れ招待トークンを除去
@@ -353,6 +377,114 @@ impl ProjectManager {
         }
     }
 
+    // ── マニフェスト (ファイルバージョン台帳) ──
+
+    async fn load_manifest_unlocked(&self, project_id: &str) -> Result<(), std::io::Error> {
+        let Some(root) = self.project_root(project_id) else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                project_id,
+            ));
+        };
+        let manifest = ProjectManifest::load(&root, project_id).await?;
+        self.manifests.insert(project_id.to_string(), manifest);
+        Ok(())
+    }
+
+    fn manifest_lock(&self, project_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+        self.manifest_locks
+            .entry(project_id.to_string())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    }
+
+    /// publish 時のバージョン発番 + 保存。内容が同じなら据え置き。
+    pub async fn bump_file_version(
+        &self,
+        project_id: &str,
+        rel: &str,
+        size: u64,
+        crc: u32,
+        publisher: &str,
+    ) -> Result<BumpOutcome, std::io::Error> {
+        let lock = self.manifest_lock(project_id);
+        let _guard = lock.lock().await;
+        if !self.manifests.contains_key(project_id) {
+            self.load_manifest_unlocked(project_id).await?;
+        }
+        let root = self
+            .project_root(project_id)
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, project_id))?;
+        let mut snapshot = self
+            .manifests
+            .get(project_id)
+            .map(|manifest| manifest.value().clone())
+            .unwrap_or_else(|| ProjectManifest::new(project_id));
+        let outcome = snapshot.bump(
+            rel,
+            size,
+            crc,
+            publisher,
+            synergos_net::types::now_ms(),
+        );
+        if matches!(outcome, BumpOutcome::Bumped(_)) {
+            snapshot.save(&root).await?;
+            self.manifests.insert(project_id.to_string(), snapshot);
+        }
+        Ok(outcome)
+    }
+
+    /// 受信完了の記録 + 保存。手元より新しいときだけ書く。
+    pub async fn record_received_file(
+        &self,
+        project_id: &str,
+        rel: &str,
+        version: u64,
+        size: u64,
+        crc: u32,
+        publisher: &str,
+    ) -> Result<bool, std::io::Error> {
+        let lock = self.manifest_lock(project_id);
+        let _guard = lock.lock().await;
+        if !self.manifests.contains_key(project_id) {
+            self.load_manifest_unlocked(project_id).await?;
+        }
+        let root = self
+            .project_root(project_id)
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, project_id))?;
+        let mut snapshot = self
+            .manifests
+            .get(project_id)
+            .map(|manifest| manifest.value().clone())
+            .unwrap_or_else(|| ProjectManifest::new(project_id));
+        let changed = snapshot.record_received(
+            rel,
+            version,
+            size,
+            crc,
+            publisher,
+            synergos_net::types::now_ms(),
+        );
+        if changed {
+            snapshot.save(&root).await?;
+            self.manifests.insert(project_id.to_string(), snapshot);
+        }
+        Ok(changed)
+    }
+
+    /// マニフェストの全エントリ (rel path, entry)。起動時の shared_files 復元用。
+    pub fn manifest_entries(&self, project_id: &str) -> Vec<(String, ManifestEntry)> {
+        self.manifests
+            .get(project_id)
+            .map(|m| {
+                m.files
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// 指定プロジェクトのルートディレクトリを返す。未登録なら `None`。
     /// ファイルパス検証 (ルート内に閉じ込め) のために IPC ハンドラが利用する。
     pub fn project_root(&self, project_id: &str) -> Option<PathBuf> {
@@ -360,6 +492,23 @@ impl ProjectManager {
             .get(project_id)
             .map(|entry| entry.root_path.clone())
     }
+}
+
+/// Converts Windows' canonical verbatim path representation back to the
+/// conventional form exposed by the project API.
+#[cfg(windows)]
+fn normalize_canonical_root(path: PathBuf) -> PathBuf {
+    let path = path.to_string_lossy();
+    if let Some(unc_path) = path.strip_prefix(r"\\?\UNC\") {
+        PathBuf::from(format!(r"\\{unc_path}"))
+    } else {
+        PathBuf::from(path.strip_prefix(r"\\?\").unwrap_or(&path))
+    }
+}
+
+#[cfg(not(windows))]
+fn normalize_canonical_root(path: PathBuf) -> PathBuf {
+    path
 }
 
 fn now_epoch_secs() -> u64 {
@@ -377,9 +526,31 @@ impl ProjectConfiguration for ProjectManager {
         root_path: PathBuf,
         display_name: Option<String>,
     ) -> Result<(), ProjectError> {
+        if project_id.is_empty()
+            || project_id.len() > 256
+            || project_id.chars().any(char::is_control)
+            || project_id.contains('/')
+            || project_id.contains('\\')
+        {
+            return Err(ProjectError::InvalidProjectId);
+        }
         if self.projects.contains_key(&project_id) {
             return Err(ProjectError::AlreadyExists(project_id));
         }
+
+        let root_path = normalize_canonical_root(
+            tokio::fs::canonicalize(&root_path)
+                .await
+                .map_err(|error| ProjectError::InvalidRoot(error.to_string()))?,
+        );
+        if !root_path.is_dir() {
+            return Err(ProjectError::InvalidRoot(
+                "path is not a directory".into(),
+            ));
+        }
+        let manifest = ProjectManifest::load(&root_path, &project_id)
+            .await
+            .map_err(|error| ProjectError::Manifest(error.to_string()))?;
 
         tracing::info!("Opening project: {} at {}", project_id, root_path.display());
 
@@ -401,7 +572,8 @@ impl ProjectConfiguration for ProjectManager {
             gossip.subscribe(TopicId::project(&project_id));
         }
 
-        self.projects.insert(project_id, project);
+        self.projects.insert(project_id.clone(), project);
+        self.manifests.insert(project_id.clone(), manifest);
         // 永続化: state_path があれば JSON に書き出す
         let _ = self.save_state().await;
         Ok(())
@@ -417,6 +589,8 @@ impl ProjectConfiguration for ProjectManager {
                 }
                 // 関連する招待トークンも削除
                 self.invites.retain(|_, inv| inv.project_id != project_id);
+                self.manifests.remove(project_id);
+                self.manifest_locks.remove(project_id);
 
                 // EventBus にプロジェクトクローズを通知（Presence/Exchange が購読して処理）
                 for peer_id in &project.connected_peer_ids {
@@ -511,7 +685,13 @@ impl ProjectConfiguration for ProjectManager {
         }
 
         let token = uuid::Uuid::new_v4().to_string();
-        let expires_at = expires_in_secs.map(|secs| now_epoch_secs() + secs);
+        let expires_at = expires_in_secs
+            .map(|secs| {
+                now_epoch_secs()
+                    .checked_add(secs)
+                    .ok_or(ProjectError::InvalidInviteExpiration)
+            })
+            .transpose()?;
 
         let invite = InviteToken {
             token: token.clone(),

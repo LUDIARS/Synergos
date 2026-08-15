@@ -54,6 +54,9 @@ pub struct ServiceContext {
     pub content_store: Arc<synergos_net::content::MemoryContentStore>,
     /// QUIC マネージャ (peer add-url / 直接接続用)。Daemon::new で bind 済み。
     pub quic: Arc<synergos_net::quic::QuicManager>,
+    /// ノード identity (招待トークン署名用)。テスト等では None 可
+    /// (その場合は従来型トークンにフォールバックする)。
+    pub identity: Option<Arc<synergos_net::identity::Identity>>,
 }
 
 /// IPC サーバー
@@ -727,6 +730,34 @@ fn filter_event_one(
 }
 
 /// コマンドをディスパッチしてレスポンスを生成
+/// project_id に対応する CatalogManager が無ければ作る (ProjectOpen / Join 共通)。
+/// chunk_max_files / chain_max_depth は net_config があればそれ、なければ既定値。
+fn ensure_catalog_manager(ctx: &ServiceContext, project_id: &str) {
+    if ctx.catalogs.contains_key(project_id) {
+        return;
+    }
+    let (chunk_max, chain_max) = ctx
+        .net_config
+        .as_ref()
+        .map(|c| (c.catalog.chunk_max_files, c.catalog.chain_max_depth))
+        .unwrap_or((128, 32));
+    ctx.catalogs.insert(
+        project_id.to_string(),
+        Arc::new(synergos_net::catalog::CatalogManager::new(
+            project_id.to_string(),
+            chunk_max,
+            chain_max,
+        )),
+    );
+}
+
+fn now_epoch_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
 pub async fn dispatch_command(command: IpcCommand, ctx: &ServiceContext) -> IpcResponse {
     match command {
         IpcCommand::Ping => IpcResponse::Pong,
@@ -774,18 +805,7 @@ pub async fn dispatch_command(command: IpcCommand, ctx: &ServiceContext) -> IpcR
             {
                 Ok(()) => {
                     // CatalogManager を同じ project_id で立ち上げる (#26)。
-                    // chunk_max_files / chain_max_depth は net_config があればそれ、なければ既定値。
-                    let (chunk_max, chain_max) = ctx
-                        .net_config
-                        .as_ref()
-                        .map(|c| (c.catalog.chunk_max_files, c.catalog.chain_max_depth))
-                        .unwrap_or((128, 32));
-                    ctx.catalogs.insert(
-                        pid_clone.clone(),
-                        Arc::new(synergos_net::catalog::CatalogManager::new(
-                            pid_clone, chunk_max, chain_max,
-                        )),
-                    );
+                    ensure_catalog_manager(ctx, &pid_clone);
                     IpcResponse::Ok
                 }
                 Err(e) => IpcResponse::Error {
@@ -869,35 +889,172 @@ pub async fn dispatch_command(command: IpcCommand, ctx: &ServiceContext) -> IpcR
         IpcCommand::ProjectCreateInvite {
             project_id,
             expires_in_secs,
-        } => match ctx
-            .project_manager
-            .create_invite(&project_id, expires_in_secs)
-            .await
-        {
-            Ok(invite) => IpcResponse::InviteToken {
-                token: invite.token,
-                expires_at: invite.expires_at,
-            },
-            Err(e) => IpcResponse::Error {
-                code: 1,
-                message: e.to_string(),
-            },
-        },
+            peer_info_url,
+        } => {
+            if ctx.project_manager.project_root(&project_id).is_none() {
+                return IpcResponse::Error {
+                    code: 1,
+                    message: format!("project not found: {project_id}"),
+                };
+            }
+            let advertised = crate::peer_join::resolve_advertised_peer_info_url(
+                peer_info_url,
+                ctx.net_config.as_deref(),
+            );
+            if let Some(url) = advertised.as_deref() {
+                if let Err(error) = crate::peer_bootstrap::validate_bootstrap_url(url) {
+                    return IpcResponse::Error {
+                        code: 1,
+                        message: error.to_string(),
+                    };
+                }
+            }
+            match (advertised, ctx.identity.as_ref()) {
+                // 自己完結型: 別マシンの daemon で join できる
+                (Some(url), Some(identity)) => {
+                    let expires_at = match expires_in_secs {
+                        Some(seconds) => match now_epoch_secs().checked_add(seconds) {
+                            Some(value) => Some(value),
+                            None => {
+                                return IpcResponse::Error {
+                                    code: 1,
+                                    message: "invite expiration is too large".into(),
+                                }
+                            }
+                        },
+                        None => None,
+                    };
+                    let display_name = ctx
+                        .project_manager
+                        .list_projects()
+                        .into_iter()
+                        .find(|p| p.project_id == project_id)
+                        .map(|p| p.display_name);
+                    let (token, _) = crate::invite_token::issue(
+                        identity,
+                        &project_id,
+                        display_name,
+                        &url,
+                        expires_at,
+                    );
+                    IpcResponse::InviteToken { token, expires_at }
+                }
+                // 従来型 (同一 daemon 内限定)。別マシンで使えない旨を警告する
+                _ => {
+                    tracing::warn!(
+                        "invite for {project_id}: no advertised /peer-info URL (pass --url or set peer_info_advertised_url / peer_info_listen_addr); issuing a local-only token"
+                    );
+                    match ctx
+                        .project_manager
+                        .create_invite(&project_id, expires_in_secs)
+                        .await
+                    {
+                        Ok(invite) => IpcResponse::InviteToken {
+                            token: invite.token,
+                            expires_at: invite.expires_at,
+                        },
+                        Err(e) => IpcResponse::Error {
+                            code: 1,
+                            message: e.to_string(),
+                        },
+                    }
+                }
+            }
+        }
 
         IpcCommand::ProjectJoin {
             invite_token,
             root_path,
-        } => match ctx
-            .project_manager
-            .join_project(&invite_token, root_path)
+        } => {
+            if !crate::invite_token::is_self_contained(&invite_token) {
+                // 従来型: 発行 daemon と同じプロセス内でのみ有効
+                return match ctx
+                    .project_manager
+                    .join_project(&invite_token, root_path)
+                    .await
+                {
+                    Ok(_project_id) => IpcResponse::Ok,
+                    Err(e) => IpcResponse::Error {
+                        code: 1,
+                        message: format!(
+                            "{e} (a token without the `syn1.` prefix only works on the daemon that issued it; ask the host to run `project invite --url ...`)"
+                        ),
+                    },
+                };
+            }
+            let payload = match crate::invite_token::decode(&invite_token, now_epoch_secs()) {
+                Ok(p) => p,
+                Err(e) => {
+                    return IpcResponse::Error {
+                        code: 1,
+                        message: e.to_string(),
+                    }
+                }
+            };
+            // Validate all network-controlled bootstrap input before open_project,
+            // so a malformed or redirect-oriented token has no local side effect.
+            if let Err(error) =
+                crate::peer_bootstrap::validate_bootstrap_url(&payload.peer_info_url)
+            {
+                return IpcResponse::Error {
+                    code: 1,
+                    message: error.to_string(),
+                };
+            }
+            // 1. 同じ project_id でローカルに open (既に open 済みならそのまま)
+            if ctx
+                .project_manager
+                .project_root(&payload.project_id)
+                .is_none()
+            {
+                let root_path = match tokio::fs::canonicalize(&root_path).await {
+                    Ok(path) if path.is_dir() => path,
+                    _ => {
+                        return IpcResponse::Error {
+                            code: 1,
+                            message: "join root must be an existing directory".into(),
+                        }
+                    }
+                };
+                if let Err(e) = ctx
+                    .project_manager
+                    .open_project(
+                        payload.project_id.clone(),
+                        root_path,
+                        payload.display_name.clone(),
+                    )
+                    .await
+                {
+                    return IpcResponse::Error {
+                        code: 1,
+                        message: format!("open project {}: {e}", payload.project_id),
+                    };
+                }
+                ensure_catalog_manager(ctx, &payload.project_id);
+            }
+            // 2. ホストへ bootstrap (QUIC 接続) + Presence 登録。相手 peer_id を照合
+            let host = PeerId::new(payload.host_peer_id.clone());
+            match crate::peer_join::bootstrap_and_register(
+                ctx,
+                &payload.project_id,
+                &payload.peer_info_url,
+                Some(&host),
+            )
             .await
-        {
-            Ok(_project_id) => IpcResponse::Ok,
-            Err(e) => IpcResponse::Error {
-                code: 1,
-                message: e.to_string(),
-            },
-        },
+            {
+                Ok(_) => IpcResponse::Ok,
+                Err(e) => IpcResponse::Error {
+                    code: 2,
+                    message: format!(
+                        "project {} opened locally but could not reach host at {}: {e}. Retry with `peer add-url {} {}` once the host is reachable",
+                        payload.project_id,
+                        payload.peer_info_url,
+                        payload.project_id,
+                        payload.peer_info_url
+                    ),
+                },
+            }
+        }
 
         // ── ピア管理 ──
         IpcCommand::PeerList { project_id } => {
@@ -962,42 +1119,11 @@ pub async fn dispatch_command(command: IpcCommand, ctx: &ServiceContext) -> IpcR
                     message: format!("unknown project: {project_id}"),
                 };
             }
-            // /peer-info GET → QUIC connect (S1 真性認証込み)
-            let result = match crate::peer_bootstrap::bootstrap_from_url(
-                &url,
-                &ctx.quic,
-                std::time::Duration::from_secs(10),
-            )
-            .await
-            {
-                Ok(r) => r,
-                Err(e) => {
-                    return IpcResponse::Error {
-                        code: 2,
-                        message: format!("bootstrap failed: {e}"),
-                    };
-                }
-            };
-            let peer_id = result.peer_id.clone();
-            // PresenceService に登録 → Connected に遷移
-            let registration = crate::presence::NodeRegistration {
-                peer_id: peer_id.clone(),
-                display_name: peer_id.to_string(),
-                endpoints: vec![],
-                project_ids: vec![project_id],
-                synergos_version: result.synergos_version,
-            };
-            if let Err(e) = ctx.presence.register_node(registration).await {
-                return IpcResponse::Error {
-                    code: 2,
-                    message: format!("register_node failed: {e}"),
-                };
+            // /peer-info GET → QUIC connect (S1 真性認証込み) → Presence 登録
+            match crate::peer_join::bootstrap_and_register(ctx, &project_id, &url, None).await {
+                Ok(_) => IpcResponse::Ok,
+                Err(message) => IpcResponse::Error { code: 2, message },
             }
-            let _ = ctx
-                .presence
-                .update_node_state(&peer_id, PeerState::Connected)
-                .await;
-            IpcResponse::Ok
         }
 
         // ── ファイル転送 ──
@@ -1122,9 +1248,18 @@ pub async fn dispatch_command(command: IpcCommand, ctx: &ServiceContext) -> IpcR
                         };
                     }
                 };
-                let file_size = metadata.len();
-                let bytes = match tokio::fs::read(&canonical).await {
-                    Ok(b) => b,
+                if !metadata.is_file() {
+                    return IpcResponse::Error {
+                        code: 3,
+                        message: format!(
+                            "not a regular file: {}",
+                            redact_path(&project_root, &canonical)
+                        ),
+                    };
+                }
+                // 全体を RAM に載せずにストリーミングで CRC を取る (数百 MB のアセット対策)
+                let (crc, file_size) = match crate::manifest::crc32_of_file(&canonical).await {
+                    Ok(v) => v,
                     Err(e) => {
                         return IpcResponse::Error {
                             code: 3,
@@ -1135,14 +1270,50 @@ pub async fn dispatch_command(command: IpcCommand, ctx: &ServiceContext) -> IpcR
                         };
                     }
                 };
-                let crc = crc32fast::hash(&bytes);
 
                 let rel = canonical
                     .strip_prefix(&project_root)
                     .map(|r| r.to_path_buf())
                     .unwrap_or(canonical.clone());
+                // FileId は OS を跨いで同一でなければならないので `/` 区切りに正規化する
+                let rel_key = crate::manifest::normalize_rel_path(&rel);
+                if rel_key == crate::manifest::META_DIR
+                    || rel_key.starts_with(&format!("{}/", crate::manifest::META_DIR))
+                {
+                    return IpcResponse::Error {
+                        code: 3,
+                        message: format!("cannot publish Synergos metadata: {rel_key}"),
+                    };
+                }
 
-                let file_id = FileId::new(rel.to_string_lossy().to_string());
+                // マニフェストでバージョン発番 (内容が同じなら据え置き = 再送しない)
+                let version = match ctx
+                    .project_manager
+                    .bump_file_version(
+                        &project_id,
+                        &rel_key,
+                        file_size,
+                        crc,
+                        &ctx.exchange.local_peer_id().0,
+                    )
+                    .await
+                {
+                    Ok(crate::manifest::BumpOutcome::Bumped(v)) => v,
+                    Ok(crate::manifest::BumpOutcome::Unchanged(v)) => {
+                        tracing::info!(
+                            "publish: {rel_key} unchanged (v{v}); re-offering without bump"
+                        );
+                        v
+                    }
+                    Err(e) => {
+                        return IpcResponse::Error {
+                            code: 3,
+                            message: format!("manifest update failed for {rel_key}: {e}"),
+                        };
+                    }
+                };
+
+                let file_id = FileId::new(rel_key.clone());
                 // ProjectManager に file_id → rel 相対パスを登録して、
                 // 受信側の out_path_resolver が確実に解決できるようにする。
                 ctx.project_manager
@@ -1154,7 +1325,7 @@ pub async fn dispatch_command(command: IpcCommand, ctx: &ServiceContext) -> IpcR
                     file_path: canonical,
                     file_size,
                     crc,
-                    version: 1,
+                    version,
                 });
             }
             match ctx.exchange.publish_updates(notifications).await {

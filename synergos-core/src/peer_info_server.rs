@@ -48,7 +48,9 @@ pub struct PeerInfoResponse {
 }
 
 /// 現在のプロトコルバージョン (bump はクライアントとの互換性を切るときのみ)
-pub const PEER_INFO_PROTOCOL_VERSION: u32 = 1;
+// Version 2 adds the version field to TransferHeader. Peers using protocol 1
+// must be rejected during bootstrap instead of attempting an ambiguous transfer.
+pub const PEER_INFO_PROTOCOL_VERSION: u32 = 2;
 
 /// このバイナリの synergos-core build version。`Cargo.toml` の `[package].version` 由来。
 pub const SYNERGOS_VERSION: &str = env!("CARGO_PKG_VERSION");

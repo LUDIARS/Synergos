@@ -153,7 +153,7 @@ impl Node {
                         version,
                     } => me_sub
                         .exchange
-                        .handle_file_want(requester, file_id, version),
+                        .handle_file_want("auto-e2e", requester, file_id, version),
                     GossipMessage::FileOffer {
                         sender,
                         file_id,
@@ -171,7 +171,8 @@ impl Node {
                         );
                         // auto-pull (daemon.rs と同じロジック)
                         let mine = sender == *me_sub.exchange.local_peer_id();
-                        let already = me_sub.exchange.has_shared_file(&file_id, version);
+                        let already =
+                            me_sub.exchange.has_shared_file("auto-e2e", &file_id, version);
                         if !mine && !already {
                             if let Some(project_id) =
                                 topic.0.strip_prefix("project/").map(|s| s.to_string())
@@ -354,7 +355,7 @@ async fn b_auto_pulls_file_after_receiving_offer() {
     // 受信完了後は B 自身の shared_files にも登録されるはず
     // (handle_incoming_transfer の責務)。
     assert!(
-        node_b.exchange.has_shared_file(&file_id, 1),
+        node_b.exchange.has_shared_file("auto-e2e", &file_id, 1),
         "B should register received file in shared_files for re-distribution"
     );
 

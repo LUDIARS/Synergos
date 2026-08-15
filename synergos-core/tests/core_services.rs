@@ -14,6 +14,7 @@ use synergos_core::event_bus::{CoreEventBus, SharedEventBus};
 use synergos_core::exchange::{
     Exchange, FetchRequest, FileSharing, ShareRequest, TransferPriority, TransferState,
 };
+use synergos_core::manifest::ProjectManifest;
 use synergos_core::presence::PresenceService;
 use synergos_core::project::{ProjectConfiguration, ProjectManager};
 use synergos_net::types::{Blake3Hash, FileId, PeerId};
@@ -102,6 +103,69 @@ async fn conflict_cleanup_resolved_preserves_active() {
     cm.cleanup_resolved();
     cm.cleanup_expired_notifications(1_000);
     assert!(cm.list_conflicts(None).is_empty());
+}
+
+#[tokio::test]
+async fn project_open_rejects_topic_breaking_id() {
+    let pm = ProjectManager::new(bus());
+    let dir = tmp_dir();
+    let error = pm
+        .open_project("nested/project".into(), dir.clone(), None)
+        .await
+        .unwrap_err();
+    use synergos_core::project::ProjectError;
+    assert!(matches!(error, ProjectError::InvalidProjectId));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn concurrent_manifest_updates_preserve_both_entries() {
+    let pm = Arc::new(ProjectManager::new(bus()));
+    let dir = tmp_dir();
+    pm.open_project("manifest-project".into(), dir.clone(), None)
+        .await
+        .unwrap();
+    let first = {
+        let pm = pm.clone();
+        tokio::spawn(async move {
+            pm.bump_file_version("manifest-project", "a.bin", 10, 1, "peer-a")
+                .await
+                .unwrap();
+        })
+    };
+    let second = {
+        let pm = pm.clone();
+        tokio::spawn(async move {
+            pm.bump_file_version("manifest-project", "b.bin", 20, 2, "peer-b")
+                .await
+                .unwrap();
+        })
+    };
+    first.await.unwrap();
+    second.await.unwrap();
+
+    let manifest = ProjectManifest::load(&dir, "manifest-project")
+        .await
+        .unwrap();
+    assert!(manifest.get("a.bin").is_some());
+    assert!(manifest.get("b.bin").is_some());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn equal_version_content_conflict_is_reported() {
+    let cm = ConflictManager::new(bus());
+    let file_id = FileId::new("asset.bin");
+    let local = PeerId::new("local-peer");
+    let remote = PeerId::new("remote-peer");
+
+    let conflict =
+        cm.record_version_conflict("project", &file_id, 2, &local, 2, &remote);
+
+    assert_eq!(conflict.state, ConflictState::Active);
+    assert_eq!(conflict.local_version, 2);
+    assert_eq!(conflict.remote_version, 2);
+    assert_eq!(cm.list_conflicts(Some("project")).len(), 1);
 }
 
 // ── Exchange (TransferState transitions) ────────────────────────────

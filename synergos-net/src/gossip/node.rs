@@ -180,9 +180,10 @@ impl GossipNode {
 
     /// メッセージをメッシュに配信
     pub fn publish(&self, topic: &TopicId, message: GossipMessage) -> Vec<PeerId> {
-        // MessageId を正規バイト列から派生 (S21 対策: Debug 出力依存をやめる)
-        let msg_bytes = canonical_bytes(&message);
-        let msg_id = MessageId::from_content(&msg_bytes);
+        // The topic is part of message identity. File IDs and versions are only
+        // unique within a project, so a global content-only key drops legitimate
+        // offers/wants from another project with the same relative path.
+        let msg_id = message_id(topic, &message);
 
         // 重複チェック
         if self.message_cache.check_and_insert(&msg_id) {
@@ -241,8 +242,7 @@ impl GossipNode {
 
     /// MessageCache 重複チェック + broadcast 配信の共通処理。
     fn deliver(&self, topic: &TopicId, message: GossipMessage) -> bool {
-        let msg_bytes = canonical_bytes(&message);
-        let msg_id = MessageId::from_content(&msg_bytes);
+        let msg_id = message_id(topic, &message);
         if self.message_cache.check_and_insert(&msg_id) {
             return false; // duplicate
         }
@@ -299,6 +299,15 @@ impl GossipNode {
             }
         }
     }
+}
+
+fn message_id(topic: &TopicId, message: &GossipMessage) -> MessageId {
+    let message_bytes = canonical_bytes(message);
+    let mut scoped = Vec::with_capacity(topic.0.len() + 1 + message_bytes.len());
+    scoped.extend_from_slice(topic.0.as_bytes());
+    scoped.push(0);
+    scoped.extend_from_slice(&message_bytes);
+    MessageId::from_content(&scoped)
 }
 
 #[cfg(test)]
@@ -365,5 +374,31 @@ mod tests {
         // Second publish returns empty (duplicate)
         let targets = node.publish(&topic, msg);
         assert!(targets.is_empty());
+    }
+
+    #[test]
+    fn identical_messages_in_different_projects_are_not_duplicates() {
+        let node = GossipNode::new(
+            PeerId::new("local"),
+            GossipsubConfig {
+                mesh_n: 6,
+                mesh_n_low: 4,
+                mesh_n_high: 12,
+                heartbeat_interval_ms: 1000,
+                message_cache_size: 100,
+            },
+        );
+        let first = TopicId::project("proj-1");
+        let second = TopicId::project("proj-2");
+        node.graft(&first, PeerId::new("peer-a"));
+        node.graft(&second, PeerId::new("peer-a"));
+        let message = GossipMessage::FileWant {
+            requester: PeerId::new("peer-a"),
+            file_id: crate::types::FileId::new("same.bin"),
+            version: 1,
+        };
+
+        assert_eq!(node.publish(&first, message.clone()).len(), 1);
+        assert_eq!(node.publish(&second, message).len(), 1);
     }
 }

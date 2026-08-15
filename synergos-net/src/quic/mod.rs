@@ -167,8 +167,15 @@ impl QuicManager {
     /// 必須としているため、ここでデフォルトの `ClientConfig` はセットしない。
     pub async fn bind(&self, addr: SocketAddr) -> Result<SocketAddr> {
         let server_config = self.build_server_config()?;
-        let endpoint = quinn::Endpoint::server(server_config, addr)
+        let socket = bind_udp_dual_stack(addr)
             .map_err(|e| SynergosNetError::Quic(format!("Failed to bind: {}", e)))?;
+        let endpoint = quinn::Endpoint::new(
+            quinn::EndpointConfig::default(),
+            Some(server_config),
+            socket,
+            Arc::new(quinn::TokioRuntime),
+        )
+        .map_err(|e| SynergosNetError::Quic(format!("Failed to bind: {}", e)))?;
 
         let actual_addr = endpoint
             .local_addr()
@@ -565,4 +572,23 @@ pub struct QuicConnectionInfo {
     pub active_streams: u32,
     pub state: QuicConnectionState,
     pub rtt_ms: u32,
+}
+
+/// UDP ソケットを bind する。IPv6 アドレスのときは **IPV6_V6ONLY を無効化**して
+/// デュアルスタック (IPv4 も同じソケットで受ける) にする。
+///
+/// Linux は既定でデュアルスタックだが、**Windows は既定 v6-only** なので
+/// `[::]:4433` で bind すると IPv4 の LAN ピアから届かない (2 台運用の典型的な罠)。
+/// OS が非対応 (set_only_v6 失敗) でも bind 自体は続行する。
+fn bind_udp_dual_stack(addr: SocketAddr) -> std::io::Result<std::net::UdpSocket> {
+    use socket2::{Domain, Protocol, Socket, Type};
+    if !addr.is_ipv6() {
+        return std::net::UdpSocket::bind(addr);
+    }
+    let socket = Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP))?;
+    if let Err(e) = socket.set_only_v6(false) {
+        tracing::debug!("set_only_v6(false) unsupported: {e}; continuing v6-only");
+    }
+    socket.bind(&addr.into())?;
+    Ok(socket.into())
 }

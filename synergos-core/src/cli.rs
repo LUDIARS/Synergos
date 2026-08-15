@@ -88,13 +88,18 @@ pub enum ProjectCommand {
         #[arg(short, long)]
         max_peers: Option<u16>,
     },
-    /// 招待トークンを生成
+    /// 招待トークンを生成 (別マシンで使うには --url か config の
+    /// peer_info_advertised_url / peer_info_listen_addr が必要)
     Invite {
         /// プロジェクトID
         id: String,
         /// 有効期限（秒）
         #[arg(short, long)]
         expires: Option<u64>,
+        /// この daemon の /peer-info URL (例 http://192.168.1.10:7780)。
+        /// 招待トークンに埋め込まれ、参加側はここへ接続する
+        #[arg(short, long)]
+        url: Option<String>,
     },
     /// 招待トークンで参加
     Join {
@@ -300,16 +305,24 @@ async fn handle_project(cmd: ProjectCommand) -> anyhow::Result<()> {
                 _ => println!("Unexpected response"),
             }
         }
-        ProjectCommand::Invite { id, expires } => {
+        ProjectCommand::Invite { id, expires, url } => {
             let resp = client
                 .send(synergos_ipc::IpcCommand::ProjectCreateInvite {
                     project_id: id,
                     expires_in_secs: expires,
+                    peer_info_url: url,
                 })
                 .await?;
             match resp {
                 synergos_ipc::IpcResponse::InviteToken { token, expires_at } => {
                     println!("Invite token: {}", token);
+                    if !token.starts_with("syn1.") {
+                        eprintln!(
+                            "note: this token only works on this daemon. For another machine, \
+                             pass --url http://<this-host>:<peer-info-port> (or set \
+                             peer_info_advertised_url in synergos-net.toml)."
+                        );
+                    }
                     if let Some(exp) = expires_at {
                         println!("Expires at:   {} (epoch)", exp);
                     } else {

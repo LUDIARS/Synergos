@@ -16,7 +16,9 @@ use synergos_net::chain::{LedgerAction, LedgerEntryState, OfferEntry, TransferLe
 use synergos_net::content::{Block, ContentStore, MemoryContentStore};
 use synergos_net::gossip::{GossipMessage, GossipNode};
 use synergos_net::quic::{QuicManager, StreamType};
-use synergos_net::transfer::{receive_over_quic, send_over_quic, TransferHeader};
+use synergos_net::transfer::{
+    peek_transfer_header, receive_over_quic_with_header, send_over_quic, TransferHeader,
+};
 use synergos_net::types::{Blake3Hash, Cid, FileId, PeerId, TopicId, TransferId};
 
 use crate::event_bus::{SharedEventBus, TransferCompletedEvent, TransferProgressEvent};
@@ -25,6 +27,25 @@ use crate::event_bus::{SharedEventBus, TransferCompletedEvent, TransferProgressE
 /// 最終的な書き込み先 `PathBuf` を返す。通常は ProjectManager 経由で
 /// プロジェクトルート + 相対パスを組み立てる想定。
 pub type OutPathResolver = Arc<dyn Fn(&str, &FileId) -> Option<PathBuf> + Send + Sync + 'static>;
+
+/// 受信完了時に呼ばれるフック。`(project_id, file_id, version, size, crc, sender)`。
+/// ProjectManager がマニフェスト (`.synergos/manifest.json`) に受信バージョンを
+/// 記録するために daemon が注入する。
+pub type ReceivedHook = Arc<
+    dyn Fn(String, FileId, u64, u64, u32, PeerId) -> futures_boxed::BoxFuture
+        + Send
+        + Sync
+        + 'static,
+>;
+
+/// `Pin<Box<dyn Future>>` の短縮 (futures crate 非依存)。
+pub mod futures_boxed {
+    pub type BoxFuture = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>;
+}
+
+/// 受信中の一時ファイル置き場を解決する。`project_id` からプロジェクト配下の
+/// 一時ディレクトリ (`<root>/.synergos/incoming`) を返す。None なら OS temp。
+pub type IncomingDirResolver = Arc<dyn Fn(&str) -> Option<PathBuf> + Send + Sync + 'static>;
 
 /// QUIC 送信を進行しつつ 128KiB ごとに読み込んだ累積バイトを
 /// `tokio::sync::mpsc` で投げ出す `AsyncRead` ラッパ。
@@ -306,9 +327,14 @@ pub struct Exchange {
     quic: Option<Arc<QuicManager>>,
     /// 受信時に保存先パスを解決するレゾルバ
     out_path_resolver: Option<OutPathResolver>,
+    /// 受信中一時ファイルの置き場 (プロジェクト内)。未設定なら OS temp
+    /// (別ボリュームだと rename が失敗しうるので本番では必ず注入する)。
+    incoming_dir_resolver: Option<IncomingDirResolver>,
+    /// 受信完了フック (マニフェスト記録用)
+    received_hook: Option<ReceivedHook>,
     /// ローカルが share_file / publish_updates で登録したファイル
     /// (FileWant 受信時に send_and_share を起動する材料にする)
-    shared_files: DashMap<FileId, SharedFileRecord>,
+    shared_files: DashMap<(String, FileId), SharedFileRecord>,
     /// ローカルピアID
     local_peer_id: PeerId,
     /// Bitswap 用 ContentStore (注入済みなら publish_updates で RootCatalog
@@ -335,6 +361,8 @@ impl Exchange {
             gossip,
             quic: None,
             out_path_resolver: None,
+            incoming_dir_resolver: None,
+            received_hook: None,
             shared_files: DashMap::new(),
             local_peer_id,
             content_store: None,
@@ -348,6 +376,23 @@ impl Exchange {
         self.out_path_resolver = Some(resolver);
     }
 
+    /// 受信一時ディレクトリの解決関数と受信完了フックを注入する (daemon 用)。
+    pub fn attach_receive_hooks(
+        &mut self,
+        incoming_dir: IncomingDirResolver,
+        received: ReceivedHook,
+    ) {
+        self.incoming_dir_resolver = Some(incoming_dir);
+        self.received_hook = Some(received);
+    }
+
+    /// 起動時復元: マニフェスト由来の共有レコードを登録する (publisher 再起動後も
+    /// FileWant に応答でき、受信側は既取得分の auto-pull を抑止できる)。
+    pub fn restore_shared_file(&self, file_id: FileId, record: SharedFileRecord) {
+        self.shared_files
+            .insert((record.project_id.clone(), file_id), record);
+    }
+
     /// ローカルピア ID を返す (gossip subscriber が auto-pull の自分宛
     /// オファー除外に使う)。
     pub fn local_peer_id(&self) -> &PeerId {
@@ -357,11 +402,23 @@ impl Exchange {
     /// 指定 file_id を共有マップに登録済か。`shared_files` は publisher 側
     /// の登録 + 受信完了時の再登録 (handle_incoming_transfer) で埋まる。
     /// 同じ file_id を持っているなら auto-pull は不要 (送信側 / 既取得済)。
-    pub fn has_shared_file(&self, file_id: &FileId, version: u64) -> bool {
+    pub fn has_shared_file(&self, project_id: &str, file_id: &FileId, version: u64) -> bool {
         self.shared_files
-            .get(file_id)
+            .get(&(project_id.to_string(), file_id.clone()))
             .map(|r| r.version >= version)
             .unwrap_or(false)
+    }
+
+    /// Return the local record for conflict/content comparison without exposing
+    /// the project-agnostic cache key that previously allowed cross-project reads.
+    pub fn shared_file_record(
+        &self,
+        project_id: &str,
+        file_id: &FileId,
+    ) -> Option<SharedFileRecord> {
+        self.shared_files
+            .get(&(project_id.to_string(), file_id.clone()))
+            .map(|record| record.value().clone())
     }
 
     /// Bitswap 用 ContentStore を注入する。publish_updates 時に
@@ -533,40 +590,121 @@ impl Exchange {
             FileSharingError::NetworkError("out_path_resolver not attached".into())
         })?;
 
-        // 先にヘッダを覗き見するため、一時バッファに受信せず receive_over_quic を
-        // 呼んで Header → Body → Footer を完結させる。保存先はヘッダから決める。
-        // 保存先を決めるために「ヘッダだけ先読み」したいが、receive_stream が
-        // 内部で一気通貫するので、tmp ファイルに書いたあと移動する。
-        let tmp_path =
-            std::env::temp_dir().join(format!("synergos-incoming-{}", uuid::Uuid::new_v4()));
-        let header = receive_over_quic(recv, &tmp_path)
+        // 一時ファイルはプロジェクト内 (`<root>/.synergos/incoming`) に置く。
+        // OS temp だと保存先と別ボリュームになり rename が失敗する (Windows で
+        // C: temp → D: プロジェクト等)。ヘッダを読む前は project_id が
+        // 分からないので、まず OS temp に受信してから移す 2 段構えは避け、
+        // 受信ストリームのヘッダを先読みして置き場を決める。
+        let (header, mut recv) = peek_transfer_header(recv)
             .await
             .map_err(|e| FileSharingError::NetworkError(format!("{e}")))?;
-
         let file_id = FileId(header.file_id.clone());
         let final_path = resolver(&header.project_id, &file_id)
             .ok_or_else(|| FileSharingError::FileNotFound(header.file_id.clone()))?;
-        if let Some(parent) = final_path.parent() {
-            tokio::fs::create_dir_all(parent).await.ok();
+        let tmp_dir = if let Some(requested) = self
+            .incoming_dir_resolver
+            .as_ref()
+            .and_then(|r| r(&header.project_id))
+        {
+            let metadata_dir = requested.parent().ok_or_else(|| {
+                FileSharingError::NetworkError("incoming directory has no parent".into())
+            })?;
+            let root = metadata_dir.parent().ok_or_else(|| {
+                FileSharingError::NetworkError("metadata directory has no project root".into())
+            })?;
+            if requested.file_name() != Some(std::ffi::OsStr::new(crate::manifest::INCOMING_DIR))
+                || metadata_dir.file_name()
+                    != Some(std::ffi::OsStr::new(crate::manifest::META_DIR))
+            {
+                return Err(FileSharingError::NetworkError(
+                    "incoming directory must be <project>/.synergos/incoming".into(),
+                ));
+            }
+            crate::manifest::ProjectManifest::incoming_dir(root).await?
+        } else {
+            let dir = std::env::temp_dir();
+            tokio::fs::create_dir_all(&dir).await?;
+            dir
+        };
+        let tmp_path = tmp_dir.join(format!("incoming-{}.part", uuid::Uuid::new_v4()));
+        let header = match receive_over_quic_with_header(&mut recv, header, &tmp_path).await {
+            Ok(h) => h,
+            Err(e) => {
+                // 中断・検証失敗の残骸を残さない
+                let _ = tokio::fs::remove_file(&tmp_path).await;
+                return Err(FileSharingError::NetworkError(format!("{e}")));
+            }
+        };
+
+        let (crc, _) = match crate::manifest::crc32_of_file(&tmp_path).await {
+            Ok(result) => result,
+            Err(error) => {
+                let _ = tokio::fs::remove_file(&tmp_path).await;
+                return Err(error.into());
+            }
+        };
+        let version = header.version.max(1);
+        if let Some(local) = self.shared_file_record(&header.project_id, &file_id) {
+            let is_stale = local.version > version;
+            let is_conflict = local.version == version
+                && (local.file_size != header.total_size || local.crc != crc);
+            if is_stale || is_conflict {
+                let _ = tokio::fs::remove_file(&tmp_path).await;
+                let reason = if is_stale {
+                    format!(
+                        "refusing stale transfer v{version}; local version is v{}",
+                        local.version
+                    )
+                } else {
+                    format!("refusing conflicting content for existing version v{version}")
+                };
+                return Err(FileSharingError::NetworkError(reason));
+            }
         }
-        tokio::fs::rename(&tmp_path, &final_path).await?;
+        if let Some(parent) = final_path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        // Re-resolve after directory creation so a pre-existing symlink/junction,
+        // or one exposed by create_dir_all, cannot redirect the final replacement.
+        let checked_final = resolver(&header.project_id, &file_id)
+            .ok_or_else(|| FileSharingError::FileNotFound(header.file_id.clone()))?;
+        if checked_final != final_path {
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            return Err(FileSharingError::NetworkError(
+                "receive destination changed during validation".into(),
+            ));
+        }
+        if let Err(e) = crate::manifest::replace_file_atomically(&tmp_path, &final_path).await {
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            return Err(e.into());
+        }
 
         // 受信完了したファイルを shared_files にも登録する。これで:
         //   1. 後続の自身に届く同一 FileOffer を has_shared_file で skip できる
         //      (auto-pull 重複ループの防止)
         //   2. このノード経由でさらに別ピアからの FileWant が来た場合に再配布できる
-        //      (将来的なメッシュ伝搬の足がかり)
-        // version はヘッダに乗っていないので 1 を仮置きする (S5 で揃える)。
+        // version はヘッダの値 (旧ピアからは 0 = 不明 → 1 と見なす)。
         self.shared_files.insert(
-            file_id.clone(),
+            (header.project_id.clone(), file_id.clone()),
             SharedFileRecord {
                 project_id: header.project_id.clone(),
                 file_path: final_path.clone(),
                 file_size: header.total_size,
-                crc: 0,
-                version: 1,
+                crc,
+                version,
             },
         );
+        if let Some(hook) = &self.received_hook {
+            hook(
+                header.project_id.clone(),
+                file_id.clone(),
+                version,
+                header.total_size,
+                crc,
+                sender.clone(),
+            )
+            .await;
+        }
 
         // この転送に対応する ActiveTransfer を作り直して complete_transfer する
         let transfer_id = TransferId(header.transfer_id.clone());
@@ -585,7 +723,7 @@ impl Exchange {
             peer_id: sender,
             state: TransferState::Running,
             priority: TransferPriority::Interactive,
-            version: 1,
+            version,
         };
         self.transfers.insert(transfer_id.clone(), transfer);
         self.complete_transfer(&transfer_id);
@@ -599,11 +737,18 @@ impl Exchange {
     ///
     /// 既に該当 peer へ同じバージョンを送ったことがあれば ledger の
     /// `mark_fulfilled` でスキップされる想定。
-    pub fn handle_file_want(self: &Arc<Self>, requester: PeerId, file_id: FileId, version: u64) {
+    pub fn handle_file_want(
+        self: &Arc<Self>,
+        project_id: &str,
+        requester: PeerId,
+        file_id: FileId,
+        version: u64,
+    ) {
         if requester == self.local_peer_id {
             return; // 自分の Want は無視
         }
-        let record = match self.shared_files.get(&file_id) {
+        let key = (project_id.to_string(), file_id.clone());
+        let record = match self.shared_files.get(&key) {
             Some(r) => r.value().clone(),
             None => {
                 tracing::debug!(
@@ -717,7 +862,7 @@ impl Exchange {
         }
     }
 
-    /// 転��進捗を更新
+    /// 転送進捗を更新
     pub fn update_progress(
         &self,
         transfer_id: &TransferId,
@@ -800,8 +945,8 @@ pub async fn spawn_send_after_share(
         total_size,
         chunk_count,
         total_hash,
+        version,
     };
-    let _ = version; // 既存の ActiveTransfer.version に既に載っている
 
     if let Err(e) = exchange
         .execute_send(transfer_id, target, path, header)
@@ -865,7 +1010,7 @@ impl FileSharing for Exchange {
 
         // FileWant 到着時に即転送起動できるよう、path とメタを保存
         self.shared_files.insert(
-            request.file_id.clone(),
+            (request.project_id.clone(), request.file_id.clone()),
             SharedFileRecord {
                 project_id: request.project_id.clone(),
                 file_path: request.file_path.clone(),
@@ -950,8 +1095,13 @@ impl FileSharing for Exchange {
             }
         }
 
-        // Gossipsub で FileWant をブロードキャスト
-        self.broadcast_want(&request.project_id, &request.file_id, 0);
+        // Gossipsub で FileWant をブロードキャスト。
+        // gossip の MessageId は内容ハッシュなので、常に version=0 ("任意の最新") で
+        // 流すと **同じファイルの 2 回目以降の Want が重複として捨てられ**、
+        // 再 publish されたバージョンを取りに行けなくなる。要求バージョンを載せて
+        // (v1 の Want と v2 の Want が別メッセージになるように) 流す。
+        // 0 (IPC の手動 TransferRequest 等) はそのまま "任意の最新" 扱い。
+        self.broadcast_want(&request.project_id, &request.file_id, request.version);
 
         Ok(transfer_id)
     }
@@ -1008,7 +1158,7 @@ impl FileSharing for Exchange {
                 notif.file_id
             );
             self.shared_files.insert(
-                notif.file_id.clone(),
+                (notif.project_id.clone(), notif.file_id.clone()),
                 SharedFileRecord {
                     project_id: notif.project_id.clone(),
                     file_path: notif.file_path.clone(),

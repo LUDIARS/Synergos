@@ -169,6 +169,7 @@ impl CoreConnection {
         let resp = self.send_command(IpcCommand::ProjectCreateInvite {
             project_id: project_id.into(),
             expires_in_secs,
+            peer_info_url: None,
         });
         if let Some(synergos_ipc::IpcResponse::InviteToken { token, expires_at }) = resp {
             Some((token, expires_at))

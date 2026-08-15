@@ -98,6 +98,50 @@ impl ConflictManager {
         }
     }
 
+    /// Record a conflict detected by the manifest/offer path when two different
+    /// contents claim the same file version. Neither side is overwritten
+    /// automatically because the version alone cannot establish a winner.
+    pub fn record_version_conflict(
+        &self,
+        project_id: &str,
+        file_id: &FileId,
+        local_version: u64,
+        local_peer: &PeerId,
+        remote_version: u64,
+        remote_peer: &PeerId,
+    ) -> ConflictInfo {
+        if let Some(existing) = self.conflicts.get(file_id) {
+            return existing.value().clone();
+        }
+
+        let conflict = ConflictInfo {
+            file_id: file_id.clone(),
+            common_ancestor_hash: None,
+            common_ancestor_version: local_version.saturating_sub(1),
+            local_version,
+            local_author: local_peer.clone(),
+            remote_version,
+            remote_author: remote_peer.clone(),
+            involved_peers: vec![local_peer.clone(), remote_peer.clone()],
+            detected_at: now_ms(),
+            state: ConflictState::Active,
+            file_path: file_id.to_string(),
+            project_id: project_id.to_string(),
+        };
+        self.conflicts.insert(file_id.clone(), conflict.clone());
+        self.event_bus.emit(ConflictDetectedEvent {
+            project_id: project_id.to_string(),
+            file_id: file_id.to_string(),
+            file_path: file_id.to_string(),
+            involved_peers: conflict
+                .involved_peers
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+        });
+        conflict
+    }
+
     /// チェーンフォークを検出してコンフリクトを生成する
     ///
     /// ローカルチェーンの HEAD とリモートブロックの prev_hash が不一致の場合、

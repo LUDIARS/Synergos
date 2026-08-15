@@ -150,7 +150,7 @@ impl Node {
                         version,
                     } => me_sub
                         .exchange
-                        .handle_file_want(requester, file_id, version),
+                        .handle_file_want("auto-e2e", requester, file_id, version),
                     GossipMessage::FileOffer {
                         sender,
                         file_id,

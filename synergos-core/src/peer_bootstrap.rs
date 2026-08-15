@@ -22,6 +22,8 @@ use synergos_net::types::PeerId;
 
 use crate::peer_info_server::PEER_INFO_PROTOCOL_VERSION;
 
+const MAX_PEER_INFO_RESPONSE_BYTES: usize = 64 * 1024;
+
 /// peer add-url の bootstrap 結果。成功時は学習した peer_id と相手の synergos
 /// バージョンを返す。
 #[derive(Debug, Clone)]
@@ -41,6 +43,8 @@ pub enum BootstrapError {
     InvalidResponse(String),
     #[error("incompatible protocol_version: got {got}, expected {expected}")]
     IncompatibleProtocol { got: u32, expected: u32 },
+    #[error("peer-info identifies {actual}, expected {expected}")]
+    UnexpectedPeer { actual: String, expected: String },
     #[error("dns resolution failed for {host}: {details}")]
     DnsFailure { host: String, details: String },
     #[error("quic connect failed: {0}")]
@@ -66,9 +70,19 @@ pub async fn bootstrap_from_url(
     quic: &QuicManager,
     timeout: Duration,
 ) -> Result<BootstrapResult, BootstrapError> {
+    bootstrap_from_url_expected(base_url, quic, timeout, None).await
+}
+
+/// Bootstrap while requiring `/peer-info` to identify a specific peer. The
+/// identity comparison happens before DNS resolution or QUIC connection.
+pub async fn bootstrap_from_url_expected(
+    base_url: &str,
+    quic: &QuicManager,
+    timeout: Duration,
+    expected_peer: Option<&PeerId>,
+) -> Result<BootstrapResult, BootstrapError> {
     // 1. URL parse + /peer-info path 付与
-    let parsed =
-        reqwest::Url::parse(base_url).map_err(|e| BootstrapError::InvalidUrl(format!("{e}")))?;
+    let parsed = validate_bootstrap_url(base_url)?;
     let host = parsed
         .host_str()
         .ok_or_else(|| BootstrapError::InvalidUrl("url has no host".into()))?
@@ -78,9 +92,13 @@ pub async fn bootstrap_from_url(
     // 2. HTTPS GET /peer-info
     let client = reqwest::Client::builder()
         .timeout(timeout)
+        // A peer-info endpoint is an explicit trust/bootstrap target. Following a
+        // redirect would let an untrusted invite token probe a second, unvalidated
+        // endpoint and would weaken the host binding used for QUIC resolution.
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|e| BootstrapError::Http(format!("client build: {e}")))?;
-    let resp = client
+    let mut resp = client
         .get(info_url.clone())
         .send()
         .await
@@ -91,9 +109,20 @@ pub async fn bootstrap_from_url(
             resp.status()
         )));
     }
-    let info: RemotePeerInfo = resp
-        .json()
+    let mut body = Vec::new();
+    while let Some(chunk) = resp
+        .chunk()
         .await
+        .map_err(|e| BootstrapError::Http(format!("read {info_url}: {e}")))?
+    {
+        if body.len().saturating_add(chunk.len()) > MAX_PEER_INFO_RESPONSE_BYTES {
+            return Err(BootstrapError::InvalidResponse(
+                "peer-info response too large".into(),
+            ));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    let info: RemotePeerInfo = serde_json::from_slice(&body)
         .map_err(|e| BootstrapError::InvalidResponse(format!("json parse: {e}")))?;
 
     // 3. protocol version check
@@ -120,7 +149,18 @@ pub async fn bootstrap_from_url(
     let candidates = resolve_candidate_addrs(&host, advertised).await?;
 
     // 5. 各候補に順番に QUIC connect (S1 仕様で peer_id 検証つき)
-    let expected_peer_id = PeerId::new(&info.peer_id);
+    let advertised_peer_id = PeerId::new(&info.peer_id);
+    if let Some(expected) = expected_peer {
+        if expected != &advertised_peer_id {
+            return Err(BootstrapError::UnexpectedPeer {
+                actual: advertised_peer_id.short(),
+                expected: expected.short(),
+            });
+        }
+    }
+    let expected_peer_id = expected_peer
+        .cloned()
+        .unwrap_or(advertised_peer_id);
     let mut last_err: Option<BootstrapError> = None;
     for addr in &candidates {
         tracing::info!(
@@ -148,6 +188,32 @@ pub async fn bootstrap_from_url(
     Err(last_err.unwrap_or_else(|| {
         BootstrapError::QuicConnect(format!("no usable address resolved for {host}"))
     }))
+}
+
+/// Validate a peer-info bootstrap base URL before any local project state is
+/// changed or network request is made.
+pub fn validate_bootstrap_url(base_url: &str) -> Result<reqwest::Url, BootstrapError> {
+    let parsed =
+        reqwest::Url::parse(base_url).map_err(|e| BootstrapError::InvalidUrl(format!("{e}")))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(BootstrapError::InvalidUrl(
+            "scheme must be http or https".into(),
+        ));
+    }
+    if parsed.host_str().is_none() {
+        return Err(BootstrapError::InvalidUrl("url has no host".into()));
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(BootstrapError::InvalidUrl(
+            "embedded credentials are not allowed".into(),
+        ));
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(BootstrapError::InvalidUrl(
+            "query strings and fragments are not allowed".into(),
+        ));
+    }
+    Ok(parsed)
 }
 
 fn build_peer_info_url(base: &reqwest::Url) -> reqwest::Url {
@@ -268,6 +334,16 @@ mod tests {
         let url = reqwest::Url::parse("https://relay.example.com/api/").unwrap();
         let info = build_peer_info_url(&url);
         assert_eq!(info.as_str(), "https://relay.example.com/api/peer-info");
+    }
+
+    #[test]
+    fn bootstrap_url_rejects_unsafe_forms() {
+        assert!(validate_bootstrap_url("file:///etc/passwd").is_err());
+        let mut with_credentials = reqwest::Url::parse("http://host:7780").unwrap();
+        with_credentials.set_username("user").unwrap();
+        assert!(validate_bootstrap_url(with_credentials.as_str()).is_err());
+        assert!(validate_bootstrap_url("http://host:7780?next=http://internal").is_err());
+        assert!(validate_bootstrap_url("http://192.168.1.10:7780").is_ok());
     }
 
     /// `[::]:port` (unspecified IPv6) なら hostname 解決にフォールバックする。

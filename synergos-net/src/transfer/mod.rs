@@ -39,6 +39,10 @@ pub struct TransferHeader {
     pub chunk_count: u64,
     /// 全体 Blake3 ハッシュ (受信側で最終検証)
     pub total_hash: Blake3Hash,
+    /// このファイルのバージョン (publisher のマニフェスト発番)。
+    /// 旧ピアからは欠落しうるので serde default (=0: 不明)。
+    #[serde(default)]
+    pub version: u64,
 }
 
 /// 各チャンクのフレーム。
@@ -113,15 +117,46 @@ pub async fn receive_stream<R>(mut reader: R, out_path: &Path) -> Result<Transfe
 where
     R: AsyncRead + Unpin,
 {
-    let header = match read_frame(&mut reader).await? {
-        FrameKind::Header(h) => h,
-        _ => {
-            return Err(SynergosNetError::Transfer(
-                "expected header as first frame".into(),
-            ));
-        }
-    };
+    let header = read_header(&mut reader).await?;
+    receive_body(reader, header, out_path).await
+}
 
+/// ヘッダフレームだけ読む (保存先をヘッダの内容で決めたい呼び出し側向け)。
+/// 続けて同じ reader を `receive_body` に渡す。
+pub async fn read_header<R>(reader: &mut R) -> Result<TransferHeader>
+where
+    R: AsyncRead + Unpin,
+{
+    match read_frame(reader).await? {
+        FrameKind::Header(h) => {
+            let expected_chunks = if h.total_size == 0 {
+                0
+            } else {
+                h.total_size.div_ceil(CHUNK_SIZE as u64)
+            };
+            if h.chunk_count != expected_chunks {
+                return Err(SynergosNetError::Transfer(format!(
+                    "invalid header chunk count: expected {expected_chunks} got {}",
+                    h.chunk_count
+                )));
+            }
+            Ok(h)
+        }
+        _ => Err(SynergosNetError::Transfer(
+            "expected header as first frame".into(),
+        )),
+    }
+}
+
+/// ヘッダ読み取り後の本体受信。chunk を検証しながら `out_path` へ書く。
+pub async fn receive_body<R>(
+    mut reader: R,
+    header: TransferHeader,
+    out_path: &Path,
+) -> Result<TransferHeader>
+where
+    R: AsyncRead + Unpin,
+{
     // 親ディレクトリが無ければ作成
     if let Some(parent) = out_path.parent() {
         if !parent.as_os_str().is_empty() {
@@ -131,11 +166,19 @@ where
     let mut file = tokio::fs::File::create(out_path).await?;
     let mut hasher = blake3::Hasher::new();
     let mut received_chunks: u64 = 0;
+    let mut received_bytes: u64 = 0;
 
     loop {
         let frame = read_frame(&mut reader).await?;
         match frame {
             FrameKind::Chunk(c) => {
+                if c.data.is_empty() || c.data.len() > CHUNK_SIZE {
+                    return Err(SynergosNetError::Transfer(format!(
+                        "invalid chunk {} length: {}",
+                        c.index,
+                        c.data.len()
+                    )));
+                }
                 let expected_hash = Blake3Hash(*blake3::hash(&c.data).as_bytes());
                 if expected_hash != c.hash {
                     return Err(SynergosNetError::Transfer(format!(
@@ -152,6 +195,15 @@ where
                 hasher.update(&c.data);
                 file.write_all(&c.data).await?;
                 received_chunks += 1;
+                received_bytes = received_bytes
+                    .checked_add(c.data.len() as u64)
+                    .ok_or_else(|| SynergosNetError::Transfer("received size overflow".into()))?;
+                if received_bytes > header.total_size {
+                    return Err(SynergosNetError::Transfer(format!(
+                        "received size exceeds header: expected {} got at least {received_bytes}",
+                        header.total_size
+                    )));
+                }
             }
             FrameKind::Footer(f) => {
                 let total = Blake3Hash(*hasher.finalize().as_bytes());
@@ -169,6 +221,12 @@ where
                     return Err(SynergosNetError::Transfer(format!(
                         "chunk count mismatch: expected {} got {}",
                         header.chunk_count, received_chunks
+                    )));
+                }
+                if received_bytes != header.total_size {
+                    return Err(SynergosNetError::Transfer(format!(
+                        "size mismatch: expected {} got {received_bytes}",
+                        header.total_size
                     )));
                 }
                 file.flush().await?;
@@ -207,6 +265,24 @@ where
 /// そのまま `receive_stream` に渡す。
 pub async fn receive_over_quic(recv: quinn::RecvStream, out_path: &Path) -> Result<TransferHeader> {
     receive_stream(recv, out_path).await
+}
+
+/// QUIC recv half からヘッダだけ先読みする。戻り値の recv を
+/// `receive_over_quic_with_header` に渡して本体を受ける。
+pub async fn peek_transfer_header(
+    mut recv: quinn::RecvStream,
+) -> Result<(TransferHeader, quinn::RecvStream)> {
+    let header = read_header(&mut recv).await?;
+    Ok((header, recv))
+}
+
+/// `peek_transfer_header` の続き: 本体を `out_path` へ受信する。
+pub async fn receive_over_quic_with_header(
+    recv: &mut quinn::RecvStream,
+    header: TransferHeader,
+    out_path: &Path,
+) -> Result<TransferHeader> {
+    receive_body(recv, header, out_path).await
 }
 
 /// ディスク上のファイルの全体 Blake3 ハッシュとサイズ + チャンク数を計算する。
@@ -298,6 +374,7 @@ mod tests {
             total_size: size,
             chunk_count: chunks,
             total_hash: h,
+            version: 1,
         };
 
         let (tx, rx) = duplex(64 * 1024);
@@ -338,6 +415,7 @@ mod tests {
             total_size: 5,
             chunk_count: 1,
             total_hash: Blake3Hash(*blake3::hash(b"hello").as_bytes()),
+            version: 1,
         };
         write_frame(&mut tx, &FrameKind::Header(header))
             .await

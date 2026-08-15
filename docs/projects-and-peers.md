@@ -26,18 +26,22 @@ ProjectOpen 時に対応する `CatalogManager` が立ち上がり、gossip Cata
 ### 招待トークンを発行する
 
 ```bash
-synergos-core project invite <project-id> [--expires <秒>]
+synergos-core project invite <project-id> [--expires <秒>] [--url http://<このホスト>:7780]
 ```
 
-- `--expires 3600` のように指定するとワンタイム的な期限付きトークンを発行。
-- 省略すると無期限。
+- `--url` は **このホストの `/peer-info` URL** (参加側が最初に接続しに来る先)。
+  config の `peer_info_advertised_url` があれば省略可。どちらも無いと
+  **同一 daemon 内でしか使えない従来型トークン** (UUID) になり、別マシンでは `invalid invite token` になる。
+- `--expires 3600` で期限付き。省略すると無期限。
 
 出力例:
 ```
-Invite token: inv-xxxxxxxxxxxxxxxxxxxxxxx
+Invite token: syn1.eyJwcm9qZWN0X2lkIjoibXlwcm9qIiw...   ← syn1. で始まれば別マシン可
 Expires at:   1746000000 (epoch)
 ```
 
+トークンには project_id / 発行ノードの peer_id・公開鍵 / `/peer-info` URL / 期限が入り、
+発行ノードの鍵で署名されています (改竄・別ノードなりすましは参加側で弾く)。
 この token を Slack / メッセンジャー等で相手に渡します。
 
 ### 招待で既存プロジェクトに参加する (2 台目以降)
@@ -49,7 +53,10 @@ synergos-core project join <token> <local-path>
 - token はホスト側で発行したもの。
 - `local-path` は参加ノード側の保存先ディレクトリ (ローカルルート)。
 
-参加後、ホストと同じ `project-id` で自動的に open されます。
+参加側では (1) 同じ `project-id` でローカルに open → (2) トークン内の URL へ bootstrap
+(QUIC 接続、相手 peer_id がトークンの発行者と一致することを検証) → (3) Presence 登録、の順に進みます。
+(2) が失敗した場合もプロジェクトは open 済みなので、原因を直したあと
+`peer add-url <project-id> <url>` で接続だけやり直せます。
 
 ### プロジェクトの確認・更新・終了
 
@@ -143,9 +150,9 @@ GUI / IPC クライアントは `CatalogSyncCompletedEvent` を subscribe して
 
 ```bash
 # A
-synergos-core start
+synergos-core start --config synergos-net.toml       # peer_info_listen_addr / quic.listen_addr を設定済み
 synergos-core project open myproj /path/to/A
-synergos-core project invite myproj                    # token を B に渡す
+synergos-core project invite myproj --url http://<A>:7780   # syn1. token を B に渡す
 
 # B
 synergos-core start

@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use synergos_core::event_bus::{CoreEventBus, SharedEventBus};
 use synergos_core::exchange::{
-    Exchange, FileSharing, OutPathResolver, ShareRequest, TransferPriority,
+    Exchange, FileSharing, OutPathResolver, ShareRequest, SharedFileRecord, TransferPriority,
 };
 use synergos_net::config::QuicConfig;
 use synergos_net::identity::Identity;
@@ -122,7 +122,7 @@ async fn file_want_auto_triggers_share_and_send_over_quic() {
 
     // ── B が FileWant を broadcast した、と想定して A の gossip subscriber
     // 経由で handle_file_want を直接叩く (gossip 中継は別途統合) ──
-    ex_a.handle_file_want(id_b.peer_id().clone(), file_id.clone(), 1);
+    ex_a.handle_file_want("p", id_b.peer_id().clone(), file_id.clone(), 1);
 
     // 受信完了を待つ
     tokio::time::timeout(Duration::from_secs(5), receive_task)
@@ -152,6 +152,7 @@ async fn file_want_without_shared_file_is_noop() {
 
     // shared_files に無いので無視される (panic せず、転送も起動しない)
     ex.handle_file_want(
+        "missing-project",
         synergos_net::types::PeerId::new("some-peer"),
         FileId::new("nonexistent"),
         1,
@@ -179,5 +180,47 @@ async fn file_offer_registers_remote_offer_in_ledger() {
     assert_eq!(
         ex.ledger().pending_want_count(&FileId::new("cool.bin"), 1),
         0
+    );
+}
+
+#[test]
+fn shared_file_records_are_scoped_by_project() {
+    let bus: SharedEventBus = Arc::new(CoreEventBus::new());
+    let exchange = Exchange::new(bus);
+    let file_id = FileId::new("same.bin");
+    exchange.restore_shared_file(
+        file_id.clone(),
+        SharedFileRecord {
+            project_id: "project-a".into(),
+            file_path: "a/same.bin".into(),
+            file_size: 10,
+            crc: 1,
+            version: 1,
+        },
+    );
+    exchange.restore_shared_file(
+        file_id.clone(),
+        SharedFileRecord {
+            project_id: "project-b".into(),
+            file_path: "b/same.bin".into(),
+            file_size: 20,
+            crc: 2,
+            version: 1,
+        },
+    );
+
+    assert_eq!(
+        exchange
+            .shared_file_record("project-a", &file_id)
+            .unwrap()
+            .file_size,
+        10
+    );
+    assert_eq!(
+        exchange
+            .shared_file_record("project-b", &file_id)
+            .unwrap()
+            .file_size,
+        20
     );
 }
