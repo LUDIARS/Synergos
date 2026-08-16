@@ -158,7 +158,9 @@ impl HistoryConfig {
                 return Err("relative history.root must stay inside the project root".into());
             }
             if self.projects.is_empty() {
-                return Err("history.projects must not be empty when history.enabled = true".into());
+                return Err(
+                    "history.projects must not be empty when history.enabled = true".into(),
+                );
             }
         }
         Ok(())

@@ -269,9 +269,15 @@ impl GossipNode {
     }
 
     /// ハートビート処理
+    ///
+    /// `mesh.iter()` の shard 読みロックを保持したまま `enforce_mesh_bounds` (同じ map の
+    /// `get_mut`) を呼ぶと DashMap の同一 shard で自己デッドロックする (プロジェクトを 1 つ
+    /// open した直後の最初の heartbeat で必ず発生し、heartbeat タスクが worker スレッドごと
+    /// 永久ブロック → shutdown 時の `unsubscribe` (`mesh.remove`) も同じ shard で止まる)。
+    /// 先に topic を集めてイテレータを手放してから個別にロックし直す。
     pub fn heartbeat(&self) {
-        for entry in self.mesh.iter() {
-            let topic = entry.key();
+        let topics: Vec<TopicId> = self.mesh.iter().map(|entry| entry.key().clone()).collect();
+        for topic in &topics {
             self.enforce_mesh_bounds(topic);
         }
     }
@@ -313,6 +319,53 @@ fn message_id(topic: &TopicId, message: &GossipMessage) -> MessageId {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 回帰: 購読中の topic があるときの heartbeat が同一 shard で自己デッドロックしない。
+    /// (デッドロックすると join が返らないので、別スレッドで走らせて時間制限を付ける)
+    #[test]
+    fn heartbeat_does_not_deadlock_with_subscribed_topics() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let node = std::sync::Arc::new(GossipNode::new(
+            PeerId::new("local"),
+            GossipsubConfig {
+                mesh_n: 6,
+                mesh_n_low: 4,
+                mesh_n_high: 2,
+                heartbeat_interval_ms: 1000,
+                message_cache_size: 100,
+            },
+        ));
+        // 複数 topic を上限超過にして、heartbeat による刈り込みも検証する。
+        // `graft` は追加ごとに刈り込むため、ここでは内部状態を直接セットする。
+        for i in 0..64 {
+            let topic = TopicId::project(&format!("proj-{i}"));
+            let _ = node.mesh.insert(
+                topic,
+                (0..4)
+                    .map(|j| PeerId::new(format!("peer-{i}-{j}")))
+                    .collect(),
+            );
+        }
+
+        let (tx, rx) = mpsc::channel();
+        let worker = node.clone();
+        std::thread::spawn(move || {
+            worker.heartbeat();
+            let _ = tx.send(());
+        });
+        rx.recv_timeout(Duration::from_secs(5))
+            .expect("heartbeat must finish (DashMap same-shard deadlock)");
+
+        // 刈り込み後も購読は残り、unsubscribe (remove) も詰まらない
+        for i in 0..64 {
+            let topic = TopicId::project(&format!("proj-{i}"));
+            assert!(node.mesh_peers(&topic).len() <= 2);
+            node.unsubscribe(&topic);
+        }
+        assert!(node.subscribed_topics().is_empty());
+    }
 
     #[test]
     fn test_subscribe_and_publish() {
