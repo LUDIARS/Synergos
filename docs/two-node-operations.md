@@ -51,14 +51,6 @@ identity (peer_id の元) は初回起動で `%APPDATA%\Synergos\identity.key` /
 `synergos-net.toml`:
 
 ```toml
-# QUIC を固定ポートで待ち受ける ([::] はデュアルスタックで IPv4 も受ける)
-[quic]
-listen_addr = "[::]:4433"
-max_concurrent_streams = 100
-idle_timeout_ms = 30000
-max_udp_payload_size = 1452
-enable_0rtt = false
-
 # 参加側が最初に叩く /peer-info サーブレット (TCP)
 peer_info_listen_addr = "0.0.0.0:7780"
 
@@ -73,6 +65,14 @@ peer_info_advertised_url = "http://192.168.1.10:7780"
 # 起動時の NAT 越え probe (IPv6 / UPnP / Tunnel、数秒) を省く。
 # join / peer add-url の直結経路には影響しないが、LAN/Mesh 運用では不要
 auto_promote = false
+
+# QUIC を固定ポートで待ち受ける ([::] はデュアルスタックで IPv4 も受ける)
+[quic]
+listen_addr = "[::]:4433"
+max_concurrent_streams = 100
+idle_timeout_ms = 30000
+max_udp_payload_size = 1452
+enable_0rtt = false
 
 [tunnel]
 api_token_ref = ""
@@ -105,14 +105,14 @@ sudo ufw allow 7780/tcp
 B は inbound 不要。最小設定:
 
 ```toml
+auto_promote = false
+
 [quic]
 listen_addr = "[::]:0"        # 任意ポート (省略可)
 max_concurrent_streams = 100
 idle_timeout_ms = 30000
 max_udp_payload_size = 1452
 enable_0rtt = false
-
-auto_promote = false
 
 [tunnel]
 api_token_ref = ""

@@ -3,7 +3,12 @@ use std::net::SocketAddr;
 use serde::{Deserialize, Serialize};
 
 /// synergos-net の全設定
+///
+/// 設定ファイルは**書いたセクション / キーだけ上書き**で、省略した部分は
+/// [`NetConfig::default`] の値になる (`[quic]` と `[tunnel]` だけの最小ファイルで起動できる)。
+/// サブセクションを書く場合、そのセクション内のキーは全部書く (サブ struct 側は個別 default を持たない)。
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct NetConfig {
     pub tunnel: TunnelConfig,
     pub mesh: MeshConfig,
@@ -510,6 +515,51 @@ mod tests {
         };
         assert!(project_root.validate().is_err());
         assert!(HistoryConfig::default().validate().is_ok());
+    }
+
+    /// 手順書 (docs/two-node-operations.md 等) の最小設定 = [quic] と [tunnel] だけ +
+    /// トップレベル数キー、で読めること。以前は missing field \`mesh\` で起動できなかった。
+    #[test]
+    fn minimal_toml_with_only_quic_and_tunnel_sections_parses() {
+        let text = r#"
+peer_info_listen_addr = "0.0.0.0:7780"
+quic_advertised_addr = "0.0.0.0:4433"
+peer_info_advertised_url = "http://100.96.0.5:7780"
+auto_promote = false
+
+[quic]
+listen_addr = "[::]:4433"
+max_concurrent_streams = 100
+idle_timeout_ms = 30000
+max_udp_payload_size = 1452
+enable_0rtt = false
+
+[tunnel]
+api_token_ref = ""
+hostname = ""
+allow_simulation = false
+auto_restart = false
+restart_base_ms = 1000
+restart_max_ms = 60000
+"#;
+        let cfg: NetConfig = toml::from_str(text).expect("minimal config must parse");
+        assert!(!cfg.auto_promote);
+        assert_eq!(cfg.quic.listen_addr.unwrap().port(), 4433);
+        assert_eq!(
+            cfg.peer_info_advertised_url.as_deref(),
+            Some("http://100.96.0.5:7780")
+        );
+        // 省略したセクションは既定値
+        let d = NetConfig::default();
+        assert_eq!(cfg.mesh.doh_endpoint, d.mesh.doh_endpoint);
+        assert_eq!(cfg.gossipsub.mesh_n, d.gossipsub.mesh_n);
+        assert!(!cfg.history.enabled);
+        // 空ファイルも既定値で読める
+        let empty: NetConfig = toml::from_str("").unwrap();
+        assert_eq!(
+            empty.quic.max_concurrent_streams,
+            d.quic.max_concurrent_streams
+        );
     }
 
     #[test]
