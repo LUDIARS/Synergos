@@ -34,4 +34,3 @@ pub struct DeviceRegistration {
     #[serde(default)]
     pub revoked_at: Option<String>,
 }
-

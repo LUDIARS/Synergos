@@ -189,9 +189,7 @@ pub async fn get_node(
     State(state): State<Arc<AppState>>,
     Path((org_id, node_id)): Path<(String, String)>,
 ) -> ControlResult<Json<NodeView>> {
-    Ok(Json(
-        state.store.get_node(&org_id, &node_id).await?.into(),
-    ))
+    Ok(Json(state.store.get_node(&org_id, &node_id).await?.into()))
 }
 
 pub async fn patch_node(
@@ -363,9 +361,7 @@ mod tests {
                 delete(delete_connector),
             )
             .with_state(delete_count.clone());
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let task = tokio::spawn(async move {
             axum::serve(listener, router).await.unwrap();

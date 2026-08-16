@@ -137,9 +137,7 @@ fn is_trusted_plaintext_host(url: &reqwest::Url) -> bool {
     // `Url::host_str` retains brackets around IPv6 literals (for example, `[::1]`).
     // Remove those URL delimiters before parsing the address.
     match host.trim_matches(['[', ']']).parse::<std::net::IpAddr>() {
-        Ok(std::net::IpAddr::V4(ip)) => {
-            ip.is_loopback() || synergos_net::mesh_ip::is_mesh_ipv4(ip)
-        }
+        Ok(std::net::IpAddr::V4(ip)) => ip.is_loopback() || synergos_net::mesh_ip::is_mesh_ipv4(ip),
         Ok(std::net::IpAddr::V6(ip)) => ip.is_loopback(),
         Err(_) => false,
     }

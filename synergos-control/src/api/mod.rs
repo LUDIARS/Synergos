@@ -7,14 +7,14 @@ pub(crate) use heartbeat::{generate_node_key, hash_node_key};
 
 use std::sync::Arc;
 
-use axum::middleware;
-use axum::routing::{get, post};
 use axum::extract::DefaultBodyLimit;
 use axum::extract::Request;
 use axum::http::header::{CACHE_CONTROL, PRAGMA};
 use axum::http::HeaderValue;
+use axum::middleware;
 use axum::middleware::Next;
 use axum::response::Response;
+use axum::routing::{get, post};
 use axum::Router;
 
 use crate::auth::{require_admin_token, AdminToken};
@@ -77,9 +77,9 @@ async fn health() -> axum::Json<serde_json::Value> {
 }
 
 fn normalize_mesh_ip(value: &str) -> ControlResult<String> {
-    let ip: std::net::Ipv4Addr = value.parse().map_err(|_| {
-        ControlError::InvalidRequest("mesh_ip must be an IPv4 address".to_string())
-    })?;
+    let ip: std::net::Ipv4Addr = value
+        .parse()
+        .map_err(|_| ControlError::InvalidRequest("mesh_ip must be an IPv4 address".to_string()))?;
     let octets = ip.octets();
     if octets[0] != 100 || !(96..=111).contains(&octets[1]) {
         return Err(ControlError::InvalidRequest(

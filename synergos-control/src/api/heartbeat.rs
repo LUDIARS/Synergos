@@ -60,10 +60,7 @@ pub async fn receive_heartbeat(
                 warn!(node = %node.id, "heartbeat received but node has no key issued");
                 return Err(ControlError::Unauthorized);
             };
-            if !crate::auth::constant_time_eq(
-                provided_hash.as_bytes(),
-                expected_hash.as_bytes(),
-            ) {
+            if !crate::auth::constant_time_eq(provided_hash.as_bytes(), expected_hash.as_bytes()) {
                 return Err(ControlError::Unauthorized);
             }
             if req.peer_id.is_empty()
@@ -74,9 +71,11 @@ pub async fn receive_heartbeat(
                     "peer_id must be 1..=256 printable characters".to_string(),
                 ));
             }
-            if req.synergos_version.as_ref().is_some_and(|version| {
-                version.len() > 128 || version.chars().any(char::is_control)
-            }) {
+            if req
+                .synergos_version
+                .as_ref()
+                .is_some_and(|version| version.len() > 128 || version.chars().any(char::is_control))
+            {
                 return Err(ControlError::InvalidRequest(
                     "synergos_version must be at most 128 printable characters".to_string(),
                 ));

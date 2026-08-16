@@ -298,11 +298,10 @@ impl Daemon {
 
         // 設定不備はバックグラウンドタスクを起動する前に検出する。
         // 起動後に `?` で戻ると、既に spawn 済みのタスクをクリーンアップできない。
-        let control_heartbeat_reporter =
-            crate::control_heartbeat::HeartbeatReporter::from_config(
-                &self.net.net_config.control,
-                self.net.local_peer_id.clone(),
-            )?;
+        let control_heartbeat_reporter = crate::control_heartbeat::HeartbeatReporter::from_config(
+            &self.net.net_config.control,
+            self.net.local_peer_id.clone(),
+        )?;
 
         let shutdown_tx = self.ctx.shutdown_tx.clone();
 

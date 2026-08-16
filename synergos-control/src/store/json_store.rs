@@ -44,10 +44,9 @@ impl JsonStore {
     async fn persist(&self, snapshot: &RegistrySnapshot) -> ControlResult<()> {
         let json = serde_json::to_string_pretty(snapshot)
             .map_err(|e| ControlError::Store(format!("serialize: {e}")))?;
-        let tmp = self.path.with_extension(format!(
-            "{}.tmp",
-            uuid::Uuid::new_v4().simple()
-        ));
+        let tmp = self
+            .path
+            .with_extension(format!("{}.tmp", uuid::Uuid::new_v4().simple()));
         let result = async {
             let mut file = tokio::fs::OpenOptions::new()
                 .write(true)

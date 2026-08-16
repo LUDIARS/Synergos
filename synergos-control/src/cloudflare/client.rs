@@ -67,9 +67,7 @@ impl CloudflareClient {
         self.call_optional(method.clone(), path, &[], body, false)
             .await?
             .ok_or_else(|| {
-                ControlError::Cloudflare(format!(
-                    "{method} {path}: success but empty result"
-                ))
+                ControlError::Cloudflare(format!("{method} {path}: success but empty result"))
             })
     }
 
@@ -308,9 +306,7 @@ mod tests {
     }
 
     async fn test_client(router: Router) -> (CloudflareClient, tokio::task::JoinHandle<()>) {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let task = tokio::spawn(async move {
             axum::serve(listener, router).await.unwrap();

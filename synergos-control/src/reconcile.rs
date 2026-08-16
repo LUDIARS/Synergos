@@ -249,10 +249,7 @@ mod tests {
         let report = classify(&orgs, &[], &[], &registrations, now_ms());
 
         assert_eq!(report.known_devices.len(), 1);
-        assert_eq!(
-            report.known_devices[0].org_ids,
-            vec!["acme".to_string()]
-        );
+        assert_eq!(report.known_devices[0].org_ids, vec!["acme".to_string()]);
         assert_eq!(report.dark_devices.len(), 2);
     }
 
