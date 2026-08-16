@@ -22,7 +22,7 @@
 | 転送の整合性検証 | ✅ できている | 64 KiB フレームごと blake3 + 全体 blake3 |
 | CatalogUpdate → CatalogSyncService | ⚠️ 骨格のみ | RootCatalog を Bitswap で取ってくるが**実ファイル同期には使われていない** (実データは FileOffer 経路)。Phase 2 (履歴ノード) では使わない。将来の最適化用に残置 |
 | Bitswap / ContentStore | ⚠️ メモリのみ | `MemoryContentStore`。再起動で消える。Phase 2 の履歴ノード保管庫は別実装 (`.synergos/history/`)、ContentStore は据え置き |
-| 差分転送 (変わった部分だけ) | ❌ 未実装 | 全体転送。設計は [versioning-design.md](versioning-design.md) §3 |
+| 差分転送 (変わった部分だけ) | ➖ やらない (neco 決定 2026-08-16) | 全体転送のまま。代わりに **履歴ノード** ([versioning-design.md](versioning-design.md) §3) が旧版の実体を保持 — ✅ 実装済 (`[history] enabled = true`) |
 | 削除 / リネームの伝搬 | ❌ 未実装 | manifest に tombstone を持たせれば可 (P1) |
 | ディレクトリ単位 publish / 自動監視 | ❌ 未実装 | `publish <id> <files...>` のみ。`--all` (作業ツリー走査) は小さい追加 (P1) |
 | 競合検出・退避 | ⚠️ 一部 | 同じ version で size / CRC が違う Offer は `ConflictManager` へ登録し、ローカル版を保持。親版に基づく分岐検出・別名退避・解決 UI は未実装。設計 §4 |
@@ -60,11 +60,11 @@
 
 | # | 作業 | 規模 |
 |---|---|---|
-| 1 | `[history]` 設定 (enabled / projects / root / 保持ポリシー) + 保管庫 (objects + index.json、atomic write、meta sidecar) | 中 |
-| 2 | 受信/publish 完了時に履歴ノードが objects へ格納 (ハードリンク or コピー) + 旧版 FileWant への応答 | 中 |
-| 3 | `project checkout` / `project restore --version` / `history ls` / `history gc` | 中 |
+| 1 | ✅ **実装済** `[history]` 設定 (enabled / projects / root / 保持ポリシー) + 保管庫 (objects + index.json、atomic write、meta sidecar、破損時 sidecar から再構築) | 中 |
+| 2 | ✅ **実装済** 受信/publish 完了時に履歴ノードが objects へコピー + 旧版 FileWant への応答 (`Exchange` の history hook)、巻き戻し後 publish の版番号衝突回避 (観測最大版 + 1) | 中 |
+| 3 | ✅ **実装済** `project checkout` / `project restore --version` / `history ls` / `history gc [--purge] [--keep-manifest]` (E2E `history_node_e2e`)。**実機 2 台での通し確認は未** | 中 |
 | 4 | 競合検出 (version 分岐) → 退避 + ConflictAlert 発火 | 中 |
-| 5 | manifest / state 分離 (git コミット用と node ローカル用) | 小 |
+| 5 | ✅ **実装済** manifest / state 分離 (`manifest.json` は git、観測版高水位 `state.json` は node ローカル) | 小 |
 | 6 | プロジェクト参加 ACL (招待トークンを認可境界にする: ホスト側で参加要求を検証) | 中 |
 | 7 | 4 台以上でのメッシュ形成 (GRAFT/PRUNE の実配線。今は全 QUIC 接続へ flood) | 中 |
 | 8 | Cloudflare Mesh の実セットアップと常駐運用 | 運用作業 |

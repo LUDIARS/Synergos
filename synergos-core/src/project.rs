@@ -18,6 +18,7 @@ use crate::event_bus::SharedEventBus;
 use crate::manifest::{
     normalize_rel_path, safe_join_under_root, BumpOutcome, ManifestEntry, ProjectManifest,
 };
+use crate::version_state::VersionState;
 
 // ── 型定義 ──
 
@@ -204,6 +205,8 @@ pub struct ProjectManager {
     /// project_id → 読み込み済みマニフェスト (`<root>/.synergos/manifest.json`)。
     /// open_project 時に読み込み、publish / 受信完了のたびに更新 + 保存する。
     manifests: DashMap<String, ProjectManifest>,
+    /// git 管理の manifest を巻き戻しても失われない、ファイル版番号の高水位。
+    version_states: DashMap<String, VersionState>,
     /// project_id ごとのマニフェスト更新ロック。メモリ更新から原子的保存までを
     /// 直列化し、古いスナップショットによる後勝ち上書きを防ぐ。
     manifest_locks: DashMap<String, Arc<tokio::sync::Mutex<()>>>,
@@ -248,6 +251,7 @@ impl ProjectManager {
             invites: DashMap::new(),
             file_paths: DashMap::new(),
             manifests: DashMap::new(),
+            version_states: DashMap::new(),
             manifest_locks: DashMap::new(),
             event_bus,
             gossip,
@@ -267,6 +271,7 @@ impl ProjectManager {
             invites: DashMap::new(),
             file_paths: DashMap::new(),
             manifests: DashMap::new(),
+            version_states: DashMap::new(),
             manifest_locks: DashMap::new(),
             event_bus,
             gossip,
@@ -391,6 +396,18 @@ impl ProjectManager {
         Ok(())
     }
 
+    async fn load_version_state_unlocked(
+        &self,
+        project_id: &str,
+    ) -> Result<(), std::io::Error> {
+        let root = self
+            .project_root(project_id)
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, project_id))?;
+        let state = VersionState::load(&root, project_id).await?;
+        self.version_states.insert(project_id.to_string(), state);
+        Ok(())
+    }
+
     fn manifest_lock(&self, project_id: &str) -> Arc<tokio::sync::Mutex<()>> {
         self.manifest_locks
             .entry(project_id.to_string())
@@ -399,6 +416,7 @@ impl ProjectManager {
     }
 
     /// publish 時のバージョン発番 + 保存。内容が同じなら据え置き。
+    /// 新しい版はノードローカルに永続化した観測済み最大版を必ず上回る。
     pub async fn bump_file_version(
         &self,
         project_id: &str,
@@ -412,6 +430,9 @@ impl ProjectManager {
         if !self.manifests.contains_key(project_id) {
             self.load_manifest_unlocked(project_id).await?;
         }
+        if !self.version_states.contains_key(project_id) {
+            self.load_version_state_unlocked(project_id).await?;
+        }
         let root = self
             .project_root(project_id)
             .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, project_id))?;
@@ -420,15 +441,28 @@ impl ProjectManager {
             .get(project_id)
             .map(|manifest| manifest.value().clone())
             .unwrap_or_else(|| ProjectManifest::new(project_id));
-        let outcome = snapshot.bump(rel, size, crc, publisher, synergos_net::types::now_ms());
+        let floor = self.highest_confirmed_version(project_id, rel);
+        let outcome = snapshot.bump_at_least(
+            rel,
+            size,
+            crc,
+            publisher,
+            synergos_net::types::now_ms(),
+            floor,
+        );
         if matches!(outcome, BumpOutcome::Bumped(_)) {
+            // 高水位を先に永続化する。manifest 保存との間で停止しても版番号を
+            // 再利用せず、欠番になるだけなので衝突安全側に倒れる。
+            self.note_confirmed_version_unlocked(project_id, rel, outcome.version())
+                .await?;
             snapshot.save(&root).await?;
             self.manifests.insert(project_id.to_string(), snapshot);
         }
         Ok(outcome)
     }
 
-    /// 受信完了の記録 + 保存。手元より新しいときだけ書く。
+    /// 受信完了の記録 + 保存。手元より新しいときだけ書く (`force` なら常に書く)。
+    #[allow(clippy::too_many_arguments)]
     pub async fn record_received_file(
         &self,
         project_id: &str,
@@ -437,11 +471,15 @@ impl ProjectManager {
         size: u64,
         crc: u32,
         publisher: &str,
+        force: bool,
     ) -> Result<bool, std::io::Error> {
         let lock = self.manifest_lock(project_id);
         let _guard = lock.lock().await;
         if !self.manifests.contains_key(project_id) {
             self.load_manifest_unlocked(project_id).await?;
+        }
+        if !self.version_states.contains_key(project_id) {
+            self.load_version_state_unlocked(project_id).await?;
         }
         let root = self
             .project_root(project_id)
@@ -451,19 +489,70 @@ impl ProjectManager {
             .get(project_id)
             .map(|manifest| manifest.value().clone())
             .unwrap_or_else(|| ProjectManifest::new(project_id));
-        let changed = snapshot.record_received(
+        self.note_confirmed_version_unlocked(project_id, rel, version)
+            .await?;
+        let changed = snapshot.record_received_with(
             rel,
             version,
             size,
             crc,
             publisher,
             synergos_net::types::now_ms(),
+            force,
         );
         if changed {
             snapshot.save(&root).await?;
             self.manifests.insert(project_id.to_string(), snapshot);
         }
         Ok(changed)
+    }
+
+    /// マニフェストをディスクから読み直す (`git checkout` 等で
+    /// `.synergos/manifest.json` が外から書き換わった後の checkout 用)。
+    pub async fn reload_manifest(
+        &self,
+        project_id: &str,
+    ) -> Result<ProjectManifest, std::io::Error> {
+        let lock = self.manifest_lock(project_id);
+        let _guard = lock.lock().await;
+        self.load_manifest_unlocked(project_id).await?;
+        self.note_manifest_versions_unlocked(project_id).await?;
+        Ok(self
+            .manifests
+            .get(project_id)
+            .map(|m| m.value().clone())
+            .unwrap_or_else(|| ProjectManifest::new(project_id)))
+    }
+
+    /// マニフェストを丸ごと差し替えて保存する (checkout `--manifest` 用)。
+    pub async fn replace_manifest(
+        &self,
+        project_id: &str,
+        manifest: ProjectManifest,
+    ) -> Result<(), std::io::Error> {
+        if manifest.project_id != project_id {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "manifest project id does not match",
+            ));
+        }
+        let lock = self.manifest_lock(project_id);
+        let _guard = lock.lock().await;
+        let root = self
+            .project_root(project_id)
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, project_id))?;
+        if !self.version_states.contains_key(project_id) {
+            self.load_version_state_unlocked(project_id).await?;
+        }
+        let versions: Vec<(String, u64)> = manifest
+            .files
+            .iter()
+            .map(|(rel, entry)| (rel.clone(), entry.version))
+            .collect();
+        self.note_versions_unlocked(project_id, &versions).await?;
+        manifest.save(&root).await?;
+        self.manifests.insert(project_id.to_string(), manifest);
+        Ok(())
     }
 
     /// マニフェストの全エントリ (rel path, entry)。起動時の shared_files 復元用。
@@ -477,6 +566,81 @@ impl ProjectManager {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    /// 手元の manifest / 検証済み転送で確定した版番号の高水位を永続化する。
+    pub async fn note_confirmed_version(
+        &self,
+        project_id: &str,
+        rel: &str,
+        version: u64,
+    ) -> Result<(), std::io::Error> {
+        let lock = self.manifest_lock(project_id);
+        let _guard = lock.lock().await;
+        if !self.version_states.contains_key(project_id) {
+            self.load_version_state_unlocked(project_id).await?;
+        }
+        self.note_confirmed_version_unlocked(project_id, rel, version)
+            .await
+    }
+
+    pub fn highest_confirmed_version(&self, project_id: &str, rel: &str) -> u64 {
+        self.version_states
+            .get(project_id)
+            .map(|state| state.highest(rel))
+            .unwrap_or(0)
+    }
+
+    async fn note_confirmed_version_unlocked(
+        &self,
+        project_id: &str,
+        rel: &str,
+        version: u64,
+    ) -> Result<(), std::io::Error> {
+        self.note_versions_unlocked(project_id, &[(rel.to_string(), version)])
+            .await
+    }
+
+    async fn note_manifest_versions_unlocked(
+        &self,
+        project_id: &str,
+    ) -> Result<(), std::io::Error> {
+        if !self.version_states.contains_key(project_id) {
+            self.load_version_state_unlocked(project_id).await?;
+        }
+        let versions: Vec<(String, u64)> = self
+            .manifest_entries(project_id)
+            .into_iter()
+            .map(|(rel, entry)| (rel, entry.version))
+            .collect();
+        self.note_versions_unlocked(project_id, &versions).await
+    }
+
+    async fn note_versions_unlocked(
+        &self,
+        project_id: &str,
+        versions: &[(String, u64)],
+    ) -> Result<(), std::io::Error> {
+        let root = self
+            .project_root(project_id)
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, project_id))?;
+        let mut snapshot = self
+            .version_states
+            .get(project_id)
+            .map(|state| state.value().clone())
+            .ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::NotFound, "version state is not loaded")
+            })?;
+        let mut changed = false;
+        for (rel, version) in versions {
+            changed |= snapshot.note(rel, *version)?;
+        }
+        if changed {
+            snapshot.save(&root).await?;
+            self.version_states
+                .insert(project_id.to_string(), snapshot);
+        }
+        Ok(())
     }
 
     /// 指定プロジェクトのルートディレクトリを返す。未登録なら `None`。
@@ -543,6 +707,21 @@ impl ProjectConfiguration for ProjectManager {
         let manifest = ProjectManifest::load(&root_path, &project_id)
             .await
             .map_err(|error| ProjectError::Manifest(error.to_string()))?;
+        let mut version_state = VersionState::load(&root_path, &project_id)
+            .await
+            .map_err(|error| ProjectError::Manifest(error.to_string()))?;
+        let mut state_changed = false;
+        for (rel, entry) in &manifest.files {
+            state_changed |= version_state
+                .note(rel, entry.version)
+                .map_err(|error| ProjectError::Manifest(error.to_string()))?;
+        }
+        if state_changed {
+            version_state
+                .save(&root_path)
+                .await
+                .map_err(|error| ProjectError::Manifest(error.to_string()))?;
+        }
 
         tracing::info!("Opening project: {} at {}", project_id, root_path.display());
 
@@ -566,6 +745,8 @@ impl ProjectConfiguration for ProjectManager {
 
         self.projects.insert(project_id.clone(), project);
         self.manifests.insert(project_id.clone(), manifest);
+        self.version_states
+            .insert(project_id.clone(), version_state);
         // 永続化: state_path があれば JSON に書き出す
         let _ = self.save_state().await;
         Ok(())
@@ -582,6 +763,7 @@ impl ProjectConfiguration for ProjectManager {
                 // 関連する招待トークンも削除
                 self.invites.retain(|_, inv| inv.project_id != project_id);
                 self.manifests.remove(project_id);
+                self.version_states.remove(project_id);
                 self.manifest_locks.remove(project_id);
 
                 // EventBus にプロジェクトクローズを通知（Presence/Exchange が購読して処理）

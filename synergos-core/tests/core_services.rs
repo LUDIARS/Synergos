@@ -17,7 +17,7 @@ use synergos_core::exchange::{
 use synergos_core::manifest::ProjectManifest;
 use synergos_core::presence::PresenceService;
 use synergos_core::project::{ProjectConfiguration, ProjectManager};
-use synergos_net::types::{Blake3Hash, FileId, PeerId};
+use synergos_net::types::{FileId, PeerId};
 
 fn bus() -> SharedEventBus {
     Arc::new(CoreEventBus::new())
@@ -199,7 +199,7 @@ async fn exchange_cancel_transitions_to_cancelled() {
             file_id: FileId::new("f"),
             file_path: PathBuf::from("/tmp/none"),
             file_size: 10,
-            checksum: Blake3Hash::default(),
+            crc: 0,
             priority: TransferPriority::Interactive,
             target_peer: Some(PeerId::new("peer")),
             version: 1,
@@ -220,7 +220,7 @@ async fn exchange_gc_finished_reaps_cancelled() {
             file_id: FileId::new("f"),
             file_path: PathBuf::from("/tmp/none"),
             file_size: 10,
-            checksum: Blake3Hash::default(),
+            crc: 0,
             priority: TransferPriority::Interactive,
             target_peer: Some(PeerId::new("peer")),
             version: 1,
@@ -242,7 +242,7 @@ async fn exchange_pause_resume_roundtrip() {
             file_id: FileId::new("f"),
             file_path: PathBuf::from("/tmp/none"),
             file_size: 10,
-            checksum: Blake3Hash::default(),
+            crc: 0,
             priority: TransferPriority::Interactive,
             target_peer: Some(PeerId::new("peer")),
             version: 1,

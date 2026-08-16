@@ -45,6 +45,10 @@ pub enum Command {
 
     /// ネットワーク状態
     Network,
+
+    /// 履歴ノードの保管庫 (ls / gc)
+    #[command(subcommand)]
+    History(crate::cli_history::HistoryCommand),
 }
 
 #[derive(Subcommand)]
@@ -115,6 +119,24 @@ pub enum ProjectCommand {
         /// publish するファイル (プロジェクトルート相対 or 絶対)
         #[arg(required = true)]
         files: Vec<PathBuf>,
+    },
+    /// 作業ツリーを manifest に合わせる (git checkout 後に実行。旧版は履歴ノードから届く)
+    Checkout {
+        /// プロジェクトID
+        id: String,
+        /// 合わせる manifest (省略時は <root>/.synergos/manifest.json)
+        #[arg(long)]
+        manifest: Option<PathBuf>,
+    },
+    /// 1 ファイルを指定版に戻す
+    Restore {
+        /// プロジェクトID
+        id: String,
+        /// プロジェクトルート相対パス (`/` 区切り)
+        path: String,
+        /// 戻す版
+        #[arg(long)]
+        version: u64,
     },
 }
 
@@ -196,6 +218,7 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Project(cmd) => handle_project(cmd).await?,
         Command::Peer(cmd) => handle_peer(cmd).await?,
         Command::Transfer(cmd) => handle_transfer(cmd).await?,
+        Command::History(cmd) => crate::cli_history::handle_history(cmd).await?,
         Command::Network => {
             let mut client = synergos_ipc::IpcClient::connect().await?;
             let resp = client.send(synergos_ipc::IpcCommand::NetworkStatus).await?;
@@ -367,6 +390,12 @@ async fn handle_project(cmd: ProjectCommand) -> anyhow::Result<()> {
                 }
                 _ => println!("Unexpected response"),
             }
+        }
+        ProjectCommand::Checkout { id, manifest } => {
+            crate::cli_history::checkout(&mut client, id, manifest).await?;
+        }
+        ProjectCommand::Restore { id, path, version } => {
+            crate::cli_history::restore(&mut client, id, path, version).await?;
         }
     }
     Ok(())

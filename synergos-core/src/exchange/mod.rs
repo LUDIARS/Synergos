@@ -23,16 +23,22 @@ use synergos_net::types::{Blake3Hash, Cid, FileId, PeerId, TopicId, TransferId};
 
 use crate::event_bus::{SharedEventBus, TransferCompletedEvent, TransferProgressEvent};
 
+const PINNED_FETCH_TTL_MS: u64 = 5 * 60 * 1000;
+
+pub mod history_hooks;
+pub use history_hooks::{ArchiveRequest, HistoryHit, HistoryHooks};
+
 /// 受信側で転送の保存先を解決するためのレゾルバ。`(project_id, file_id)` から
 /// 最終的な書き込み先 `PathBuf` を返す。通常は ProjectManager 経由で
 /// プロジェクトルート + 相対パスを組み立てる想定。
 pub type OutPathResolver = Arc<dyn Fn(&str, &FileId) -> Option<PathBuf> + Send + Sync + 'static>;
 
-/// 受信完了時に呼ばれるフック。`(project_id, file_id, version, size, crc, sender)`。
+/// 受信完了時に呼ばれるフック。`(project_id, file_id, version, size, crc, sender, pinned)`。
 /// ProjectManager がマニフェスト (`.synergos/manifest.json`) に受信バージョンを
-/// 記録するために daemon が注入する。
+/// 記録するために daemon が注入する。`pinned = true` は checkout / restore で
+/// 明示要求した版 (手元より古いこともある) なので、手元の版に関わらず上書き記録する。
 pub type ReceivedHook = Arc<
-    dyn Fn(String, FileId, u64, u64, u32, PeerId) -> futures_boxed::BoxFuture
+    dyn Fn(String, FileId, u64, u64, u32, PeerId, bool) -> futures_boxed::BoxFuture
         + Send
         + Sync
         + 'static,
@@ -146,7 +152,8 @@ pub struct ShareRequest {
     pub file_id: FileId,
     pub file_path: PathBuf,
     pub file_size: u64,
-    pub checksum: Blake3Hash,
+    /// ファイル内容の CRC32。Offer の競合検出に使う。
+    pub crc: u32,
     pub priority: TransferPriority,
     /// 送信先ピア（None の場合は Gossipsub で全ピアにブロードキャスト）
     pub target_peer: Option<PeerId>,
@@ -314,6 +321,13 @@ pub struct SharedFileRecord {
     pub version: u64,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct PinnedFetch {
+    version: u64,
+    expires_at: u64,
+    expected_size_crc: Option<(u64, u32)>,
+}
+
 /// ファイル転送制御サービス
 pub struct Exchange {
     event_bus: SharedEventBus,
@@ -340,6 +354,11 @@ pub struct Exchange {
     /// Bitswap 用 ContentStore (注入済みなら publish_updates で RootCatalog
     /// スナップショットを put し、catalog_cid を CatalogUpdate に乗せる)。
     content_store: Option<Arc<MemoryContentStore>>,
+    /// 履歴ノードのフック (保管 / 旧版 lookup)。通常ノードでは None。
+    history: Option<HistoryHooks>,
+    /// checkout / restore が明示要求した (project, file) → version。
+    /// 手元より古い版でも、この pin と一致する受信は拒否せず作業ツリーへ反映する。
+    pinned_fetches: DashMap<(String, FileId), PinnedFetch>,
 }
 
 impl Exchange {
@@ -366,7 +385,78 @@ impl Exchange {
             shared_files: DashMap::new(),
             local_peer_id,
             content_store: None,
+            history: None,
+            pinned_fetches: DashMap::new(),
         }
+    }
+
+    /// 履歴ノードのフックを注入する (daemon 用、`history.enabled` のときだけ)。
+    pub fn attach_history_hooks(&mut self, hooks: HistoryHooks) {
+        self.history = Some(hooks);
+    }
+
+    /// checkout / restore: この (project, file) の `version` を明示要求中として
+    /// 記録する。手元より古い版の受信をこの 1 回だけ受け入れる。
+    pub fn pin_fetch_version(
+        &self,
+        project_id: &str,
+        file_id: &FileId,
+        version: u64,
+        expected_size_crc: Option<(u64, u32)>,
+    ) {
+        self.pinned_fetches
+            .insert(
+                (project_id.to_string(), file_id.clone()),
+                PinnedFetch {
+                    version,
+                    expires_at: now_ms().saturating_add(PINNED_FETCH_TTL_MS),
+                    expected_size_crc,
+                },
+            );
+    }
+
+    /// pin を外す (受信完了 / キャンセル時)。
+    pub fn unpin_fetch_version(&self, project_id: &str, file_id: &FileId, version: u64) {
+        use dashmap::mapref::entry::Entry;
+
+        if let Entry::Occupied(entry) = self
+            .pinned_fetches
+            .entry((project_id.to_string(), file_id.clone()))
+        {
+            if entry.get().version == version {
+                entry.remove();
+            }
+        }
+    }
+
+    fn pinned_fetch(
+        &self,
+        project_id: &str,
+        file_id: &FileId,
+        version: u64,
+    ) -> Option<PinnedFetch> {
+        let key = (project_id.to_string(), file_id.clone());
+        let Some(pin) = self.pinned_fetches.get(&key).map(|pin| *pin) else {
+            return None;
+        };
+        if pin.expires_at < now_ms() {
+            self.unpin_fetch_version(project_id, file_id, pin.version);
+            return None;
+        }
+        (pin.version == version).then_some(pin)
+    }
+
+    fn clear_fetch_pin(&self, project_id: &str, file_id: &FileId) {
+        self.pinned_fetches
+            .remove(&(project_id.to_string(), file_id.clone()));
+    }
+
+    /// 履歴ノードなら、呼び出し元が完了を返す前に安定したスナップショットを保管する。
+    pub async fn archive_to_history(&self, request: ArchiveRequest) -> std::io::Result<()> {
+        if let Some(hooks) = &self.history {
+            (hooks.archive)(request).await?;
+        }
+        Ok(())
     }
 
     /// QUIC 送受を行うためのハンドルと、受信先解決用リゾルバを注入する。
@@ -389,6 +479,7 @@ impl Exchange {
     /// 起動時復元: マニフェスト由来の共有レコードを登録する (publisher 再起動後も
     /// FileWant に応答でき、受信側は既取得分の auto-pull を抑止できる)。
     pub fn restore_shared_file(&self, file_id: FileId, record: SharedFileRecord) {
+        self.clear_fetch_pin(&record.project_id, &file_id);
         self.shared_files
             .insert((record.project_id.clone(), file_id), record);
     }
@@ -643,11 +734,28 @@ impl Exchange {
             }
         };
         let version = header.version.max(1);
+        if version == u64::MAX {
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            return Err(FileSharingError::NetworkError(
+                "refusing invalid maximum file version".into(),
+            ));
+        }
+        let pin = self.pinned_fetch(&header.project_id, &file_id, version);
+        let pinned = pin.is_some();
+        if let Some((expected_size, expected_crc)) = pin.and_then(|pin| pin.expected_size_crc) {
+            if header.total_size != expected_size || crc != expected_crc {
+                let _ = tokio::fs::remove_file(&tmp_path).await;
+                return Err(FileSharingError::NetworkError(format!(
+                    "pinned transfer metadata mismatch for v{version}"
+                )));
+            }
+        }
         if let Some(local) = self.shared_file_record(&header.project_id, &file_id) {
             let is_stale = local.version > version;
             let is_conflict = local.version == version
                 && (local.file_size != header.total_size || local.crc != crc);
-            if is_stale || is_conflict {
+            // checkout / restore が明示要求した版は、手元より古くても受け入れる
+            if (is_stale || is_conflict) && !pinned {
                 let _ = tokio::fs::remove_file(&tmp_path).await;
                 let reason = if is_stale {
                     format!(
@@ -693,6 +801,12 @@ impl Exchange {
                 version,
             },
         );
+        if pinned {
+            self.unpin_fetch_version(&header.project_id, &file_id, version);
+        } else {
+            // A newer accepted local state supersedes any older rollback request.
+            self.clear_fetch_pin(&header.project_id, &file_id);
+        }
         if let Some(hook) = &self.received_hook {
             hook(
                 header.project_id.clone(),
@@ -701,8 +815,31 @@ impl Exchange {
                 header.total_size,
                 crc,
                 sender.clone(),
+                pinned,
             )
             .await;
+        }
+        if let Err(error) = self
+            .archive_to_history(ArchiveRequest {
+                project_id: header.project_id.clone(),
+                file_id: file_id.clone(),
+                version,
+                size: header.total_size,
+                crc,
+                publisher: sender.0.clone(),
+                source: "received",
+                path: final_path.clone(),
+            })
+            .await
+        {
+            // The received working copy is already committed atomically. Keep it,
+            // but make loss of history retention observable.
+            tracing::warn!(
+                "history archive failed for {}/{} v{}: {error}",
+                header.project_id,
+                file_id,
+                version
+            );
         }
 
         // この転送に対応する ActiveTransfer を作り直して complete_transfer する
@@ -746,6 +883,10 @@ impl Exchange {
         if requester == self.local_peer_id {
             return; // 自分の Want は無視
         }
+        if self.quic.is_none() {
+            tracing::debug!("handle_file_want: QUIC not attached, cannot auto-send");
+            return;
+        }
         let key = (project_id.to_string(), file_id.clone());
         let record = match self.shared_files.get(&key) {
             Some(r) => r.value().clone(),
@@ -755,19 +896,18 @@ impl Exchange {
                     file_id,
                     requester.short()
                 );
+                self.serve_from_history(project_id, requester, file_id, version);
                 return;
             }
         };
-        // 要求バージョン 0 = 任意の最新、それ以外は一致するバージョンのみ
+        // 要求バージョン 0 = 任意の最新、それ以外は一致するバージョンのみ。
+        // 一致しない版は履歴ノードなら保管庫から出す。
         if version != 0 && version != record.version {
             tracing::debug!(
                 "handle_file_want: version mismatch (want v{version}, have v{})",
                 record.version
             );
-            return;
-        }
-        if self.quic.is_none() {
-            tracing::debug!("handle_file_want: QUIC not attached, cannot auto-send");
+            self.serve_from_history(project_id, requester, file_id, version);
             return;
         }
 
@@ -777,7 +917,7 @@ impl Exchange {
             file_id: file_id.clone(),
             file_path: record.file_path.clone(),
             file_size: record.file_size,
-            checksum: synergos_net::types::Blake3Hash::default(),
+            crc: record.crc,
             priority: TransferPriority::Interactive,
             target_peer: Some(requester.clone()),
             version: record.version,
@@ -791,6 +931,53 @@ impl Exchange {
             );
             if let Err(e) = share_and_send(ex, req).await {
                 tracing::warn!("auto-send via FileWant failed: {e}");
+            }
+        });
+    }
+
+    /// 履歴ノードなら保管庫の (project, file, version) を探し、あれば要求ピアへ送る。
+    /// 通常ノード (フック未注入) / version 0 (最新要求) では何もしない。
+    fn serve_from_history(
+        self: &Arc<Self>,
+        project_id: &str,
+        requester: PeerId,
+        file_id: FileId,
+        version: u64,
+    ) {
+        let Some(hooks) = self.history.clone() else {
+            return;
+        };
+        if version == 0 {
+            return;
+        }
+        let ex = self.clone();
+        let project_id = project_id.to_string();
+        tokio::spawn(async move {
+            let Some(hit) = (hooks.lookup)(project_id.clone(), file_id.clone(), version).await
+            else {
+                tracing::debug!(
+                    "handle_file_want: v{version} of {file_id} not in history store either"
+                );
+                return;
+            };
+            let req = ShareRequest {
+                project_id,
+                file_id: file_id.clone(),
+                file_path: hit.path,
+                file_size: hit.size,
+                crc: hit.crc,
+                priority: TransferPriority::Interactive,
+                target_peer: Some(requester.clone()),
+                version,
+            };
+            tracing::info!(
+                "history node: sending {} v{} to {} from history store",
+                file_id,
+                version,
+                requester.short()
+            );
+            if let Err(e) = share_and_send(ex, req).await {
+                tracing::warn!("history send via FileWant failed: {e}");
             }
         });
     }
@@ -1000,7 +1187,7 @@ impl FileSharing for Exchange {
             file_id: request.file_id.clone(),
             version: request.version,
             file_size: request.file_size,
-            crc: crc32fast::hash(&request.checksum.0),
+            crc: request.crc,
             offered_at: now_ms(),
             state: LedgerEntryState::Pending,
         };
@@ -1014,7 +1201,7 @@ impl FileSharing for Exchange {
                 project_id: request.project_id.clone(),
                 file_path: request.file_path.clone(),
                 file_size: request.file_size,
-                crc: crc32fast::hash(&request.checksum.0),
+                crc: request.crc,
                 version: request.version,
             },
         );
@@ -1025,7 +1212,7 @@ impl FileSharing for Exchange {
             &request.file_id,
             request.version,
             request.file_size,
-            crc32fast::hash(&request.checksum.0),
+            request.crc,
         );
 
         Ok(transfer_id)
@@ -1156,6 +1343,7 @@ impl FileSharing for Exchange {
                 "[asset-update][step 2/5] shared_files register: file_id={}",
                 notif.file_id
             );
+            self.clear_fetch_pin(&notif.project_id, &notif.file_id);
             self.shared_files.insert(
                 (notif.project_id.clone(), notif.file_id.clone()),
                 SharedFileRecord {
@@ -1269,8 +1457,13 @@ impl FileSharing for Exchange {
 
                 // TransferLedger で Want をキャンセル
                 if transfer.direction == TransferDirection::Receive {
+                    self.unpin_fetch_version(
+                        &transfer.project_id,
+                        &transfer.file_id,
+                        transfer.version,
+                    );
                     self.ledger
-                        .cancel_want(&transfer.file_id, 0, &self.local_peer_id);
+                        .cancel_want(&transfer.file_id, transfer.version, &self.local_peer_id);
                 }
 
                 Ok(())
@@ -1312,5 +1505,43 @@ impl FileSharing for Exchange {
                 transfer_id
             ))),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::event_bus::CoreEventBus;
+
+    fn exchange() -> Exchange {
+        Exchange::new(Arc::new(CoreEventBus::new()))
+    }
+
+    #[test]
+    fn unpin_only_removes_the_matching_request_generation() {
+        let exchange = exchange();
+        let file_id = FileId::new("asset.bin");
+        exchange.pin_fetch_version("p", &file_id, 1, None);
+        exchange.pin_fetch_version("p", &file_id, 2, None);
+        exchange.unpin_fetch_version("p", &file_id, 1);
+        assert!(exchange.pinned_fetch("p", &file_id, 2).is_some());
+    }
+
+    #[test]
+    fn accepting_a_new_local_version_invalidates_an_old_rollback_pin() {
+        let exchange = exchange();
+        let file_id = FileId::new("asset.bin");
+        exchange.pin_fetch_version("p", &file_id, 1, None);
+        exchange.restore_shared_file(
+            file_id.clone(),
+            SharedFileRecord {
+                project_id: "p".into(),
+                file_path: PathBuf::from("asset.bin"),
+                file_size: 1,
+                crc: 1,
+                version: 2,
+            },
+        );
+        assert!(exchange.pinned_fetch("p", &file_id, 1).is_none());
     }
 }

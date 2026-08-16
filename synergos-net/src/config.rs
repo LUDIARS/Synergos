@@ -75,10 +75,102 @@ pub struct NetConfig {
     /// node key (環境変数) が必須で、欠けていると起動を拒否する (fail-fast)。
     #[serde(default)]
     pub control: ControlReportConfig,
+    /// 履歴ノード設定 (docs/versioning-design.md §3)。既定は無効。
+    /// 有効にすると publish / 受信した各 version の実体を丸ごと保持し、
+    /// 旧版の FileWant に応答する。
+    #[serde(default)]
+    pub history: HistoryConfig,
 }
 
 fn default_true_auto_promote() -> bool {
     true
+}
+
+/// 履歴ノード (history node) 設定。
+///
+/// `enabled = true` のノードは、対象プロジェクトで publish / 受信した
+/// **すべての version の実体**を `root` (既定 `<project>/.synergos/history`) に
+/// 内容アドレス (ファイル全体の blake3) で保持し、旧版 `FileWant` に応答する。
+/// 通常ノード (既定) は最新版だけを持ち、挙動は変わらない。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HistoryConfig {
+    /// このノードを履歴ノードにする。
+    #[serde(default)]
+    pub enabled: bool,
+    /// 対象プロジェクト ID。`"*"` は参加中すべて (既定)。
+    #[serde(default = "default_history_projects")]
+    pub projects: Vec<String>,
+    /// 保管庫。相対パスならプロジェクトルート相対、絶対パスなら
+    /// `<root>/<blake3(project_id)>/` を各プロジェクトの保管庫にする。
+    #[serde(default = "default_history_root")]
+    pub root: String,
+    /// path ごとに残す新しい版の数。0 = 無制限。
+    #[serde(default)]
+    pub max_versions_per_file: u64,
+    /// 版の保持期間 (日)。0 = 無制限。
+    #[serde(default)]
+    pub max_age_days: u64,
+    /// 保管庫全体の上限バイト数。0 = 無制限。超えたら古い順に削る。
+    #[serde(default)]
+    pub max_bytes: u64,
+}
+
+impl Default for HistoryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            projects: default_history_projects(),
+            root: default_history_root(),
+            max_versions_per_file: 0,
+            max_age_days: 0,
+            max_bytes: 0,
+        }
+    }
+}
+
+impl HistoryConfig {
+    /// 指定プロジェクトを保持対象にするか (`enabled` かつ `projects` に該当)。
+    pub fn covers(&self, project_id: &str) -> bool {
+        self.enabled && self.projects.iter().any(|p| p == "*" || p == project_id)
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.enabled {
+            let trimmed = self.root.trim();
+            if trimmed.is_empty() {
+                return Err("history.root must not be empty when history.enabled = true".into());
+            }
+            if trimmed != self.root {
+                return Err("history.root must not have surrounding whitespace".into());
+            }
+            let root = std::path::Path::new(trimmed);
+            if !root.is_absolute()
+                && root.components().any(|component| {
+                    matches!(
+                        component,
+                        std::path::Component::CurDir
+                            | std::path::Component::ParentDir
+                            | std::path::Component::RootDir
+                            | std::path::Component::Prefix(_)
+                    )
+                })
+            {
+                return Err("relative history.root must stay inside the project root".into());
+            }
+            if self.projects.is_empty() {
+                return Err("history.projects must not be empty when history.enabled = true".into());
+            }
+        }
+        Ok(())
+    }
+}
+
+fn default_history_projects() -> Vec<String> {
+    vec!["*".to_string()]
+}
+
+fn default_history_root() -> String {
+    ".synergos/history".to_string()
 }
 
 /// 管制サーバーへの heartbeat 報告設定。
@@ -362,6 +454,7 @@ impl Default for NetConfig {
             force_relay_only: false,
             auto_promote: true,
             control: ControlReportConfig::default(),
+            history: HistoryConfig::default(),
         }
     }
 }
@@ -371,6 +464,7 @@ impl NetConfig {
     /// 個別の知識は各サブ struct の `validate()` に委譲する。
     pub fn validate(&self) -> Result<(), String> {
         self.stream_allocation.validate()?;
+        self.history.validate()?;
         Ok(())
     }
 }
@@ -378,6 +472,43 @@ impl NetConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn history_defaults_disabled_and_covers_wildcard() {
+        let cfg = NetConfig::default();
+        assert!(!cfg.history.enabled);
+        assert!(!cfg.history.covers("any"));
+        let enabled: HistoryConfig = serde_json::from_str(r#"{"enabled": true}"#).unwrap();
+        assert!(enabled.covers("proj"));
+        let scoped: HistoryConfig =
+            serde_json::from_str(r#"{"enabled": true, "projects": ["a"]}"#).unwrap();
+        assert!(scoped.covers("a"));
+        assert!(!scoped.covers("b"));
+        assert_eq!(scoped.root, ".synergos/history");
+    }
+
+    #[test]
+    fn history_validate_rejects_empty_root_when_enabled() {
+        let cfg = HistoryConfig {
+            enabled: true,
+            root: String::new(),
+            ..HistoryConfig::default()
+        };
+        assert!(cfg.validate().is_err());
+        let traversal = HistoryConfig {
+            enabled: true,
+            root: "../outside".into(),
+            ..HistoryConfig::default()
+        };
+        assert!(traversal.validate().is_err());
+        let project_root = HistoryConfig {
+            enabled: true,
+            root: ".".into(),
+            ..HistoryConfig::default()
+        };
+        assert!(project_root.validate().is_err());
+        assert!(HistoryConfig::default().validate().is_ok());
+    }
 
     #[test]
     fn quic_listen_addr_defaults_to_none() {

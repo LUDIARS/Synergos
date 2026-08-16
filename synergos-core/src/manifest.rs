@@ -113,40 +113,52 @@ impl ProjectManifest {
 
     /// 読み込み。無ければ空のマニフェスト。壊れていれば Err。
     pub async fn load(root: &Path, project_id: &str) -> std::io::Result<Self> {
-        let path = safe_metadata_path(root, MANIFEST_FILE)?;
+        let path = metadata_file_path(root, MANIFEST_FILE)?;
         match tokio::fs::read(&path).await {
-            Ok(bytes) => {
-                let mut m: ProjectManifest = serde_json::from_slice(&bytes)
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-                if m.project_id.is_empty() {
-                    m.project_id = project_id.to_string();
-                }
-                if m.format != 1 {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("unsupported manifest format: {}", m.format),
-                    ));
-                }
-                if m.project_id != project_id {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "manifest project id does not match the open project",
-                    ));
-                }
-                if m.files
-                    .values()
-                    .any(|entry| entry.version == 0 || entry.version == u64::MAX)
-                {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "manifest contains an invalid file version",
-                    ));
-                }
-                Ok(m)
-            }
+            Ok(bytes) => Self::from_bytes(&bytes, project_id),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::new(project_id)),
             Err(e) => Err(e),
         }
+    }
+
+    /// 任意の場所にあるマニフェスト (例: git の別コミットから取り出したもの) を読む。
+    /// `project_id` が一致しなければ Err。checkout の `--manifest` 用。
+    pub async fn load_from_file(path: &Path, project_id: &str) -> std::io::Result<Self> {
+        let bytes = tokio::fs::read(path).await?;
+        Self::from_bytes(&bytes, project_id)
+    }
+
+    /// JSON バイト列から組み立てて検証する (format / project_id / version 範囲)。
+    pub fn from_bytes(bytes: &[u8], project_id: &str) -> std::io::Result<Self> {
+        let mut m: ProjectManifest = serde_json::from_slice(bytes)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        if m.project_id.is_empty() {
+            m.project_id = project_id.to_string();
+        }
+        if m.format != 1 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("unsupported manifest format: {}", m.format),
+            ));
+        }
+        if m.project_id != project_id {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "manifest project id does not match the open project",
+            ));
+        }
+        if m.files.iter().any(|(rel, entry)| {
+            safe_rel_to_local(rel).is_none()
+                || entry.version == 0
+                || entry.version == u64::MAX
+        })
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "manifest contains an invalid file path or version",
+            ));
+        }
+        Ok(m)
     }
 
     /// 原子的に保存 (同一ディレクトリ tmp → rename)。
@@ -175,10 +187,28 @@ impl ProjectManifest {
         publisher: &str,
         now_ms: u64,
     ) -> BumpOutcome {
+        self.bump_at_least(rel, size, crc, publisher, now_ms, 0)
+    }
+
+    /// `bump` の下限付き。新しい版は `max(手元 + 1, floor + 1)` になる。
+    /// checkout / restore で古い版に戻した後の publish が、他ノードが既に持つ
+    /// 版番号 (node-local state で確定済み) と衝突しないようにするために使う。
+    pub fn bump_at_least(
+        &mut self,
+        rel: &str,
+        size: u64,
+        crc: u32,
+        publisher: &str,
+        now_ms: u64,
+        floor: u64,
+    ) -> BumpOutcome {
         match self.files.get_mut(rel) {
             Some(e) if e.size == size && e.crc == crc => BumpOutcome::Unchanged(e.version),
             Some(e) => {
-                e.version += 1;
+                e.version = e
+                    .version
+                    .saturating_add(1)
+                    .max(floor.saturating_add(1));
                 e.size = size;
                 e.crc = crc;
                 e.updated_at = now_ms;
@@ -186,17 +216,18 @@ impl ProjectManifest {
                 BumpOutcome::Bumped(e.version)
             }
             None => {
+                let version = 1u64.max(floor.saturating_add(1));
                 self.files.insert(
                     rel.to_string(),
                     ManifestEntry {
-                        version: 1,
+                        version,
                         size,
                         crc,
                         updated_at: now_ms,
                         publisher: publisher.to_string(),
                     },
                 );
-                BumpOutcome::Bumped(1)
+                BumpOutcome::Bumped(version)
             }
         }
     }
@@ -212,8 +243,24 @@ impl ProjectManifest {
         publisher: &str,
         now_ms: u64,
     ) -> bool {
+        self.record_received_with(rel, version, size, crc, publisher, now_ms, false)
+    }
+
+    /// `record_received` の強制版。`force = true` (checkout / restore で明示要求した
+    /// 版) なら手元の版に関わらず上書きする。
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_received_with(
+        &mut self,
+        rel: &str,
+        version: u64,
+        size: u64,
+        crc: u32,
+        publisher: &str,
+        now_ms: u64,
+        force: bool,
+    ) -> bool {
         match self.files.get(rel) {
-            Some(e) if e.version >= version => false,
+            Some(e) if e.version >= version && !force => false,
             _ => {
                 self.files.insert(
                     rel.to_string(),
@@ -321,7 +368,7 @@ pub async fn replace_file_atomically(source: &Path, destination: &Path) -> io::R
     }
 }
 
-fn safe_metadata_path(root: &Path, file_name: &str) -> io::Result<PathBuf> {
+pub(crate) fn metadata_file_path(root: &Path, file_name: &str) -> io::Result<PathBuf> {
     let canonical_root = std::fs::canonicalize(root)?;
     let metadata_dir = canonical_root.join(META_DIR);
     match std::fs::symlink_metadata(&metadata_dir) {
@@ -345,13 +392,13 @@ fn safe_metadata_path(root: &Path, file_name: &str) -> io::Result<PathBuf> {
     Ok(metadata_dir.join(file_name))
 }
 
-async fn prepare_metadata_dir(root: &Path) -> io::Result<PathBuf> {
-    let path = safe_metadata_path(root, MANIFEST_FILE)?;
+pub(crate) async fn prepare_metadata_dir(root: &Path) -> io::Result<PathBuf> {
+    let path = metadata_file_path(root, MANIFEST_FILE)?;
     let metadata_dir = path
         .parent()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "manifest has no parent"))?;
     tokio::fs::create_dir_all(metadata_dir).await?;
-    let checked = safe_metadata_path(root, MANIFEST_FILE)?;
+    let checked = metadata_file_path(root, MANIFEST_FILE)?;
     checked
         .parent()
         .map(Path::to_path_buf)
@@ -477,6 +524,55 @@ mod tests {
             BumpOutcome::Bumped(2)
         );
         assert_eq!(m.get("a.bin").unwrap().version, 2);
+    }
+
+    #[test]
+    fn bump_at_least_respects_persisted_floor() {
+        let mut m = ProjectManifest::new("p");
+        // 手元は v1 だが node-local state の高水位が v5 → 次は v6
+        assert_eq!(m.bump("a.bin", 1, 1, "me", 1), BumpOutcome::Bumped(1));
+        assert_eq!(
+            m.bump_at_least("a.bin", 2, 2, "me", 2, 5),
+            BumpOutcome::Bumped(6)
+        );
+        // 未知のファイルでも floor が効く
+        assert_eq!(
+            m.bump_at_least("new.bin", 1, 1, "me", 3, 3),
+            BumpOutcome::Bumped(4)
+        );
+        // 内容が同じなら floor に関係なく据え置き
+        assert_eq!(
+            m.bump_at_least("a.bin", 2, 2, "me", 4, 9),
+            BumpOutcome::Unchanged(6)
+        );
+    }
+
+    #[test]
+    fn from_bytes_rejects_unsafe_manifest_paths() {
+        let bytes = br#"{
+            "format": 1,
+            "project_id": "p",
+            "files": {
+                "../outside.bin": {
+                    "version": 1,
+                    "size": 1,
+                    "crc": 1,
+                    "updated_at": 1,
+                    "publisher": "peer"
+                }
+            }
+        }"#;
+        assert!(ProjectManifest::from_bytes(bytes, "p").is_err());
+    }
+
+    #[test]
+    fn record_received_force_overwrites_older_version() {
+        let mut m = ProjectManifest::new("p");
+        assert!(m.record_received("a.bin", 5, 1, 1, "peer", 1));
+        assert!(!m.record_received("a.bin", 2, 1, 1, "peer", 2));
+        assert!(m.record_received_with("a.bin", 2, 9, 9, "peer", 3, true));
+        assert_eq!(m.get("a.bin").unwrap().version, 2);
+        assert_eq!(m.get("a.bin").unwrap().crc, 9);
     }
 
     #[test]

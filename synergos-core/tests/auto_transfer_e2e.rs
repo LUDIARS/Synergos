@@ -22,7 +22,7 @@ use synergos_net::config::QuicConfig;
 use synergos_net::identity::Identity;
 use synergos_net::quic::QuicManager;
 use synergos_net::transfer::TRANSFER_STREAM_MAGIC;
-use synergos_net::types::{Blake3Hash, FileId};
+use synergos_net::types::FileId;
 
 fn qcfg() -> QuicConfig {
     QuicConfig {
@@ -106,7 +106,7 @@ async fn file_want_auto_triggers_share_and_send_over_quic() {
         file_id: file_id.clone(),
         file_path: src_file.clone(),
         file_size: payload.len() as u64,
-        checksum: Blake3Hash::default(),
+        crc: crc32fast::hash(&payload),
         priority: TransferPriority::Interactive,
         target_peer: None, // broadcast offer; want 側でトリガ
         version: 1,

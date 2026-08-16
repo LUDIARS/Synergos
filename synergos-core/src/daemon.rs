@@ -204,8 +204,8 @@ impl Daemon {
                 })
             });
             let pm = project_manager.clone();
-            let received: crate::exchange::ReceivedHook =
-                Arc::new(move |project_id, file_id, version, size, crc, sender| {
+            let received: crate::exchange::ReceivedHook = Arc::new(
+                move |project_id, file_id, version, size, crc, sender, pinned| {
                     let pm = pm.clone();
                     Box::pin(async move {
                         if let Err(e) = pm
@@ -216,6 +216,7 @@ impl Daemon {
                                 size,
                                 crc,
                                 &sender.0,
+                                pinned,
                             )
                             .await
                         {
@@ -226,7 +227,8 @@ impl Daemon {
                             );
                         }
                     })
-                });
+                },
+            );
             exchange_inner.attach_receive_hooks(incoming, received);
         }
         // Bitswap 用 ContentStore: ServiceContext と同じインスタンスを
@@ -234,6 +236,22 @@ impl Daemon {
         // put → BSW1 経路で相手が引けるようにする (#25/#26)。
         let shared_content_store = Arc::new(synergos_net::content::MemoryContentStore::new());
         exchange_inner.attach_content_store(shared_content_store.clone());
+        // 履歴ノード (docs/versioning-design.md §3): `[history] enabled = true` のときだけ
+        // 保管庫を作り、受信/publish の保管フックと旧版 lookup フックを Exchange に注入する。
+        let history = Arc::new(crate::history::HistoryStore::new(
+            net.net_config.history.clone(),
+        ));
+        if history.enabled() {
+            tracing::info!(
+                "history node enabled: root={} projects={:?}",
+                history.config().root,
+                history.config().projects
+            );
+            exchange_inner.attach_history_hooks(crate::history::wiring::build_hooks(
+                history.clone(),
+                project_manager.clone(),
+            ));
+        }
         let exchange = Arc::new(exchange_inner);
         // 起動時復元: 各プロジェクトのマニフェストから shared_files を再構築する
         // (publisher 再起動後も FileWant に応答でき、受信側は既取得分を再 pull しない)。
@@ -265,6 +283,7 @@ impl Daemon {
             content_store: shared_content_store,
             quic: net.quic.clone(),
             identity: Some(net.identity.clone()),
+            history,
         });
 
         // 永続化されていた project を restore した後、それぞれの
@@ -844,6 +863,10 @@ fn spawn_gossip_subscriber(
                                 );
                                 continue;
                             };
+                            if version == 0 || version == u64::MAX {
+                                tracing::warn!("ignoring invalid FileOffer version for {project_id}/{file_id}");
+                                continue;
+                            }
                             ctx.exchange.handle_file_offer(sender.clone(), file_id.clone(), version, size, crc);
                             // auto-pull: project が open & 自分の Offer ではない & 未保有なら
                             // FileWant を発火する。これにより publisher 側 handle_file_want が

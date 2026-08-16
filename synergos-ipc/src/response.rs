@@ -43,8 +43,49 @@ pub enum IpcResponse {
     /// コンフリクト一覧
     ConflictList(Vec<ConflictInfoDto>),
 
+    /// checkout の結果 (取得要求を出したファイル / 既に一致 / 取得元不明)
+    CheckoutReport(CheckoutReportDto),
+
+    /// 履歴ノード上の保持版一覧
+    HistoryList(Vec<HistoryVersionDto>),
+
+    /// history gc の結果
+    HistoryGcReport(HistoryGcReportDto),
+
     /// イベント購読完了
     Subscribed { subscription_id: String },
+}
+
+/// checkout の結果 (IPC 向け DTO)
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct CheckoutReportDto {
+    /// FileWant(version) を出したファイル (rel_path, version)。実体は非同期に届く
+    pub requested: Vec<(String, u64)>,
+    /// 作業ツリーが既に manifest と一致していたファイル数
+    pub up_to_date: usize,
+    /// manifest に無いが作業ツリー / 手元台帳にあるファイル (触らない)
+    pub extra: Vec<String>,
+}
+
+/// 履歴ノードの保持版 1 件 (IPC 向け DTO)
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HistoryVersionDto {
+    pub rel_path: String,
+    pub version: u64,
+    pub hash: String,
+    pub size: u64,
+    pub crc: u32,
+    pub stored_at: u64,
+    pub publisher: String,
+    pub source: String,
+}
+
+/// history gc の結果 (IPC 向け DTO)
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct HistoryGcReportDto {
+    pub removed_versions: Vec<(String, u64)>,
+    pub removed_objects: usize,
+    pub bytes_freed: u64,
 }
 
 /// コンフリクト情報 (IPC 向け DTO)

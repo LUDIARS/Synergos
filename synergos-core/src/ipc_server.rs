@@ -57,6 +57,8 @@ pub struct ServiceContext {
     /// ノード identity (招待トークン署名用)。テスト等では None 可
     /// (その場合は従来型トークンにフォールバックする)。
     pub identity: Option<Arc<synergos_net::identity::Identity>>,
+    /// 履歴ノードの保管庫 (無効なノードでも実体はあり、`enabled()` が false)。
+    pub history: Arc<crate::history::HistoryStore>,
 }
 
 /// IPC サーバー
@@ -1286,7 +1288,8 @@ pub async fn dispatch_command(command: IpcCommand, ctx: &ServiceContext) -> IpcR
                     };
                 }
 
-                // マニフェストでバージョン発番 (内容が同じなら据え置き = 再送しない)
+                // マニフェストでバージョン発番 (内容が同じなら据え置き = 再送しない)。
+                // ProjectManager は node-local state の観測済み最大版を下限にする。
                 let version = match ctx
                     .project_manager
                     .bump_file_version(
@@ -1318,6 +1321,26 @@ pub async fn dispatch_command(command: IpcCommand, ctx: &ServiceContext) -> IpcR
                 // 受信側の out_path_resolver が確実に解決できるようにする。
                 ctx.project_manager
                     .register_file(&project_id, file_id.clone(), rel.clone());
+                // 履歴ノードなら自分の publish 版も保管庫へ
+                if let Err(error) = ctx
+                    .exchange
+                    .archive_to_history(crate::exchange::ArchiveRequest {
+                        project_id: project_id.clone(),
+                        file_id: file_id.clone(),
+                        version,
+                        size: file_size,
+                        crc,
+                        publisher: ctx.exchange.local_peer_id().0.clone(),
+                        source: "published",
+                        path: canonical.clone(),
+                    })
+                    .await
+                {
+                    return IpcResponse::Error {
+                        code: 3,
+                        message: format!("history archive failed for {rel_key}: {error}"),
+                    };
+                }
 
                 notifications.push(PublishNotification {
                     project_id: project_id.clone(),
@@ -1388,6 +1411,150 @@ pub async fn dispatch_command(command: IpcCommand, ctx: &ServiceContext) -> IpcR
                 max_connections,
                 avg_latency_ms: avg_latency,
             })
+        }
+
+        // ── checkout / restore / 履歴ノード ──
+        IpcCommand::ProjectCheckout {
+            project_id,
+            manifest_path,
+        } => {
+            let cctx = crate::checkout::CheckoutContext {
+                projects: &ctx.project_manager,
+                exchange: &ctx.exchange,
+                history: &ctx.history,
+            };
+            match crate::checkout::checkout_project(&cctx, &project_id, manifest_path.as_deref())
+                .await
+            {
+                Ok(report) => {
+                    IpcResponse::CheckoutReport(synergos_ipc::response::CheckoutReportDto {
+                        requested: report.requested,
+                        up_to_date: report.up_to_date,
+                        extra: report.extra,
+                    })
+                }
+                Err(e) => IpcResponse::Error {
+                    code: 3,
+                    message: format!("checkout failed: {e}"),
+                },
+            }
+        }
+        IpcCommand::ProjectRestore {
+            project_id,
+            rel_path,
+            version,
+        } => {
+            let cctx = crate::checkout::CheckoutContext {
+                projects: &ctx.project_manager,
+                exchange: &ctx.exchange,
+                history: &ctx.history,
+            };
+            match crate::checkout::restore_file(&cctx, &project_id, &rel_path, version).await {
+                Ok(outcome) => {
+                    tracing::info!("restore {project_id}/{rel_path} v{version}: {outcome:?}");
+                    IpcResponse::Ok
+                }
+                Err(e) => IpcResponse::Error {
+                    code: 3,
+                    message: format!("restore failed: {e}"),
+                },
+            }
+        }
+        IpcCommand::HistoryList {
+            project_id,
+            rel_path,
+        } => {
+            let Some(root) = ctx.project_manager.project_root(&project_id) else {
+                return IpcResponse::Error {
+                    code: 2,
+                    message: format!("project not open: {project_id}"),
+                };
+            };
+            match ctx
+                .history
+                .list(&root, &project_id, rel_path.as_deref())
+                .await
+            {
+                Ok(items) => IpcResponse::HistoryList(
+                    items
+                        .into_iter()
+                        .map(|v| synergos_ipc::response::HistoryVersionDto {
+                            rel_path: v.rel,
+                            version: v.version,
+                            hash: v.hash,
+                            size: v.size,
+                            crc: v.crc,
+                            stored_at: v.stored_at,
+                            publisher: v.publisher,
+                            source: v.source,
+                        })
+                        .collect(),
+                ),
+                Err(e) => IpcResponse::Error {
+                    code: 3,
+                    message: format!("history list failed: {e}"),
+                },
+            }
+        }
+        IpcCommand::HistoryGc {
+            project_id,
+            purge,
+            keep_manifests,
+        } => {
+            let Some(root) = ctx.project_manager.project_root(&project_id) else {
+                return IpcResponse::Error {
+                    code: 2,
+                    message: format!("project not open: {project_id}"),
+                };
+            };
+            if !ctx.history.covers(&project_id) {
+                return IpcResponse::Error {
+                    code: 4,
+                    message: "this node is not a history node for the project".into(),
+                };
+            }
+            // purge でなければ、手元 manifest + --keep-manifest の参照版を保護する。
+            let mut keep = Vec::new();
+            if !purge {
+                keep.extend(
+                    ctx.project_manager
+                        .manifest_entries(&project_id)
+                        .into_iter()
+                        .map(|(rel, entry)| (rel, entry.version)),
+                );
+                for path in &keep_manifests {
+                    match crate::manifest::ProjectManifest::load_from_file(path, &project_id).await {
+                        Ok(manifest) => keep.extend(
+                            manifest
+                                .files
+                                .into_iter()
+                                .map(|(rel, entry)| (rel, entry.version)),
+                        ),
+                        Err(error) => {
+                            return IpcResponse::Error {
+                                code: 3,
+                                message: format!(
+                                    "keep manifest {} unreadable: {error}",
+                                    path.display()
+                                ),
+                            }
+                        }
+                    }
+                }
+            }
+            match ctx.history.gc(&root, &project_id, &keep, purge).await {
+                Ok(report) => {
+                    IpcResponse::HistoryGcReport(synergos_ipc::response::HistoryGcReportDto {
+                        removed_versions: report.removed_versions,
+                        removed_objects: report.removed_objects,
+                        bytes_freed: report.bytes_freed,
+                    })
+                }
+                Err(e) => IpcResponse::Error {
+                    code: 3,
+                    message: format!("history gc failed: {e}"),
+                },
+            }
         }
 
         // Subscribe / Unsubscribe は handle_client 側で per-client タスクとして

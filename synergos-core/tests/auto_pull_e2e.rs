@@ -31,7 +31,7 @@ use synergos_net::gossip::{
 use synergos_net::identity::Identity;
 use synergos_net::quic::{QuicManager, StreamType};
 use synergos_net::transfer::TRANSFER_STREAM_MAGIC;
-use synergos_net::types::{Blake3Hash, FileId, TopicId};
+use synergos_net::types::{FileId, TopicId};
 
 fn qcfg() -> QuicConfig {
     QuicConfig {
@@ -329,7 +329,7 @@ async fn b_auto_pulls_file_after_receiving_offer() {
             file_id: file_id.clone(),
             file_path: src.clone(),
             file_size: payload.len() as u64,
-            checksum: Blake3Hash::default(),
+            crc: crc32fast::hash(&payload),
             priority: TransferPriority::Interactive,
             target_peer: None,
             version: 1,

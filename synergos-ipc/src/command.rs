@@ -86,6 +86,36 @@ pub enum IpcCommand {
         project_id: String,
         file_paths: Vec<PathBuf>,
     },
+    /// 作業ツリーを manifest に合わせる (docs/versioning-design.md §3.4)。
+    /// `manifest_path` 省略時は `<root>/.synergos/manifest.json` をディスクから
+    /// 読み直す (= `git checkout` 後の状態)。手元と違う版は履歴ノード /
+    /// publisher へ FileWant(version) を出す (非同期に届く)。
+    ProjectCheckout {
+        project_id: String,
+        manifest_path: Option<PathBuf>,
+    },
+    /// 1 ファイルを指定版に戻す (manifest も書き戻す)。
+    ProjectRestore {
+        project_id: String,
+        /// プロジェクトルート相対 (`/` 区切り)
+        rel_path: String,
+        version: u64,
+    },
+
+    // ── 履歴ノード ──
+    /// 履歴ノード上の保持版一覧 (このノードが履歴ノードでなければ空)
+    HistoryList {
+        project_id: String,
+        rel_path: Option<String>,
+    },
+    /// 保持ポリシーを適用する。`purge` なら保管庫を全消去する。
+    /// `keep_manifests` (例: git の各リリースタグ時点の manifest) が参照する版は削らない。
+    HistoryGc {
+        project_id: String,
+        purge: bool,
+        #[serde(default)]
+        keep_manifests: Vec<PathBuf>,
+    },
 
     // ── コンフリクト管理 ──
     /// プロジェクトのアクティブなコンフリクト一覧
@@ -181,6 +211,27 @@ impl IpcCommand {
             Ok(())
         };
 
+        let check_rel_path = |label: &str, path: &str| -> Result<(), String> {
+            check_id(label, path)?;
+            if path.starts_with('/')
+                || path.contains('\\')
+                || path == ".synergos"
+                || path.starts_with(".synergos/")
+                || path.chars().any(char::is_control)
+                || path.split('/').any(|segment| {
+                    segment.is_empty()
+                        || segment == "."
+                        || segment == ".."
+                        || segment.contains(':')
+                })
+            {
+                return Err(format!(
+                    "{label} must be a safe '/'-separated project-relative path"
+                ));
+            }
+            Ok(())
+        };
+
         match self {
             Self::Ping
             | Self::Shutdown
@@ -261,6 +312,50 @@ impl IpcCommand {
                 }
                 for p in file_paths {
                     check_path("file_paths[*]", p)?;
+                }
+                Ok(())
+            }
+
+            Self::ProjectCheckout {
+                project_id,
+                manifest_path,
+            } => {
+                check_id("project_id", project_id)?;
+                if let Some(p) = manifest_path {
+                    check_path("manifest_path", p)?;
+                }
+                Ok(())
+            }
+            Self::ProjectRestore {
+                project_id,
+                rel_path,
+                version,
+            } => {
+                check_id("project_id", project_id)?;
+                check_rel_path("rel_path", rel_path)?;
+                if *version == 0 || *version == u64::MAX {
+                    return Err("version must be a positive file version".into());
+                }
+                Ok(())
+            }
+            Self::HistoryList {
+                project_id,
+                rel_path,
+            } => {
+                check_id("project_id", project_id)?;
+                if let Some(p) = rel_path {
+                    check_rel_path("rel_path", p)?;
+                }
+                Ok(())
+            }
+            Self::HistoryGc {
+                project_id,
+                keep_manifests,
+                ..
+            } => {
+                check_id("project_id", project_id)?;
+                for p in keep_manifests {
+                    check_path("keep_manifests[*]", p)?;
                 }
                 Ok(())
             }
@@ -349,6 +444,24 @@ mod validate_tests {
             peer_id: "x".into(),
         };
         cmd.validate().unwrap();
+    }
+
+    #[test]
+    fn history_paths_must_stay_project_relative() {
+        for rel_path in ["../outside", "/absolute", ".synergos/manifest.json", "a\\b"] {
+            let restore = IpcCommand::ProjectRestore {
+                project_id: "p".into(),
+                rel_path: rel_path.into(),
+                version: 1,
+            };
+            assert!(restore.validate().is_err(), "accepted {rel_path}");
+
+            let list = IpcCommand::HistoryList {
+                project_id: "p".into(),
+                rel_path: Some(rel_path.into()),
+            };
+            assert!(list.validate().is_err(), "accepted {rel_path}");
+        }
     }
 
     #[test]

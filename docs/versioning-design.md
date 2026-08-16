@@ -134,24 +134,27 @@ max_bytes = 0                 # 0 = 無制限。超えたら古い順に削る (
 
 ```json
 { "format": 1,
+  "project_id": "myproj",
   "entries": {
-    "myproj": {
-      "assets/big.bin": {
-        "3": { "hash": "b3:…", "size": 524288000, "crc": 2894113452,
-               "stored_at": 1755250000000, "publisher": "peer-abcd…", "source": "received" },
-        "2": { "hash": "b3:…", "size": 0, "stored_at": 0, "source": "published" }
-      }
+    "assets/big.bin": {
+      "3": { "hash": "<64桁 blake3 hex>", "size": 524288000, "crc": 2894113452,
+             "stored_at": 1755250000000, "publisher": "peer-abcd…", "source": "received" },
+      "2": { "hash": "<64桁 blake3 hex>", "size": 0, "stored_at": 0, "source": "published" }
     }
   }
 }
 ```
 
+絶対 `root` ではプロジェクト間の衝突・path traversal を避けるため、実際の保管先を
+`<root>/<blake3(project_id)>/` とする。相対 `root` は `..` と symlink 経由の脱出を拒否する。
+
 - 版の実体は **チャンク化しない**。ファイル全体を objects に置く。重複排除はファイル単位のみ
-- 同一内容は複数の project / path / version から参照され得るため、sidecar の `refs` にはそれぞれの
+- 同一内容は複数の path / version から参照され得るため、sidecar の `refs` にはそれぞれの
   index エントリを列挙する。`index.json` は atomic write (tmp + rename)。破損時は objects の
   `.meta.json` を走査して再構築する
 - 作業ツリー側は Phase 1 と同じ (最新版が置かれる)。履歴ノードは受信/publish 完了時に
-  **作業ツリーへの反映と同時に objects へハードリンク or コピー**する (同一ボリュームならハードリンク)
+  **作業ツリーへの反映と同時に objects へコピー**する。ハードリンクは使わない
+  (publisher の作業ツリーは人が in-place 編集するので、リンクだと保管した旧版が後から書き換わる)
 - Phase 1 の manifest.json は変更しない (format 1 のまま)。履歴ノードの索引は node ローカルの
   `<root>/index.json` (既定では `.synergos/history/index.json`) で、git には**入れない**
   (`.gitignore` に `.synergos/history/`)
@@ -163,20 +166,29 @@ max_bytes = 0                 # 0 = 無制限。超えたら古い順に削る (
 
 1. 通常ノードは手元 manifest の version と一致する FileWant にだけ応答 (現状)
 2. 履歴ノードは `index.json` に (project, path, version) があれば応答し、objects から送る
-3. 要求側は最初に返ってきた Offer から受信 (Phase 1 と同じ)。ハッシュ検証で真正性を確認
+3. 要求側は最初に返ってきた Offer から受信 (Phase 1 と同じ)。blake3 で転送中の破損を検出する
 
 | コマンド | 動作 |
 |---|---|
 | `synergos project publish <id> <files...>` | (既存) manifest 更新 + Offer。履歴ノードなら自分の publish 版も objects に置く |
 | `synergos project status <id>` | manifest と作業ツリーの差 (変更 / 未 publish / 未取得) を表示 — `git status` 相当 |
 | `synergos project checkout <id> [--manifest <path>]` | 指定 manifest (既定: 作業ツリーの `.synergos/manifest.json`、= `git checkout` 後の状態) に**作業ツリーを合わせる**。手元に無い版は FileWant(version) を出し、その版を保持する履歴ノードから取る |
-| `synergos project restore <id> <path> --version N` | 1 ファイルだけ指定版に戻す (manifest も N に書き戻す) |
+| `synergos project restore <id> <path> --version N` | 1 ファイルだけ指定版に戻す (manifest も N に書き戻す)。自ノードが履歴ノードで実体を持っていればネットワーク無しで差し替える |
 | `synergos history ls <id> [<path>]` | 履歴ノード上の保持版一覧 (version / size / stored_at / source) |
 | `synergos history gc [--purge] [--keep-manifest <path>...]` | §3.5 の保持ポリシーを適用。`--purge` は保管庫全消去 |
 
 想定フロー: `git pull` → `manifest.json` が更新される → `synergos project checkout myproj` →
 アセットが揃う (新しい版は publisher から、古い版に戻す場合は履歴ノードから)。逆に、
 アセットを publish したら `manifest.json` が変わるので**それをコミットして push** する。
+
+**巻き戻し後の publish と版番号**: checkout / restore で v1 に戻したノードが再 publish
+すると、単純な +1 では他ノードが既に持つ v2 と番号が衝突する (同 version 別内容 = Conflict)。
+そこで publish の版は `max(手元 + 1, これまで manifest / 検証済み転送で確定した最大版 + 1)` にする。
+観測最大版は node-local の `.synergos/state.json` に永続化し、daemon 再起動や git checkout
+でも失わない。上の例では v3 が発番され、履歴ノードには v1/v2/v3 が残る。
+checkout / restore で「手元より古い版」を受け入れるのは、その (project, file, version) を
+明示要求 (pin) したときだけで、通常の Offer 経由では今までどおり古い版を拒否する。pin は
+5 分で失効し、その後に publish / 受信した版があれば直ちに無効化して遅延応答の上書きを防ぐ。
 
 ### 3.5 保持ポリシー (GC)
 
@@ -216,8 +228,8 @@ max_bytes = 0                 # 0 = 無制限。超えたら古い順に削る (
 
 ## 5. 決めごとまとめ (実装者向け)
 
-1. Synergos は「何が何版か」の履歴を持たない。`.synergos/manifest.json` が唯一の状態で、git がそれを版管理する
-2. `manifest.json` は **git にコミットする**、`.synergos/history/` `.synergos/incoming/` は **ignore**
+1. git 管理する版ポインタは `.synergos/manifest.json`。単調増加発番用の観測高水位だけは node-local の `.synergos/state.json` に持つ
+2. `manifest.json` は **git にコミットする**、`.synergos/history/` `.synergos/incoming/` `.synergos/state.json` は **ignore**
 3. version は path ごとの単調増加。転送要否は version・size・CRC で決める (時刻は使わない)
 4. 差分管理・差分転送はしない。**履歴の実体は `history.enabled = true` のノードだけが版ごとに丸ごと保持**し、旧版 FileWant に応答する
 5. テキストの diff は git の仕事。Synergos は種別を区別せず全部ファイル単位で運ぶ

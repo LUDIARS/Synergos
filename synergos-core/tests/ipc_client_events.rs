@@ -47,6 +47,7 @@ fn make_ctx() -> Arc<ServiceContext> {
         content_store: Arc::new(synergos_net::content::MemoryContentStore::new()),
         quic,
         identity: None,
+        history: Arc::new(synergos_core::history::HistoryStore::new(Default::default())),
     })
 }
 

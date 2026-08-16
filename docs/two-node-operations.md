@@ -201,6 +201,33 @@ LAN 手順との差分は **「A の到達アドレスが Mesh IP になる」**
 
 ---
 
+## 3.5 履歴ノード (任意、推奨: 常駐する A を履歴ノードにする)
+
+通常ノードは最新版しか持たない。**旧版に戻せる・publisher が消えても実体が残る**ようにするには、
+常駐ノード 1 台の `synergos.toml` に `[history]` を足す (docs/versioning-design.md §3):
+
+```toml
+[history]
+enabled = true            # このノードを履歴ノードにする (既定 false)
+projects = ["*"]          # 対象プロジェクト (既定: 参加中すべて)
+root = ".synergos/history" # 保管庫。絶対パス (別ドライブ) も可
+max_versions_per_file = 0 # 0 = 無制限
+max_age_days = 0
+max_bytes = 0
+```
+
+- 有効化後に publish / 受信した版から保管される (既に作業ツリーにある版は次の publish で入る)
+- `synergos-core history ls <project>` で保持版を確認、`history gc` で保持ポリシー適用
+- 他ノードで戻す: `synergos-core project restore <project> assets/big.bin --version 1`
+  → 履歴ノードが v1 を送ってくる。`git checkout <古いコミット>` の後は
+  `synergos-core project checkout <project>` で manifest に合わせて一括で取り直す
+- `.gitignore` に `.synergos/history/` と `.synergos/state.json` を追加する
+  (履歴実体と版番号高水位は node ローカル。`manifest.json` だけを git に入れる)
+- 現段階の project topic には参加ピア ACL がないため、履歴ノードは信頼できる mesh 内だけで使う。
+  project ID や招待トークンを、履歴データのアクセス制御境界として扱わない
+
+---
+
 ## 4. 常駐化
 
 - **Linux**: SETUP.md §3-B-2 の systemd unit をそのまま使う
@@ -226,6 +253,7 @@ LAN 手順との差分は **「A の到達アドレスが Mesh IP になる」**
 | B に `.synergos/incoming/*.part` が残る | 転送途中で切れた残骸。消してよい。次の publish で取り直す |
 | Windows: `project publish` が `not a regular file` | ディレクトリは publish できない。ファイルを列挙して渡す (`Get-ChildItem -Recurse -File`) |
 | A を再起動したら B が取りに来ない | A は `.synergos/manifest.json` から Offer 台帳を復元する。復元ログ `restored N shared file record(s)` を確認。実ファイルを移動/削除していると復元対象外 |
+| `project restore` / `checkout` しても旧版が来ない | 履歴ノードが 1 台も無い (旧版は誰も持っていない)、または履歴ノードの `history ls` にその版が無い (有効化前の版)。履歴ノードの daemon ログに `history node: sending ...` が出るか |
 | `Daemon not running` (CLI) | Linux systemd 常駐時の `XDG_RUNTIME_DIR` 不一致 (SETUP.md つまずき表)。Windows は別ユーザで CLI を叩いていないか |
 
 ログを増やす: `RUST_LOG=synergos_core=debug,synergos_net=debug synergos-core start ...`

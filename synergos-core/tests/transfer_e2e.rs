@@ -12,7 +12,7 @@ use synergos_net::config::QuicConfig;
 use synergos_net::identity::Identity;
 use synergos_net::quic::QuicManager;
 use synergos_net::transfer::{hash_file, TransferHeader, TRANSFER_STREAM_MAGIC};
-use synergos_net::types::{Blake3Hash, FileId, TransferId};
+use synergos_net::types::{FileId, TransferId};
 
 fn qcfg() -> QuicConfig {
     QuicConfig {
@@ -123,7 +123,7 @@ async fn execute_send_and_handle_incoming_roundtrip() {
             file_id: file_id.clone(),
             file_path: src_file.clone(),
             file_size: total_size,
-            checksum: Blake3Hash::default(),
+            crc: crc32fast::hash(&payload),
             priority: TransferPriority::Interactive,
             target_peer: Some(server_id.peer_id().clone()),
             version: 1,
