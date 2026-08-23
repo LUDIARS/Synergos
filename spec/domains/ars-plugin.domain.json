@@ -1,0 +1,11 @@
+{
+  "name": "ars-plugin",
+  "description": "Ars 連携プラグイン。 ワークスペース側からの利用境界。",
+  "presetRules": [],
+  "templateRules": [],
+  "membership": [
+    {
+      "pathPattern": "(^|/)ars-plugin-synergos/(?:.*/)?[^/]+$"
+    }
+  ]
+}

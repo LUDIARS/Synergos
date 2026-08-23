@@ -11,3 +11,6 @@ synergos-control-store.*.tmp
 .synergos/incoming/
 .synergos/history/
 .synergos/state.json
+
+# Anatomia のローカル状態 (ドメイン定義の正本は spec/domains/)
+.anatomia/

@@ -1,0 +1,17 @@
+{
+  "name": "network-transport",
+  "description": "ネットワーク層。 接続の確立と中継、 プロセス間通信。",
+  "presetRules": [],
+  "templateRules": [],
+  "membership": [
+    {
+      "pathPattern": "(^|/)synergos-net/(?:.*/)?[^/]+$"
+    },
+    {
+      "pathPattern": "(^|/)synergos-relay/(?:.*/)?[^/]+$"
+    },
+    {
+      "pathPattern": "(^|/)synergos-ipc/(?:.*/)?[^/]+$"
+    }
+  ]
+}

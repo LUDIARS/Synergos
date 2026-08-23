@@ -1,0 +1,3 @@
+[build]
+# Keep Windows CI compilation within the compiler's process-resource limits.
+jobs = 1

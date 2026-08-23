@@ -1,0 +1,11 @@
+{
+  "name": "mesh-core",
+  "description": "メッシュの中核。 ノードの状態と経路、 リアルタイム同期の土台。",
+  "presetRules": [],
+  "templateRules": [],
+  "membership": [
+    {
+      "pathPattern": "(^|/)synergos-core/(?:.*/)?[^/]+$"
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "name": "control-plane",
+  "description": "管制。 メッシュ全体の監視と操作の受口。",
+  "presetRules": [],
+  "templateRules": [],
+  "membership": [
+    {
+      "pathPattern": "(^|/)synergos-control/(?:.*/)?[^/]+$"
+    }
+  ]
+}

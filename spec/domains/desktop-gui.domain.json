@@ -1,0 +1,14 @@
+{
+  "name": "desktop-gui",
+  "description": "デスクトップの画面 (Tauri / GUI)。 状態表示と操作。",
+  "presetRules": [],
+  "templateRules": [],
+  "membership": [
+    {
+      "pathPattern": "(^|/)synergos-gui/(?:.*/)?[^/]+$"
+    },
+    {
+      "pathPattern": "(^|/)synergos-tauri/(?:.*/)?[^/]+$"
+    }
+  ]
+}
