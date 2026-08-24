@@ -52,6 +52,12 @@ pub enum IpcResponse {
     /// history gc の結果
     HistoryGcReport(HistoryGcReportDto),
 
+    /// tag add / show の結果
+    Tag(TagDto),
+
+    /// tag ls の結果
+    TagList(Vec<TagSummaryDto>),
+
     /// イベント購読完了
     Subscribed { subscription_id: String },
 }
@@ -86,6 +92,22 @@ pub struct HistoryGcReportDto {
     pub removed_versions: Vec<(String, u64)>,
     pub removed_objects: usize,
     pub bytes_freed: u64,
+}
+
+/// 版タグ 1 件のピン内容 (IPC 向け DTO)
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TagDto {
+    pub name: String,
+    pub created_at: u64,
+    pub pins: Vec<(String, u64)>,
+}
+
+/// タグ一覧の 1 行 (IPC 向け DTO)
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TagSummaryDto {
+    pub name: String,
+    pub created_at: u64,
+    pub pin_count: usize,
 }
 
 /// コンフリクト情報 (IPC 向け DTO)

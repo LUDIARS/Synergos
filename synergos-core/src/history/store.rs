@@ -18,6 +18,7 @@ use super::index::{
     append_object_ref, is_valid_object_hash, meta_path, object_path, remove_object_ref,
     HistoryIndex, IndexEntry, ObjectRef, OBJECTS_DIR,
 };
+use super::tags::{self, Tag, TagSummary};
 
 /// 保管庫に置いた版 1 件 (lookup / list の戻り値)。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -289,8 +290,109 @@ impl HistoryStore {
             .collect())
     }
 
+    /// タグを作成/上書きする (`pins` = 保護したい (rel, version) 集合)。
+    pub async fn tag_add(
+        &self,
+        project_root: &Path,
+        project_id: &str,
+        name: &str,
+        pins: std::collections::BTreeMap<String, u64>,
+    ) -> io::Result<Tag> {
+        if !self.covers(project_id) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "this node is not a history node for the project",
+            ));
+        }
+        let store_dir = self.store_dir(project_root, project_id)?;
+        let lock = self.lock(project_id);
+        let _guard = lock.lock().await;
+        let now = synergos_net::types::now_ms();
+        tags::save(&store_dir, project_id, name, now, pins).await
+    }
+
+    /// タグ一覧 (name / created_at / pin 数)。
+    pub async fn tag_list(
+        &self,
+        project_root: &Path,
+        project_id: &str,
+    ) -> io::Result<Vec<TagSummary>> {
+        if !self.covers(project_id) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "this node is not a history node for the project",
+            ));
+        }
+        let store_dir = self.store_dir(project_root, project_id)?;
+        tags::list(&store_dir, project_id).await
+    }
+
+    /// 1 タグの内容を取得する。無ければ `None`。
+    pub async fn tag_show(
+        &self,
+        project_root: &Path,
+        project_id: &str,
+        name: &str,
+    ) -> io::Result<Option<Tag>> {
+        if !self.covers(project_id) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "this node is not a history node for the project",
+            ));
+        }
+        let store_dir = self.store_dir(project_root, project_id)?;
+        tags::load(&store_dir, project_id, name).await
+    }
+
+    /// タグを削除する (実体は消さない。以後 GC 対象に戻るだけ)。`false` = 元々無かった。
+    pub async fn tag_remove(
+        &self,
+        project_root: &Path,
+        project_id: &str,
+        name: &str,
+    ) -> io::Result<bool> {
+        if !self.covers(project_id) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "this node is not a history node for the project",
+            ));
+        }
+        let store_dir = self.store_dir(project_root, project_id)?;
+        let lock = self.lock(project_id);
+        let _guard = lock.lock().await;
+        tags::remove(&store_dir, project_id, name).await
+    }
+
+    /// GC / ローテーションが参照する「保護済み (path, version) 集合」を返す。
+    /// `extra_keep` (手元 manifest の最新版、`--keep-manifest` 等) と全タグの
+    /// pins を合流させる。保管庫にタグ pins ディレクトリが無ければ `extra_keep`
+    /// のみ返す。
+    pub async fn protected_versions(
+        &self,
+        project_root: &Path,
+        project_id: &str,
+        extra_keep: &[(String, u64)],
+    ) -> io::Result<Vec<(String, u64)>> {
+        let store_dir = self.store_dir(project_root, project_id)?;
+        let mut protected = extra_keep.to_vec();
+        let tag_pins = tags::all_pins(&store_dir, project_id).await?;
+        if !tag_pins.is_empty() {
+            let index = HistoryIndex::load_or_rebuild(&store_dir, project_id).await?;
+            for (rel, version) in &tag_pins {
+                if index.get(rel, *version).is_none() {
+                    tracing::warn!(
+                        "tag pin {rel} v{version} is not present in the store for project {project_id}"
+                    );
+                }
+            }
+        }
+        protected.extend(tag_pins);
+        Ok(protected)
+    }
+
     /// 保持ポリシー (設定) を適用する。`keep` は削ってはいけない (rel, version)
-    /// (手元 manifest の最新版など)。`purge = true` なら保管庫を全消去する。
+    /// (手元 manifest の最新版など)。タグが指す版はここで自動的に追加保護される。
+    /// `purge = true` なら保管庫を全消去する (タグの有無に関わらず全て消える)。
     pub async fn gc(
         &self,
         project_root: &Path,
@@ -330,7 +432,8 @@ impl HistoryStore {
             return Ok(report);
         }
         let now = synergos_net::types::now_ms();
-        let victims = apply_retention(&index, &self.config, keep, now);
+        let protected = self.protected_versions(project_root, project_id, keep).await?;
+        let victims = apply_retention(&index, &self.config, &protected, now);
         let mut removed = Vec::new();
         for (rel, version) in &victims {
             if let Some(entry) = index.remove(rel, *version) {
@@ -796,6 +899,122 @@ mod tests {
         let purge = s.gc(&root, "p", &[], true).await.unwrap();
         assert_eq!(purge.removed_versions.len(), 2);
         assert!(s.list(&root, "p", None).await.unwrap().is_empty());
+        let _ = tokio::fs::remove_dir_all(&root).await;
+    }
+
+    /// max_versions_per_file=1 でも、タグが指す旧版は GC で消えない
+    /// (spec/tasks/…-2-version-tags.md の完了条件: GC 保護の統合テスト)。
+    #[tokio::test]
+    async fn gc_protects_tagged_versions_even_under_max_versions_policy() {
+        let root = temp_project().await;
+        let mut cfg = HistoryConfig {
+            enabled: true,
+            ..HistoryConfig::default()
+        };
+        cfg.max_versions_per_file = 1;
+        let s = HistoryStore::new(cfg);
+        let f = root.join("a.bin");
+        for (v, body) in [(1u64, "one"), (2, "two"), (3, "three")] {
+            tokio::fs::write(&f, body).await.unwrap();
+            s.archive(
+                &root,
+                "p",
+                "a.bin",
+                v,
+                body.len() as u64,
+                crc32fast::hash(body.as_bytes()),
+                "peer",
+                "published",
+                &f,
+            )
+            .await
+            .unwrap();
+        }
+        let mut pins = std::collections::BTreeMap::new();
+        pins.insert("a.bin".to_string(), 1);
+        s.tag_add(&root, "p", "release-1.0", pins).await.unwrap();
+
+        // keep も --keep-manifest も渡さない。タグだけで v1 が保護されるはず。
+        let report = s.gc(&root, "p", &[], false).await.unwrap();
+        assert_eq!(report.removed_versions, vec![("a.bin".to_string(), 2)]);
+        assert!(s.lookup(&root, "p", "a.bin", 1).await.unwrap().is_some());
+        assert!(s.lookup(&root, "p", "a.bin", 2).await.unwrap().is_none());
+        assert!(s.lookup(&root, "p", "a.bin", 3).await.unwrap().is_some());
+
+        // タグを外せば通常の保持ポリシーに戻り、v1 も次回 GC の対象になる。
+        assert!(s.tag_remove(&root, "p", "release-1.0").await.unwrap());
+        let report2 = s.gc(&root, "p", &[], false).await.unwrap();
+        assert_eq!(report2.removed_versions, vec![("a.bin".to_string(), 1)]);
+        let _ = tokio::fs::remove_dir_all(&root).await;
+    }
+
+    /// `--purge` はタグの有無に関わらず保管庫を全消去する。
+    #[tokio::test]
+    async fn gc_purge_ignores_tags() {
+        let root = temp_project().await;
+        let s = store(".synergos/history");
+        let f = root.join("a.bin");
+        tokio::fs::write(&f, b"one").await.unwrap();
+        s.archive(
+            &root,
+            "p",
+            "a.bin",
+            1,
+            3,
+            crc32fast::hash(b"one"),
+            "peer",
+            "published",
+            &f,
+        )
+        .await
+        .unwrap();
+        let mut pins = std::collections::BTreeMap::new();
+        pins.insert("a.bin".to_string(), 1);
+        s.tag_add(&root, "p", "keep-me", pins).await.unwrap();
+
+        let purge = s.gc(&root, "p", &[], true).await.unwrap();
+        assert_eq!(purge.removed_versions.len(), 1);
+        assert!(s.list(&root, "p", None).await.unwrap().is_empty());
+        let _ = tokio::fs::remove_dir_all(&root).await;
+    }
+
+    /// `protected_versions` は extra_keep とタグ pins を合流させる。タグが指す版が
+    /// 保管庫に無くても (未取得の版など) エラーにはならず、そのまま保護集合に入る。
+    #[tokio::test]
+    async fn protected_versions_merges_extra_keep_and_tags_and_tolerates_missing_pins() {
+        let root = temp_project().await;
+        let s = store(".synergos/history");
+        let mut pins = std::collections::BTreeMap::new();
+        pins.insert("missing.bin".to_string(), 9);
+        s.tag_add(&root, "p", "future", pins).await.unwrap();
+
+        let mut merged = s
+            .protected_versions(&root, "p", &[("manifest.bin".to_string(), 4)])
+            .await
+            .unwrap();
+        merged.sort();
+        assert_eq!(
+            merged,
+            vec![
+                ("manifest.bin".to_string(), 4),
+                ("missing.bin".to_string(), 9),
+            ]
+        );
+        let _ = tokio::fs::remove_dir_all(&root).await;
+    }
+
+    #[tokio::test]
+    async fn non_history_nodes_cannot_read_or_mutate_tags() {
+        let root = temp_project().await;
+        let s = HistoryStore::new(HistoryConfig::default());
+
+        assert!(s
+            .tag_add(&root, "p", "release", std::collections::BTreeMap::new())
+            .await
+            .is_err());
+        assert!(s.tag_list(&root, "p").await.is_err());
+        assert!(s.tag_show(&root, "p", "release").await.is_err());
+        assert!(s.tag_remove(&root, "p", "release").await.is_err());
         let _ = tokio::fs::remove_dir_all(&root).await;
     }
 

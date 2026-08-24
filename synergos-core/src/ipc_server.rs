@@ -1557,6 +1557,132 @@ pub async fn dispatch_command(command: IpcCommand, ctx: &ServiceContext) -> IpcR
             }
         }
 
+        IpcCommand::TagAdd {
+            project_id,
+            name,
+            manifest_path,
+            pins,
+        } => {
+            let Some(root) = ctx.project_manager.project_root(&project_id) else {
+                return IpcResponse::Error {
+                    code: 2,
+                    message: format!("project not open: {project_id}"),
+                };
+            };
+            if !ctx.history.covers(&project_id) {
+                return IpcResponse::Error {
+                    code: 4,
+                    message: "this node is not a history node for the project".into(),
+                };
+            }
+            let resolved: std::collections::BTreeMap<String, u64> = if !pins.is_empty() {
+                pins.into_iter().collect()
+            } else if let Some(path) = &manifest_path {
+                match crate::manifest::ProjectManifest::load_from_file(path, &project_id).await {
+                    Ok(manifest) => manifest
+                        .files
+                        .into_iter()
+                        .map(|(rel, entry)| (rel, entry.version))
+                        .collect(),
+                    Err(error) => {
+                        return IpcResponse::Error {
+                            code: 3,
+                            message: format!("manifest {} unreadable: {error}", path.display()),
+                        }
+                    }
+                }
+            } else {
+                ctx.project_manager
+                    .manifest_entries(&project_id)
+                    .into_iter()
+                    .map(|(rel, entry)| (rel, entry.version))
+                    .collect()
+            };
+            if resolved.is_empty() {
+                return IpcResponse::Error {
+                    code: 3,
+                    message: "nothing to pin: manifest has no entries".into(),
+                };
+            }
+            match ctx.history.tag_add(&root, &project_id, &name, resolved).await {
+                Ok(tag) => IpcResponse::Tag(synergos_ipc::response::TagDto {
+                    name: tag.name,
+                    created_at: tag.created_at,
+                    pins: tag.pins.into_iter().collect(),
+                }),
+                Err(e) => IpcResponse::Error {
+                    code: 3,
+                    message: format!("tag add failed: {e}"),
+                },
+            }
+        }
+        IpcCommand::TagLs { project_id } => {
+            let Some(root) = ctx.project_manager.project_root(&project_id) else {
+                return IpcResponse::Error {
+                    code: 2,
+                    message: format!("project not open: {project_id}"),
+                };
+            };
+            match ctx.history.tag_list(&root, &project_id).await {
+                Ok(items) => IpcResponse::TagList(
+                    items
+                        .into_iter()
+                        .map(|t| synergos_ipc::response::TagSummaryDto {
+                            name: t.name,
+                            created_at: t.created_at,
+                            pin_count: t.pin_count,
+                        })
+                        .collect(),
+                ),
+                Err(e) => IpcResponse::Error {
+                    code: 3,
+                    message: format!("tag ls failed: {e}"),
+                },
+            }
+        }
+        IpcCommand::TagShow { project_id, name } => {
+            let Some(root) = ctx.project_manager.project_root(&project_id) else {
+                return IpcResponse::Error {
+                    code: 2,
+                    message: format!("project not open: {project_id}"),
+                };
+            };
+            match ctx.history.tag_show(&root, &project_id, &name).await {
+                Ok(Some(tag)) => IpcResponse::Tag(synergos_ipc::response::TagDto {
+                    name: tag.name,
+                    created_at: tag.created_at,
+                    pins: tag.pins.into_iter().collect(),
+                }),
+                Ok(None) => IpcResponse::Error {
+                    code: 2,
+                    message: format!("tag not found: {name}"),
+                },
+                Err(e) => IpcResponse::Error {
+                    code: 3,
+                    message: format!("tag show failed: {e}"),
+                },
+            }
+        }
+        IpcCommand::TagRm { project_id, name } => {
+            let Some(root) = ctx.project_manager.project_root(&project_id) else {
+                return IpcResponse::Error {
+                    code: 2,
+                    message: format!("project not open: {project_id}"),
+                };
+            };
+            match ctx.history.tag_remove(&root, &project_id, &name).await {
+                Ok(true) => IpcResponse::Ok,
+                Ok(false) => IpcResponse::Error {
+                    code: 2,
+                    message: format!("tag not found: {name}"),
+                },
+                Err(e) => IpcResponse::Error {
+                    code: 3,
+                    message: format!("tag rm failed: {e}"),
+                },
+            }
+        }
+
         // Subscribe / Unsubscribe は handle_client 側で per-client タスクとして
         // 処理するため、ここに届くことはない。保険として Ok を返す。
         IpcCommand::Subscribe { .. } => IpcResponse::Ok,

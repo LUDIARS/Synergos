@@ -28,6 +28,48 @@ pub enum HistoryCommand {
     },
 }
 
+/// `synergos tag ...` — 版タグ (GC・ローテーション保護)。docs/versioning-design.md §3.5。
+#[derive(Subcommand)]
+pub enum TagCommand {
+    /// タグを作成/上書きする。ピン集合の指定方法は 3 通り (排他):
+    /// 何も指定しなければ現在の manifest、`--manifest` なら指定 manifest、
+    /// `--file` + `--version` なら単一ファイル版だけをピンする。
+    Add {
+        /// プロジェクトID
+        project: String,
+        /// タグ名 (`[A-Za-z0-9._-]{1,64}`)
+        name: String,
+        /// この manifest の全 (path, version) をピン (git の過去コミット等から取り出した manifest)
+        #[arg(long, conflicts_with = "file")]
+        manifest: Option<PathBuf>,
+        /// 単一ファイル版だけをピンする対象パス (`--version` と併用)
+        #[arg(long, requires = "version")]
+        file: Option<String>,
+        /// `--file` と併用する版番号
+        #[arg(long, requires = "file")]
+        version: Option<u64>,
+    },
+    /// タグ一覧 (name / created_at / pin 数)
+    Ls {
+        /// プロジェクトID
+        project: String,
+    },
+    /// ピン内容の一覧
+    Show {
+        /// プロジェクトID
+        project: String,
+        /// タグ名
+        name: String,
+    },
+    /// タグ削除 (実体は消さない。以後 GC 対象に戻るだけ)
+    Rm {
+        /// プロジェクトID
+        project: String,
+        /// タグ名
+        name: String,
+    },
+}
+
 /// `project checkout`
 pub async fn checkout(
     client: &mut synergos_ipc::IpcClient,
@@ -141,6 +183,94 @@ pub async fn handle_history(cmd: HistoryCommand) -> anyhow::Result<()> {
                 }
                 IpcResponse::Error { message, .. } => anyhow::bail!(message),
                 _ => anyhow::bail!("unexpected history gc response"),
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `tag ...`
+pub async fn handle_tag(cmd: TagCommand) -> anyhow::Result<()> {
+    let mut client = synergos_ipc::IpcClient::connect().await?;
+    match cmd {
+        TagCommand::Add {
+            project,
+            name,
+            manifest,
+            file,
+            version,
+        } => {
+            let pins = match (file, version) {
+                (Some(path), Some(v)) => vec![(path, v)],
+                _ => Vec::new(),
+            };
+            let resp = client
+                .send(IpcCommand::TagAdd {
+                    project_id: project,
+                    name,
+                    manifest_path: manifest,
+                    pins,
+                })
+                .await?;
+            match resp {
+                IpcResponse::Tag(tag) => {
+                    println!(
+                        "Tag {} created ({} pin(s), at {})",
+                        tag.name,
+                        tag.pins.len(),
+                        tag.created_at
+                    );
+                }
+                IpcResponse::Error { message, .. } => anyhow::bail!(message),
+                _ => anyhow::bail!("unexpected tag add response"),
+            }
+        }
+        TagCommand::Ls { project } => {
+            let resp = client
+                .send(IpcCommand::TagLs { project_id: project })
+                .await?;
+            match resp {
+                IpcResponse::TagList(items) => {
+                    if items.is_empty() {
+                        println!("No tags.");
+                    }
+                    for t in items {
+                        println!("  {} {} pin(s) at {}", t.name, t.pin_count, t.created_at);
+                    }
+                }
+                IpcResponse::Error { message, .. } => anyhow::bail!(message),
+                _ => anyhow::bail!("unexpected tag ls response"),
+            }
+        }
+        TagCommand::Show { project, name } => {
+            let resp = client
+                .send(IpcCommand::TagShow {
+                    project_id: project,
+                    name,
+                })
+                .await?;
+            match resp {
+                IpcResponse::Tag(tag) => {
+                    println!("Tag {} ({} at {})", tag.name, tag.pins.len(), tag.created_at);
+                    for (rel, v) in &tag.pins {
+                        println!("  {rel} v{v}");
+                    }
+                }
+                IpcResponse::Error { message, .. } => anyhow::bail!(message),
+                _ => anyhow::bail!("unexpected tag show response"),
+            }
+        }
+        TagCommand::Rm { project, name } => {
+            let resp = client
+                .send(IpcCommand::TagRm {
+                    project_id: project,
+                    name: name.clone(),
+                })
+                .await?;
+            match resp {
+                IpcResponse::Ok => println!("Tag {name} removed."),
+                IpcResponse::Error { message, .. } => anyhow::bail!(message),
+                _ => anyhow::bail!("unexpected tag rm response"),
             }
         }
     }

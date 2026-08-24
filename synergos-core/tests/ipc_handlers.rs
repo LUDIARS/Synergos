@@ -256,6 +256,148 @@ async fn history_node_keeps_published_versions_and_restores_locally() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// `tag add/ls/show/rm` の IPC 配線と、タグが GC 保護に効くことを確認する
+/// (spec/tasks/…-2-version-tags.md の完了条件: IPC/CLI の配線テスト)。
+#[tokio::test]
+async fn tag_add_ls_show_rm_round_trip_and_protects_from_gc() {
+    let ctx = make_ctx_with_history(HistoryConfig {
+        enabled: true,
+        max_versions_per_file: 1,
+        ..HistoryConfig::default()
+    });
+    let root = std::env::temp_dir().join(format!("synergos-ipc-tag-{}", uuid::Uuid::new_v4()));
+
+    open_and_publish(&ctx, &root, b"one").await;
+    open_and_publish(&ctx, &root, b"two!!").await;
+
+    // 現在の manifest (v2) をタグ "release-1.0" としてピン
+    let tag = match dispatch_command(
+        IpcCommand::TagAdd {
+            project_id: "hist".into(),
+            name: "release-1.0".into(),
+            manifest_path: None,
+            pins: Vec::new(),
+        },
+        &ctx,
+    )
+    .await
+    {
+        IpcResponse::Tag(tag) => tag,
+        other => panic!("expected Tag, got {other:?}"),
+    };
+    assert_eq!(tag.name, "release-1.0");
+    assert_eq!(tag.pins, vec![("assets/a.bin".to_string(), 2)]);
+
+    // 単一ファイル版のピンでも作れる ("older" が v1 を保護する)
+    match dispatch_command(
+        IpcCommand::TagAdd {
+            project_id: "hist".into(),
+            name: "older".into(),
+            manifest_path: None,
+            pins: vec![("assets/a.bin".to_string(), 1)],
+        },
+        &ctx,
+    )
+    .await
+    {
+        IpcResponse::Tag(_) => {}
+        other => panic!("expected Tag, got {other:?}"),
+    }
+
+    match dispatch_command(IpcCommand::TagLs { project_id: "hist".into() }, &ctx).await {
+        IpcResponse::TagList(items) => {
+            assert_eq!(items.len(), 2);
+            assert!(items.iter().any(|t| t.name == "release-1.0" && t.pin_count == 1));
+            assert!(items.iter().any(|t| t.name == "older" && t.pin_count == 1));
+        }
+        other => panic!("expected TagList, got {other:?}"),
+    }
+
+    match dispatch_command(
+        IpcCommand::TagShow {
+            project_id: "hist".into(),
+            name: "older".into(),
+        },
+        &ctx,
+    )
+    .await
+    {
+        IpcResponse::Tag(tag) => assert_eq!(tag.pins, vec![("assets/a.bin".to_string(), 1)]),
+        other => panic!("expected Tag, got {other:?}"),
+    }
+
+    // publish で v3 を作る。max_versions_per_file=1 でも "older" タグが v1 を守る
+    open_and_publish(&ctx, &root, b"three!!!").await;
+    let gc_report = match dispatch_command(
+        IpcCommand::HistoryGc {
+            project_id: "hist".into(),
+            purge: false,
+            keep_manifests: vec![],
+        },
+        &ctx,
+    )
+    .await
+    {
+        IpcResponse::HistoryGcReport(report) => report,
+        other => panic!("expected HistoryGcReport, got {other:?}"),
+    };
+    // v2 は "release-1.0" タグと最新 manifest どちらでも保護されないが、gc 前に
+    // release-1.0 は v2 を、older は v1 を保護するので消えるのは無し
+    assert!(
+        !gc_report
+            .removed_versions
+            .contains(&("assets/a.bin".to_string(), 1)),
+        "tagged v1 must survive gc: {gc_report:?}"
+    );
+    assert!(
+        !gc_report
+            .removed_versions
+            .contains(&("assets/a.bin".to_string(), 2)),
+        "tagged v2 must survive gc: {gc_report:?}"
+    );
+
+    // タグを消せば実体はまだ残るが (rm は実体を消さない)、保護は外れる
+    match dispatch_command(
+        IpcCommand::TagRm {
+            project_id: "hist".into(),
+            name: "older".into(),
+        },
+        &ctx,
+    )
+    .await
+    {
+        IpcResponse::Ok => {}
+        other => panic!("expected Ok, got {other:?}"),
+    }
+    match dispatch_command(
+        IpcCommand::TagShow {
+            project_id: "hist".into(),
+            name: "older".into(),
+        },
+        &ctx,
+    )
+    .await
+    {
+        IpcResponse::Error { .. } => {}
+        other => panic!("expected Error for removed tag, got {other:?}"),
+    }
+    // 存在しないタグの rm は Error
+    match dispatch_command(
+        IpcCommand::TagRm {
+            project_id: "hist".into(),
+            name: "older".into(),
+        },
+        &ctx,
+    )
+    .await
+    {
+        IpcResponse::Error { .. } => {}
+        other => panic!("expected Error for already-removed tag, got {other:?}"),
+    }
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// 通常ノード (既定) では保管庫を作らず、`history ls` は空、`gc` は拒否する。
 #[tokio::test]
 async fn plain_node_stores_nothing_and_refuses_history_gc() {

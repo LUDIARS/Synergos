@@ -176,6 +176,10 @@ max_bytes = 0                 # 0 = 無制限。超えたら古い順に削る (
 | `synergos project restore <id> <path> --version N` | 1 ファイルだけ指定版に戻す (manifest も N に書き戻す)。自ノードが履歴ノードで実体を持っていればネットワーク無しで差し替える |
 | `synergos history ls <id> [<path>]` | 履歴ノード上の保持版一覧 (version / size / stored_at / source) |
 | `synergos history gc [--purge] [--keep-manifest <path>...]` | §3.5 の保持ポリシーを適用。`--purge` は保管庫全消去 |
+| `synergos tag add <id> <name> [--manifest <path> \| --file <path> --version N]` | 版タグを作成/上書き。省略時は現在の manifest、`--manifest` は指定 manifest、`--file`+`--version` は単一ファイル版をピン (§3.5) |
+| `synergos tag ls <id>` | タグ一覧 (name / created_at / pin 数) |
+| `synergos tag show <id> <name>` | タグのピン内容一覧 |
+| `synergos tag rm <id> <name>` | タグ削除 (実体は消さない。以後 GC 対象に戻るだけ) |
 
 想定フロー: `git pull` → `manifest.json` が更新される → `synergos project checkout myproj` →
 アセットが揃う (新しい版は publisher から、古い版に戻す場合は履歴ノードから)。逆に、
@@ -195,9 +199,26 @@ checkout / restore で「手元より古い版」を受け入れるのは、そ�
 履歴ノードだけが対象。通常ノードには GC 対象がない。
 
 - 削除候補 = `max_versions_per_file` / `max_age_days` / `max_bytes` のいずれかを超えた版
-- **削らない版**: 手元 manifest が参照する最新版、および `--keep-manifest <path>` で渡された
-  manifest (例: git の各リリースタグ時点) が参照する版
+- **削らない版**: 手元 manifest が参照する最新版、`--keep-manifest <path>` で渡された
+  manifest (例: git の各リリースタグ時点) が参照する版、および**版タグが指す版** (下記)
 - objects はどの index エントリからも参照されなくなったら削除 (参照カウントは index を走査して数える)
+
+**版タグによる保護**: `synergos tag add` で名前付きの (path → version) ピン集合をタグとして
+保存できる (git tag に相当)。保存場所は履歴ノードの保管庫直下 `<store_dir>/tags/<name>.json`
+(node ローカル。git には入れない — 索引の正は git 側 manifest というルールに反しない: タグは
+保持保護のためのローカル指定であって第二の履歴系ではない)。タグ名は `[A-Za-z0-9._-]{1,64}`
+でパス脱出を拒否する。
+
+- `history gc` は全タグの pins を保護集合に自動的に合流させる (`--purge` は例外で、タグの
+  有無に関わらず保管庫を全消去する)
+- タグが指す版が保管庫に無い場合は警告を出すだけでエラーにしない (削除済み・未取得でも
+  タグ自体は残せる)
+- `tag rm` はタグの実体 (pin 定義) を消すだけで、それが指していた版は消さない。以後の GC で
+  他の保護根拠が無ければ通常どおり削除候補に戻る
+- 後続の外部ストレージローテーションからも同じ保護を再利用できるよう、「保護済み
+  (path, version) 集合を返す」関数を history モジュールの公開 API として切り出している
+  (`HistoryStore::protected_versions(project_root, project_id, extra_keep)`)。呼び出し側は
+  手元 manifest 等の追加保護 (`extra_keep`) を渡すだけでよく、タグの合流は内部で行われる
 
 ### 3.6 なぜ差分 (CDC / text diff) をやらないか
 

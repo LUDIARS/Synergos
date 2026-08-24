@@ -117,6 +117,25 @@ pub enum IpcCommand {
         keep_manifests: Vec<PathBuf>,
     },
 
+    // ── 版タグ (GC / ローテーション保護) ──
+    /// タグを作成/上書きする。ピン集合の指定方法は 3 通り (排他):
+    /// - `pins` を明示 (`tag add --file <path> --version N`)
+    /// - `manifest_path` を渡す (`tag add --manifest <path>`)
+    /// - 両方省略: 作業ツリーの現在 manifest (`.synergos/manifest.json`) をピン
+    TagAdd {
+        project_id: String,
+        name: String,
+        manifest_path: Option<PathBuf>,
+        #[serde(default)]
+        pins: Vec<(String, u64)>,
+    },
+    /// タグ一覧 (name / created_at / pin 数)。
+    TagLs { project_id: String },
+    /// 1 タグのピン内容を表示する。
+    TagShow { project_id: String, name: String },
+    /// タグを削除する (実体は消さない。以後 GC 対象に戻るだけ)。
+    TagRm { project_id: String, name: String },
+
     // ── コンフリクト管理 ──
     /// プロジェクトのアクティブなコンフリクト一覧
     ConflictList { project_id: Option<String> },
@@ -230,6 +249,24 @@ impl IpcCommand {
                 ));
             }
             Ok(())
+        };
+
+        // タグ名: `[A-Za-z0-9._-]{1,64}` (synergos-core::history::tags::is_valid_tag_name と同じ規則)
+        let check_tag_name = |name: &str| -> Result<(), String> {
+            let valid = !name.is_empty()
+                && name.len() <= 64
+                && name != "."
+                && name != ".."
+                && name
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
+            if valid {
+                Ok(())
+            } else {
+                Err(format!(
+                    "tag name must match [A-Za-z0-9._-]{{1,64}}: {name}"
+                ))
+            }
         };
 
         match self {
@@ -360,6 +397,34 @@ impl IpcCommand {
                 Ok(())
             }
 
+            Self::TagAdd {
+                project_id,
+                name,
+                manifest_path,
+                pins,
+            } => {
+                check_id("project_id", project_id)?;
+                check_tag_name(name)?;
+                if let Some(p) = manifest_path {
+                    check_path("manifest_path", p)?;
+                }
+                if manifest_path.is_some() && !pins.is_empty() {
+                    return Err("manifest_path and pins are mutually exclusive".into());
+                }
+                for (rel, version) in pins {
+                    check_rel_path("pins[*].0", rel)?;
+                    if *version == 0 || *version == u64::MAX {
+                        return Err("pins[*].1 must be a positive file version".into());
+                    }
+                }
+                Ok(())
+            }
+            Self::TagLs { project_id } => check_id("project_id", project_id),
+            Self::TagShow { project_id, name } | Self::TagRm { project_id, name } => {
+                check_id("project_id", project_id)?;
+                check_tag_name(name)
+            }
+
             Self::Subscribe { .. } => Ok(()),
             Self::Unsubscribe { subscription_id } => check_id("subscription_id", subscription_id),
 
@@ -482,5 +547,64 @@ mod validate_tests {
             payload: vec![0u8; 1024], // 1 KiB
         };
         cmd.validate().unwrap();
+    }
+
+    #[test]
+    fn tag_names_are_restricted_to_the_allowed_charset() {
+        for bad in ["", "../escape", "a/b", "a\\b", " space", &"x".repeat(65)] {
+            let add = IpcCommand::TagAdd {
+                project_id: "p".into(),
+                name: bad.into(),
+                manifest_path: None,
+                pins: Vec::new(),
+            };
+            assert!(add.validate().is_err(), "accepted {bad}");
+
+            let show = IpcCommand::TagShow {
+                project_id: "p".into(),
+                name: bad.into(),
+            };
+            assert!(show.validate().is_err(), "accepted {bad}");
+        }
+        let ok = IpcCommand::TagAdd {
+            project_id: "p".into(),
+            name: "release-1.0".into(),
+            manifest_path: None,
+            pins: Vec::new(),
+        };
+        ok.validate().unwrap();
+    }
+
+    #[test]
+    fn tag_add_rejects_manifest_and_pins_together() {
+        let cmd = IpcCommand::TagAdd {
+            project_id: "p".into(),
+            name: "t".into(),
+            manifest_path: Some(PathBuf::from("m.json")),
+            pins: vec![("a.bin".into(), 1)],
+        };
+        assert!(cmd.validate().is_err());
+    }
+
+    #[test]
+    fn tag_add_rejects_non_positive_pin_versions() {
+        let cmd = IpcCommand::TagAdd {
+            project_id: "p".into(),
+            name: "t".into(),
+            manifest_path: None,
+            pins: vec![("a.bin".into(), 0)],
+        };
+        assert!(cmd.validate().is_err());
+    }
+
+    #[test]
+    fn tag_add_rejects_unsafe_pin_paths() {
+        let cmd = IpcCommand::TagAdd {
+            project_id: "p".into(),
+            name: "t".into(),
+            manifest_path: None,
+            pins: vec![("../escape".into(), 1)],
+        };
+        assert!(cmd.validate().is_err());
     }
 }
