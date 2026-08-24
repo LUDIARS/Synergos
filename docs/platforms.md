@@ -1,20 +1,22 @@
 # プラットフォーム対応
 
 Synergos は **Windows / Linux / macOS** の 3 OS をネイティブサポートしています。
-CI (GitHub Actions) は `Test (windows-latest)` / `Test (ubuntu-latest)` / `Test (macos-latest)` を毎コミット並列実行して全部 green を維持しており、2026-04-23 時点で 171 tests 全合格。
+CI (GitHub Actions) は `Test (windows-latest)` / `Test (ubuntu-latest)` /
+`Test (macos-latest)` のマトリクスでワークスペースをビルド・テストします。
 
 ## 共通 / OS 固有の切り分け
 
-プラットフォーム固有コードは **IPC トランスポート層のみ** で、他 (QUIC / gossip / bitswap / catalog sync / GUI) は完全に共通です。
+主なプラットフォーム差分は IPC トランスポートと保存先パスです。QUIC / gossip /
+bitswap / catalog sync / GUI の実装は各 OS で共通です。
 
 | 層 | Windows | Linux | macOS |
 |---|---|---|---|
-| **IPC 経路** | Named Pipe (`\\.\pipe\synergos-core`) | Unix Domain Socket (`$XDG_RUNTIME_DIR/synergos-core.sock`、無ければ `/tmp/synergos-core-<uid>.sock`) | 同左 |
-| **IPC 権限** | Named Pipe ACL で呼び出しユーザ限定 | `chmod 0600` + SO_PEERCRED (via `libc::geteuid`) で UID チェック | 同左 |
+| **IPC 経路** | Named Pipe (`\\.\pipe\synergos`) | Unix Domain Socket (`$XDG_RUNTIME_DIR/synergos/synergos.sock`、未設定時は `/tmp/synergos/synergos.sock`) | Unix Domain Socket (`~/Library/Application Support/Synergos/synergos.sock`) |
+| **IPC 権限** | Named Pipe ACL で呼び出しユーザ限定 | `chmod 0600` + `SO_PEERCRED` で UID チェック | `chmod 0600` + `getpeereid` で UID チェック |
 | **QUIC (quinn)** | ○ | ○ | ○ |
 | **Cloudflare Tunnel** | cloudflared.exe が PATH 必須 | cloudflared が PATH 必須 | cloudflared が PATH 必須 |
 | **GUI (egui/eframe/glutin)** | ○ (Direct3D / OpenGL) | ○ (X11 / Wayland、OpenGL 必須) | ○ (Metal 非使用、OpenGL) |
-| **Identity 保存先** | `%APPDATA%/synergos/identity` | `$XDG_CONFIG_HOME/synergos/identity` (既定 `~/.config/synergos/`) | `~/Library/Application Support/synergos/identity` |
+| **Identity 保存先** | `%APPDATA%/Synergos/identity.key` | `$XDG_STATE_HOME/synergos/identity.key` (既定 `~/.local/state/synergos/identity.key`) | `~/Library/Application Support/Synergos/identity.key` |
 
 ## ビルド
 
@@ -34,8 +36,8 @@ cargo build --release --workspace
 
 ### Rust ツールチェーン
 
-- 最低要件: Rust **stable 1.89+** (Cargo edition 2021)
-- CI / clippy は Rust 1.95 で回しているので、ローカルも最新 stable が推奨
+- リポジトリは最低 Rust バージョンを固定していない
+- CI と同じ最新 `stable` を推奨
 - `rustup update stable` で揃う
 
 ### 依存システムライブラリ
@@ -102,8 +104,9 @@ systemctl --user enable --now synergos-core
 
 ### macOS (launchd)
 
-`~/Library/LaunchAgents/io.ludiars.synergos-core.plist` に `ProgramArguments` で
-`synergos-core start` を指定。詳細は Apple の launchd ドキュメント参照。
+`~/Library/LaunchAgents/com.ludiars.synergos-core.plist` に `ProgramArguments` で
+`synergos-core start` を指定。plist の実例・`launchctl bootstrap` / `bootout` の
+操作・ログの場所は [setup-macos.md §4](setup-macos.md) を参照。
 
 ### Windows (サービス化)
 
@@ -124,5 +127,6 @@ systemctl --user enable --now synergos-core
 ## 関連ドキュメント
 
 - [getting-started.md](getting-started.md): ビルド + 起動 + 最小 2 ノード手順
+- [setup-macos.md](setup-macos.md): macOS 専用の通しセットアップ手順 (本ページの macOS 断片の詳細版)
 - [projects-and-peers.md](projects-and-peers.md): CLI リファレンスと auto-sync 経路の詳細
 - [../DESIGN.md](../DESIGN.md): 内部アーキテクチャ (Exchange / CatalogSync / Bitswap など)

@@ -366,6 +366,7 @@ IPv6 / UPnP / Tunnel で互いに繋がり、AWS は「直接繋がらないペ�
 ## 関連ドキュメント
 
 - [docs/getting-started.md](docs/getting-started.md): ローカルでの最小 2 ノード手順
+- [docs/setup-macos.md](docs/setup-macos.md): macOS 専用の通しセットアップ手順
 - [docs/platforms.md](docs/platforms.md): OS ごとの前提条件
 - [docs/projects-and-peers.md](docs/projects-and-peers.md): CLI リファレンス
 - [DESIGN.md](DESIGN.md): 内部アーキテクチャ
