@@ -159,6 +159,10 @@ synergos-control serve --config control.toml
 | POST | `/v1/orgs/{org}/nodes/{id}/connector-token` | 登録トークン再発行 |
 | POST | `/v1/orgs/{org}/nodes/{id}/node-key` | heartbeat 用 node key 再発行 (旧キー即無効) |
 | POST | `/v1/reconcile` | **dark node 検出**。`{"revoke_dark": true}` で失効まで実施 |
+| GET | `/v1/mesh/context` | UI 用。対象アカウント / API base を返す (秘密情報なし) |
+| POST | `/v1/mesh/token-check` | リクエストで渡した Cloudflare API token の検証 (保存しない) |
+| POST | `/v1/mesh/reconcile` | 同トークンでの突合 |
+| POST | `/v1/mesh/connector-tokens` | 同トークンで組織内 Mesh node の登録トークンを一括発行 |
 
 `POST /v1/heartbeat` だけは管理トークンではなく node key (Bearer) で認証する
 (ノード自身が叩くため)。
@@ -235,7 +239,61 @@ curl -s -X POST http://127.0.0.1:4250/v1/reconcile \
 | `dark_devices` | どの組織メンバーでもない端末 | 調査 → members 追加 or 失効 |
 | `missing_connectors` | 登録済みだが CF に実体が無い | dashboard 手動削除等。ノード再発行 or レジストリ削除 |
 
-### 3.6 抑止の考え方 (予防 + 検出)
+### 3.6 管理コンソール (Web UI) からの操作
+
+`synergos-control` は管理 Web UI (`synergos-admin-ui` / Dioxus 0.7 の WASM アプリ) を
+`/ui/` から静的配信できる。ビルドと配信設定は [admin-ui.md](admin-ui.md) を参照。
+
+```bash
+cd synergos-admin-ui && dx build --release --platform web && cd ..
+# control.toml に [ui] dist_path を設定してから
+synergos-control serve --config control.toml
+# → http://127.0.0.1:4250/ui/
+```
+
+初回アクセスで `SYNERGOS_CONTROL_ADMIN_TOKEN` を入力する。値はブラウザの
+`sessionStorage` にだけ保持され、全 API 呼び出しに Bearer として付く。
+
+**ノード追加 (UI):**
+
+1. 「組織 / ノード管理」で対象組織を選ぶ
+2. 登録フォームに表示名 / 所有者メール / 種別 (Mesh node か Client device) を入れて登録
+3. 返ってきた `connector_token` と `node_key` をコピーする
+   (control には保存されないため、画面を離れる前にコピーする)
+4. 画面の導線からガイド「5. ノードをエンロールする」を開き、ノード上で
+   `sudo warp-cli connector new <connector_token> && sudo warp-cli connect` を実行
+
+登録トークンを紛失したら、一覧の「トークン再発行」で再取得できる
+(`POST /v1/orgs/{org}/nodes/{id}/connector-token` と同じ)。
+
+**Mesh 自動設定 (UI):**
+
+「Mesh 自動設定」タブで Cloudflare API トークンを入力すると、次の 3 ステップを
+進捗表示付きで順に実行する。
+
+| step | 叩く API | 内容 |
+|---|---|---|
+| 1 | `POST /v1/mesh/token-check` | トークンの有効性 (`user/tokens/verify`) と、アカウント配下の Mesh node を実際に読めるかを確認 |
+| 2 | `POST /v1/mesh/reconcile` | レジストリと Cloudflare の突合 (dark node 検出)。**レポートのみ** |
+| 3 | `POST /v1/mesh/connector-tokens` | 対象組織の Mesh node へ配る登録トークンをまとめて発行 |
+
+これらの API は起動時 env の `CLOUDFLARE_API_TOKEN` ではなく、**リクエストで受け取った
+トークン**をそのリクエストの処理中だけ使う。保存もログ出力もしない
+(応答にも含めない)。いずれも管理トークン層の内側にあり、トークンの持ち込み口を
+無認証にはしていない。
+
+UI からは `revoke_dark` を行わない。失効は破壊的なので §3.5 の curl から明示的に実行する。
+
+**ダッシュボード:** 組織ごとのノード数・Mesh node 数・heartbeat 未着数を表示し、
+「dark node を点検」で `POST /v1/reconcile` (起動時 env のトークンを使う、レポートのみ)
+を実行できる。
+
+**セットアップガイド:** getting-started.md / two-node-operations.md / このドキュメントの
+手順を、操作順のステップ形式でアプリ内に表示する。OS タブ (Windows / Linux / macOS) で
+コマンドが切り替わり、各ブロックはコピーできる。各画面の主要操作に付いた「?」から
+対応する節へ飛べる。
+
+### 3.7 抑止の考え方 (予防 + 検出)
 
 1. **予防**: connector トークンは管制サーバー経由でのみ発行し、発行時に必ず org/owner が
    記録される。端末エンロールはエンロールポリシー (メール) で制限し、そのメールは

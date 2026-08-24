@@ -378,14 +378,18 @@ mod tests {
             })
             .await
             .unwrap();
+        let api_base = format!("http://{addr}/client/v4");
         let state = Arc::new(AppState {
             store,
             cloudflare: CloudflareClient::new(
-                format!("http://{addr}/client/v4"),
+                api_base.clone(),
                 "account".to_string(),
                 "token".to_string(),
             )
             .unwrap(),
+            cf_api_base: api_base,
+            cf_account_id: "account".to_string(),
+            ui_dist: None,
         });
 
         let result = register_node(

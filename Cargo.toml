@@ -9,4 +9,10 @@ members = [
     "ars-plugin-synergos",
     "synergos-tauri/src-tauri",
 ]
+
+# synergos-admin-ui は wasm32-unknown-unknown 専用 (Dioxus web renderer)。
+# workspace member にするとホストターゲットの `cargo build/test --workspace` が
+# 壊れるため除外し、専用の CI ジョブで wasm ビルドを検証する。
+# ビルド手順: docs/admin-ui.md
+exclude = ["synergos-admin-ui"]
 resolver = "2"

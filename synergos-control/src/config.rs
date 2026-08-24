@@ -24,6 +24,19 @@ pub struct ControlConfig {
     pub admin_token_env: String,
 
     pub cloudflare: CloudflareConfig,
+
+    /// 管理 Web UI (synergos-admin-ui) の配信設定。省略可 (API のみで運用できる)。
+    #[serde(default)]
+    pub ui: UiConfig,
+}
+
+/// 管理 Web UI の配信設定。
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct UiConfig {
+    /// `dx build --release --platform web` が出力したディレクトリ。
+    /// 未設定なら `/ui/` は 503 を返し、ビルド手順を案内する。
+    #[serde(default)]
+    pub dist_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -90,13 +103,23 @@ impl ControlConfig {
                 "cloudflare.account_id must not be empty".to_string(),
             ));
         }
+        // 配信先を指定したのに存在しない場合は起動時に落とす
+        // (起動は成功したのに /ui/ だけ 503、という分かりにくい状態を作らない)。
+        if let Some(dist) = &self.ui.dist_path {
+            if !dist.is_dir() {
+                return Err(ControlError::Config(format!(
+                    "ui.dist_path {} is not a directory (run `dx build --release --platform web` first)",
+                    dist.display()
+                )));
+            }
+        }
         Ok(())
     }
 
     /// 必須の秘密情報を起動時に解決する。欠けていたら即エラー (fail-fast, §7.1)。
     pub fn resolve_secrets(&self) -> ControlResult<ResolvedSecrets> {
         let admin_token = read_secret_env(&self.admin_token_env)?;
-        if admin_token.as_bytes().len() < 32 {
+        if admin_token.len() < 32 {
             return Err(ControlError::Config(format!(
                 "required secret env var {} must contain at least 32 bytes",
                 self.admin_token_env

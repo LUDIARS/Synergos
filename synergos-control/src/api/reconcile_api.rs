@@ -5,6 +5,7 @@ use axum::Json;
 use serde::Deserialize;
 use tracing::{info, warn};
 
+use crate::cloudflare::CloudflareClient;
 use crate::error::ControlResult;
 use crate::reconcile::{classify, ReconcileReport};
 use crate::store::now_ms;
@@ -25,10 +26,20 @@ pub async fn run_reconcile(
     body: Option<Json<ReconcileRequest>>,
 ) -> ControlResult<Json<ReconcileReport>> {
     let req = body.map(|Json(r)| r).unwrap_or_default();
+    let report = reconcile_with(&state, &state.cloudflare, req.revoke_dark).await?;
+    Ok(Json(report))
+}
 
+/// 突合本体。Cloudflare クライアントを引数に取るため、起動時 env のトークンでも
+/// リクエストで受け取った一時トークン (mesh_setup) でも同じ処理を共有できる。
+pub async fn reconcile_with(
+    state: &AppState,
+    cloudflare: &CloudflareClient,
+    revoke_dark: bool,
+) -> ControlResult<ReconcileReport> {
     let snapshot = state.store.snapshot().await;
-    let connectors = state.cloudflare.list_mesh_connectors().await?;
-    let registrations = state.cloudflare.list_device_registrations().await?;
+    let connectors = cloudflare.list_mesh_connectors().await?;
+    let registrations = cloudflare.list_device_registrations().await?;
 
     let mut report = classify(
         &snapshot.orgs,
@@ -46,41 +57,41 @@ pub async fn run_reconcile(
         "reconcile completed"
     );
 
-    if req.revoke_dark {
-        let device_ids: Vec<String> = report.dark_devices.iter().map(|d| d.id.clone()).collect();
-        if !device_ids.is_empty() {
-            match state
-                .cloudflare
-                .revoke_device_registrations(&device_ids)
-                .await
-            {
-                Ok(()) => report
-                    .actions
-                    .push(format!("revoked {} dark device(s)", device_ids.len())),
-                Err(err) => {
-                    warn!(error = %err, "failed to revoke dark devices");
-                    report.actions.push(format!(
-                        "FAILED to revoke {} dark device(s)",
-                        device_ids.len()
-                    ));
-                }
-            }
-        }
-        for connector in &report.dark_connectors {
-            match state.cloudflare.delete_mesh_connector(&connector.id).await {
-                Ok(_) => report
-                    .actions
-                    .push(format!("deleted dark connector {}", connector.id)),
-                Err(err) => {
-                    // 1 件の失敗で全体を止めず、結果に失敗を明記する
-                    warn!(connector = %connector.id, error = %err, "failed to delete dark connector");
-                    report
-                        .actions
-                        .push(format!("FAILED to delete dark connector {}", connector.id));
-                }
+    if revoke_dark {
+        revoke_dark_participants(cloudflare, &mut report).await;
+    }
+
+    Ok(report)
+}
+
+async fn revoke_dark_participants(cloudflare: &CloudflareClient, report: &mut ReconcileReport) {
+    let device_ids: Vec<String> = report.dark_devices.iter().map(|d| d.id.clone()).collect();
+    if !device_ids.is_empty() {
+        match cloudflare.revoke_device_registrations(&device_ids).await {
+            Ok(()) => report
+                .actions
+                .push(format!("revoked {} dark device(s)", device_ids.len())),
+            Err(err) => {
+                warn!(error = %err, "failed to revoke dark devices");
+                report.actions.push(format!(
+                    "FAILED to revoke {} dark device(s)",
+                    device_ids.len()
+                ));
             }
         }
     }
-
-    Ok(Json(report))
+    for connector in &report.dark_connectors {
+        match cloudflare.delete_mesh_connector(&connector.id).await {
+            Ok(_) => report
+                .actions
+                .push(format!("deleted dark connector {}", connector.id)),
+            Err(err) => {
+                // 1 件の失敗で全体を止めず、結果に失敗を明記する
+                warn!(connector = %connector.id, error = %err, "failed to delete dark connector");
+                report
+                    .actions
+                    .push(format!("FAILED to delete dark connector {}", connector.id));
+            }
+        }
+    }
 }

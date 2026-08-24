@@ -34,3 +34,14 @@ pub struct DeviceRegistration {
     #[serde(default)]
     pub revoked_at: Option<String>,
 }
+
+/// `user/tokens/verify` の結果 (API token 自体の有効性)。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenStatus {
+    #[serde(default)]
+    pub id: Option<String>,
+    /// Cloudflare が返す状態。有効なトークンは "active"。
+    pub status: String,
+    #[serde(default)]
+    pub expires_on: Option<String>,
+}

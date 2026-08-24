@@ -14,3 +14,8 @@ synergos-control-store.*.tmp
 
 # Anatomia のローカル状態 (ドメイン定義の正本は spec/domains/)
 .anatomia/
+
+# synergos-admin-ui は独立 workspace のため、その target は root の /target に含まれない
+/synergos-admin-ui/target
+/synergos-admin-ui/dist
+/synergos-admin-ui/.dioxus

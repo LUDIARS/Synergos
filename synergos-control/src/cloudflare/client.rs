@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use crate::error::{ControlError, ControlResult};
 
-use super::{DeviceRegistration, MeshConnector};
+use super::{DeviceRegistration, MeshConnector, TokenStatus};
 
 /// Cloudflare API v4 の薄いクライアント。
 ///
@@ -99,17 +99,42 @@ impl CloudflareClient {
             ControlError::Cloudflare(format!("{method} {path}: invalid response ({status}): {e}"))
         })?;
         if !envelope.success {
-            let detail = envelope
-                .errors
-                .iter()
-                .map(|e| format!("{}:{}", e.code, e.message))
-                .collect::<Vec<_>>()
-                .join("; ");
+            let detail = format_api_errors(&envelope.errors);
             return Err(ControlError::Cloudflare(format!(
                 "{method} {path} failed ({status}): {detail}"
             )));
         }
         Ok(envelope.result)
+    }
+
+    /// API token 自体の有効性を確認する。
+    /// account 配下ではないエンドポイントなので `url()` を経由しない。
+    ///
+    /// UI から渡される一時トークンを、副作用のある操作より前に弾くために使う。
+    pub async fn verify_token(&self) -> ControlResult<TokenStatus> {
+        let url = format!("{}/user/tokens/verify", self.api_base);
+        let resp = self
+            .http
+            .get(&url)
+            .bearer_auth(&self.api_token)
+            .send()
+            .await
+            .map_err(|e| ControlError::Cloudflare(format!("GET user/tokens/verify: {e}")))?;
+        let status = resp.status();
+        let envelope: Envelope<TokenStatus> = resp.json().await.map_err(|e| {
+            ControlError::Cloudflare(format!(
+                "GET user/tokens/verify: invalid response ({status}): {e}"
+            ))
+        })?;
+        if !envelope.success {
+            return Err(ControlError::Cloudflare(format!(
+                "GET user/tokens/verify failed ({status}): {}",
+                format_api_errors(&envelope.errors)
+            )));
+        }
+        envelope.result.ok_or_else(|| {
+            ControlError::Cloudflare("GET user/tokens/verify: success but empty result".to_string())
+        })
     }
 
     // --- Mesh node (warp_connector) ---
@@ -225,6 +250,14 @@ impl CloudflareClient {
             .await?;
         Ok(())
     }
+}
+
+fn format_api_errors(errors: &[ApiError]) -> String {
+    errors
+        .iter()
+        .map(|e| format!("{}:{}", e.code, e.message))
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 fn validate_api_base(api_base: &str) -> ControlResult<()> {

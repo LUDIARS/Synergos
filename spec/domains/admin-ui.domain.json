@@ -1,0 +1,11 @@
+{
+  "name": "admin-ui",
+  "description": "管理コンソール。 管制サーバーの操作とセットアップ手順をブラウザで提供する面。",
+  "presetRules": [],
+  "templateRules": [],
+  "membership": [
+    {
+      "pathPattern": "(^|/)synergos-admin-ui/(?:.*/)?[^/]+$"
+    }
+  ]
+}

@@ -13,6 +13,8 @@ Synergos のセットアップと運用に必要な情報を段階別にまと�
 | [setup-macos.md](setup-macos.md) | macOS 専用セットアップガイド (ビルド、Gatekeeper、launchd 常駐、プロジェクト参加、Mesh 参加、検証チェックリスト) |
 | [mesh-two-node-checklist.md](mesh-two-node-checklist.md) | Cloudflare Mesh で AWS Linux + Windows の 2 台を実際に動かす実施チェックリスト (人手の段とコピペの段) |
 | [two-node-operations.md](two-node-operations.md) | **別マシン 2 台**で動かす手順 (LAN / Cloudflare Mesh)、firewall、トラブルシューティング |
+| [mesh-operations.md](mesh-operations.md) | Cloudflare Mesh の構築手順と管制サーバー (synergos-control) の設計・API・運用フロー |
+| [admin-ui.md](admin-ui.md) | 管理コンソール (synergos-admin-ui) のビルド・配信設定・画面構成・秘密情報の扱い |
 | [operations-readiness.md](operations-readiness.md) | 運用開始に向けた完成度の棚卸しと残作業 (P0/P1/P2) |
 | [versioning-design.md](versioning-design.md) | バージョン管理 (git) との兼ね合い、バイナリ/大容量ファイルの差分の扱い |
 

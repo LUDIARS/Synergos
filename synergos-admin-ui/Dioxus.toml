@@ -1,0 +1,15 @@
+[application]
+name = "synergos-admin-ui"
+
+[web.app]
+title = "Synergos 管理コンソール"
+# synergos-control は成果物を `/ui/` 配下で配信する。
+# base_path を合わせないと生成される JS/WASM の URL がずれる。
+base_path = "ui"
+
+[web.watcher]
+reload_html = true
+
+[web.resource]
+style = []
+script = []

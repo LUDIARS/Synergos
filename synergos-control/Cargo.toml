@@ -24,3 +24,5 @@ thiserror = "2"
 
 [dev-dependencies]
 tempfile = "3"
+# ルーター層のテスト (認証必須の確認) で `oneshot` を使う
+tower = { version = "0.5", features = ["util"] }

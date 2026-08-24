@@ -66,11 +66,21 @@ async fn serve(config_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
         secrets.cloudflare_api_token,
     )?;
 
-    let state = Arc::new(AppState { store, cloudflare });
+    let state = Arc::new(AppState {
+        store,
+        cloudflare,
+        cf_api_base: config.cloudflare.api_base.clone(),
+        cf_account_id: config.cloudflare.account_id.clone(),
+        ui_dist: config.ui.dist_path.clone(),
+    });
     let router = api::build_router(state, AdminToken(secrets.admin_token));
 
     let listener = tokio::net::TcpListener::bind(config.bind_addr).await?;
     info!(addr = %config.bind_addr, "synergos-control listening");
+    match &config.ui.dist_path {
+        Some(_) => info!("admin UI served at /ui/"),
+        None => info!("admin UI is not configured ([ui] dist_path); /ui/ returns 503"),
+    }
 
     axum::serve(listener, router)
         .with_graceful_shutdown(shutdown_signal())

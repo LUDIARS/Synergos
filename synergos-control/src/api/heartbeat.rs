@@ -175,6 +175,9 @@ mod tests {
                 "unused".to_string(),
             )
             .unwrap(),
+            cf_api_base: "http://127.0.0.1:1/client/v4".to_string(),
+            cf_account_id: "account".to_string(),
+            ui_dist: None,
         })
     }
 

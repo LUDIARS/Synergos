@@ -85,6 +85,38 @@ jobs:
       - name: Run tests
         run: cargo test --workspace --all-targets
 
+  wasm:
+    runs-on: ubuntu-latest
+    name: Admin UI (wasm)
+    # synergos-admin-ui は workspace から exclude されているため、
+    # ここで wasm32 ターゲットのビルドを別途検証する。
+    defaults:
+      run:
+        working-directory: synergos-admin-ui
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: rustfmt, clippy
+      - name: Cache cargo registry & build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            synergos-admin-ui/target
+          key: wasm-cargo-${{ hashFiles('synergos-admin-ui/Cargo.toml', 'synergos-admin-ui/Cargo.lock') }}
+          restore-keys: |
+            wasm-cargo-
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Build for wasm32
+        run: cargo build --target wasm32-unknown-unknown --release
+      - name: Run clippy
+        run: cargo clippy --target wasm32-unknown-unknown --all-targets -- -D warnings
+
   coverage:
     runs-on: ubuntu-latest
     name: Coverage (llvm-cov)
@@ -137,3 +169,5 @@ jobs:
         run: cargo install --locked cargo-audit
       - name: Run cargo audit
         run: cargo audit
+      - name: Run admin UI cargo audit
+        run: cargo audit --file synergos-admin-ui/Cargo.lock

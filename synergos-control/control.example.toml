@@ -19,3 +19,10 @@ store_path = "synergos-control-store.json"
 [cloudflare]
 # Cloudflare dashboard → 対象アカウントの Account ID
 account_id = ""
+
+[ui]
+# 管理 Web UI (synergos-admin-ui) のビルド成果物ディレクトリ。
+# 省略すると /ui/ は 503 を返す (API サーバー単体として動く)。
+# `dx build --release --platform web` の出力先を指定する:
+#   dist_path = "target/dx/synergos-admin-ui/release/web/public"
+# dist_path = ""
