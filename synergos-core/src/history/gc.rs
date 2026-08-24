@@ -37,7 +37,11 @@ pub fn apply_retention(
     if config.max_versions_per_file > 0 {
         let keep_count = usize::try_from(config.max_versions_per_file).unwrap_or(usize::MAX);
         for (rel, versions) in &index.entries {
-            let mut sorted: Vec<u64> = versions.keys().copied().collect();
+            let mut sorted: Vec<u64> = versions
+                .iter()
+                .filter(|(_, entry)| entry.offloaded.is_none())
+                .map(|(version, _)| *version)
+                .collect();
             sorted.sort_unstable_by(|a, b| b.cmp(a));
             for v in sorted
                 .into_iter()
@@ -60,7 +64,10 @@ pub fn apply_retention(
             .saturating_mul(1000);
         let cutoff = now_ms.saturating_sub(max_age_ms);
         for (rel, v, entry) in index.iter_all() {
-            if entry.stored_at < cutoff && !protected.contains(&(rel, v)) {
+            if entry.offloaded.is_none()
+                && entry.stored_at < cutoff
+                && !protected.contains(&(rel, v))
+            {
                 victims.insert((rel.to_string(), v));
             }
         }
@@ -71,7 +78,7 @@ pub fn apply_retention(
         let mut object_refs: std::collections::BTreeMap<&str, (usize, u64)> =
             std::collections::BTreeMap::new();
         for (rel, version, entry) in index.iter_all() {
-            if victims.contains(&(rel.to_string(), version)) {
+            if entry.offloaded.is_some() || victims.contains(&(rel.to_string(), version)) {
                 continue;
             }
             object_refs
@@ -84,7 +91,9 @@ pub fn apply_retention(
         });
         let mut oldest: Vec<(u64, String, u64)> = index
             .iter_all()
-            .filter(|(rel, v, _)| !protected.contains(&(rel, *v)))
+            .filter(|(rel, v, entry)| {
+                entry.offloaded.is_none() && !protected.contains(&(rel, *v))
+            })
             .map(|(rel, v, e)| (e.stored_at, rel.to_string(), v))
             .collect();
         oldest.sort();
@@ -113,7 +122,7 @@ pub fn apply_retention(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::history::index::IndexEntry;
+    use crate::history::index::{IndexEntry, OffloadedRef};
 
     fn idx() -> HistoryIndex {
         let mut i = HistoryIndex::new("p");
@@ -133,6 +142,7 @@ mod tests {
                     stored_at: at,
                     publisher: String::new(),
                     source: String::new(),
+                    offloaded: None,
                 },
             );
         }
@@ -173,6 +183,25 @@ mod tests {
                 ("b".to_string(), 1)
             ]
         );
+    }
+
+    #[test]
+    fn retention_never_removes_offloaded_versions() {
+        let mut index = idx();
+        let mut offloaded = index.get("a", 1).unwrap().clone();
+        offloaded.offloaded = Some(OffloadedRef {
+            backend: "local_path".into(),
+            key: format!("{}/{}", "a".repeat(64), "b".repeat(64)),
+            config: None,
+        });
+        index.insert("a", 1, offloaded);
+        let mut config = cfg();
+        config.max_versions_per_file = 1;
+        config.max_age_days = 1;
+        config.max_bytes = 1;
+
+        let victims = apply_retention(&index, &config, &[], 2 * 24 * 60 * 60 * 1000);
+        assert!(!victims.contains(&("a".to_string(), 1)));
     }
 
     #[test]

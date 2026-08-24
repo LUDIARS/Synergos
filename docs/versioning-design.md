@@ -220,7 +220,100 @@ checkout / restore で「手元より古い版」を受け入れるのは、そ�
   (`HistoryStore::protected_versions(project_root, project_id, extra_keep)`)。呼び出し側は
   手元 manifest 等の追加保護 (`extra_keep`) を渡すだけでよく、タグの合流は内部で行われる
 
-### 3.6 なぜ差分 (CDC / text diff) をやらないか
+### 3.6 外部ストレージローテーション (spec: archive-rotation)
+
+履歴ノードの保管庫は保持ポリシー (§3.5) を適用しても、対象を絞らない運用では際限なく
+増える。**削除ではなく外部ストレージへの退避**でこれに対処するのがローテーション。
+先行実装 (版タグ / `protected_versions`) を再利用し、保護ロジックを二重実装しない。
+
+**設定 (`synergos.toml`)**:
+
+```toml
+[history.rotation]
+enabled = false               # 既定無効
+offload_after_days = 90       # この日数より古い stored_at の版が候補
+interval_hours = 24           # daemon 内の定期実行間隔 (0 = 手動のみ)
+
+[history.rotation.backend]
+type = "s3"                   # "s3" | "local_path" | "gdrive"
+# type = "s3":
+bucket = "synergos-archive"
+prefix = "myteam/"
+region = "ap-northeast-1"     # 認証は env / workload identity。設定ファイルに鍵直書き禁止
+# type = "local_path":
+path = "D:/SynergosArchive"   # 外部 HDD のマウント先。到達不能なら退避をスキップして警告
+# type = "gdrive":
+folder_id = "<drive folder id>"
+credentials_file = "~/.synergos/gdrive-sa.json"   # service account JSON。REST (reqwest) で叩く
+```
+
+**backend 抽象** (`synergos-core/src/history/rotation/`):
+
+```rust
+#[async_trait]
+trait RotationBackend {
+    async fn put(&self, key: &str, path: &Path) -> io::Result<()>;
+    async fn get(&self, key: &str, dest: &Path) -> io::Result<()>;
+    async fn exists(&self, key: &str) -> io::Result<bool>;
+    async fn size(&self, key: &str) -> io::Result<Option<u64>>;
+    async fn delete(&self, key: &str) -> io::Result<()>;
+}
+```
+
+- `key` = `<project_id_hash>/<blake3 hex>` (content-addressed のまま。保管庫の object 実体と同じ命名)
+- **S3**: `object_store` crate (`object_store::aws`)。フル SDK の `aws-sdk-s3` ではなく
+  put/get/head/delete だけの薄い `ObjectStore` trait を選定 (依存が軽く、env / workload identity に対応)
+- **LocalDir**: 単純コピー + `File::sync_all` (fsync) + atomic rename。マウント先に到達できなければ
+  「到達不能」を明確なエラーで返し、呼び出し側 (`rotate`) はこれを退避スキップ + 警告として扱う
+- **GoogleDrive**: `reqwest` で Drive v3 REST を直接叩く (google SDK は使わず依存を増やさない)。
+  service account の JSON 鍵から JWT assertion (RS256, `jsonwebtoken` crate) を組み立てて
+  OAuth2 token endpoint と交換する。Drive は path 空間を持たないため、multipart upload 時に
+  `appProperties.rotationKey = key` を埋め、`files.list` の query でそれを検索して key ↔ file id を解決する
+
+**動作**:
+
+1. 候補選定 = `stored_at` が `offload_after_days` を超過、かつ以下を**除外**:
+   保持ポリシー (§3.5) と同じ保護集合 (`HistoryStore::protected_versions` を再利用— 手元
+   manifest の最新版 / `--keep-manifest` / 版タグ)、および既に `offloaded` 済みの版
+2. 退避 = `backend.put` → put 後に `exists` + size 一致 + 再取得時の hash/CRC 一致を確認 → index と復旧用 sidecar に
+   `offloaded: { backend, key, config }` を記録して `index.save` (atomic write) →
+   ここまで成功し、同じ内容を指すローカル版が無い場合だけ objects 実体を削除する。同じ内容 (hash) を指す
+   他の (rel, version) が既に退避済みなら put をスキップし索引更新だけ行う (dedup を維持)。
+   put 失敗時は index/objects を一切変更せず、理由付きでスキップ一覧に積む
+3. 取り戻し = `HistoryStore::lookup` が index の `offloaded` に当たったら (checkout /
+   restore / 旧版 FileWant 応答の共通経路)、`backend.get` → blake3 + CRC + size 検証 →
+   objects へ書き戻し → 同じ外部 object を指す他の退避版が無ければ backend から削除 →
+   sidecar 参照を復元 → `offloaded` マークを外してから通常経路で応答する。
+   backend 不達時は「アーカイブ先に接続できない」という明確なエラーを返し、index / objects は
+   変更しない (壊れた状態を作らない)。`synergos history fetch` で明示的に取り戻すこともできる
+4. 実行契機 = daemon 内タイマー (`interval_hours` ごと。プロジェクトごとの実行失敗は
+   warn するだけで他プロジェクトを止めない) + CLI 手動 (`history rotate`)。
+   `interval_hours = 0` は「daemon タイマーは使わず CLI 手動のみ」の意味
+
+**CLI**:
+
+| コマンド | 動作 |
+|---|---|
+| `synergos history rotate <id> [--dry-run] [--keep-manifest <path>...]` | 今すぐローテーション。`--dry-run` は候補一覧のみ (何も変更しない) |
+| `synergos history offloaded <id> [<path>]` | 退避済み一覧 (path / version / backend / key / size) |
+| `synergos history fetch <id> <path> --version N` | 明示的に取り戻す |
+
+**運用注意**:
+
+- S3 / GDrive の認証情報は設定ファイルに書かない (env / workload identity / service account JSON ファイル参照のみ)
+- `local_path` はマウントが外れた状態で `rotate` を実行しても安全 (put 前に到達性を確認し、
+  不達ならその回はスキップして次回タイマーに委ねる)
+- ローテーション対象は「保持ポリシーで残った版」であり、通常の `history gc` は退避済み版を
+  削除しない。外部 object を索引だけ失って回収不能にしないため、退避済み版が残る間の
+  `history gc --purge` は拒否される。全消去する場合は先に `history fetch` で取り戻す
+- S3 / GDrive はネットワーク非依存の unit test (key 組み立て・query エスケープ等) までを
+  リポジトリのテストに含める。実環境疎通は各チームの認証情報で手動確認する:
+  - S3: `bucket` / `region` を設定し `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` を
+    export した状態で `synergos history rotate <id> --dry-run` → 候補が出たら `--dry-run` を外す
+  - GDrive: service account を作成し対象 `folder_id` に編集者権限で共有した上で
+    `credentials_file` に鍵 JSON を置き、同様に確認する
+
+### 3.7 なぜ差分 (CDC / text diff) をやらないか
 
 - 主目的は「チームでアセットを揃えて作業を続ける」で、**巻き戻せる・消えない**が満たせれば足りる。
   差分転送は帯域の最適化であり、LAN / Cloudflare Mesh の帯域では必須ではない

@@ -20,7 +20,7 @@ async-trait = "0.1"
 # HTTP servlet (peer-info bootstrap endpoint, 将来 auth/API 拡張のホスト)
 axum = { version = "0.7", default-features = false, features = ["http1", "json", "tokio"] }
 
-# HTTP client (peer-add-by-url の bootstrap GET)
+# HTTP client (peer-add-by-url の bootstrap GET / gdrive rotation backend REST)
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "http2"] }
 
 # QUIC (for transfer stream handling)
@@ -28,6 +28,14 @@ quinn = "0.11"
 
 # Crypto / Hash
 blake3 = "1"
+
+# 外部ストレージローテーション (spec: archive-rotation)
+# S3 backend: object_store は put/get/head/delete だけの薄い ObjectStore trait
+# (env / workload identity 認証に対応)。フル SDK の aws-sdk-s3 より依存が軽い。
+object_store = { version = "0.11", features = ["aws"] }
+bytes = "1"
+# gdrive backend: service account JSON 鍵から JWT assertion (RS256) を組み立てる。
+jsonwebtoken = "9"
 
 # Config / Serialization
 serde = { version = "1", features = ["derive"] }

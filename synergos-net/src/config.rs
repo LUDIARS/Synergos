@@ -288,6 +288,9 @@ pub struct HistoryConfig {
     /// 保管庫全体の上限バイト数。0 = 無制限。超えたら古い順に削る。
     #[serde(default)]
     pub max_bytes: u64,
+    /// 外部ストレージへのローテーション設定 (spec: archive-rotation)。既定は無効。
+    #[serde(default)]
+    pub rotation: HistoryRotationConfig,
 }
 
 impl Default for HistoryConfig {
@@ -299,6 +302,124 @@ impl Default for HistoryConfig {
             max_versions_per_file: 0,
             max_age_days: 0,
             max_bytes: 0,
+            rotation: HistoryRotationConfig::default(),
+        }
+    }
+}
+
+/// `[history.rotation]` — 保持ポリシーで残った旧版のうち、さらに古いものを
+/// 外部ストレージへ退避する設定。既定は無効 (`enabled = false`)。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HistoryRotationConfig {
+    /// このノードでローテーションを有効にする。
+    #[serde(default)]
+    pub enabled: bool,
+    /// `stored_at` がこの日数より古い版が退避候補。
+    #[serde(default = "default_offload_after_days")]
+    pub offload_after_days: u64,
+    /// daemon 内タイマーの実行間隔 (時間)。0 = 手動実行のみ (`history rotate`)。
+    #[serde(default = "default_rotation_interval_hours")]
+    pub interval_hours: u64,
+    /// 退避先バックエンド。
+    #[serde(default)]
+    pub backend: RotationBackendConfig,
+}
+
+impl Default for HistoryRotationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            offload_after_days: default_offload_after_days(),
+            interval_hours: default_rotation_interval_hours(),
+            backend: RotationBackendConfig::default(),
+        }
+    }
+}
+
+impl HistoryRotationConfig {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.enabled {
+            self.backend.validate()?;
+        }
+        Ok(())
+    }
+}
+
+fn default_offload_after_days() -> u64 {
+    90
+}
+
+fn default_rotation_interval_hours() -> u64 {
+    24
+}
+
+/// `[history.rotation.backend]` — 退避先。`type` タグで 3 種を選ぶ。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum RotationBackendConfig {
+    /// AWS S3 (または互換 API)。認証は環境変数 / workload identity — 設定ファイルに鍵を書かない。
+    S3 {
+        bucket: String,
+        #[serde(default)]
+        prefix: String,
+        region: String,
+    },
+    /// ローカルパス (外部 HDD 等のマウント先)。到達不能なら退避をスキップして警告する。
+    LocalPath { path: String },
+    /// Google Drive。service account の JSON 鍵ファイルを `credentials_file` で指す。
+    Gdrive {
+        folder_id: String,
+        credentials_file: String,
+    },
+    /// 未設定 (既定)。`rotation.enabled = true` のときはこのままだと validate が失敗する。
+    #[serde(other)]
+    Unset,
+}
+
+impl Default for RotationBackendConfig {
+    fn default() -> Self {
+        Self::Unset
+    }
+}
+
+impl RotationBackendConfig {
+    pub fn validate(&self) -> Result<(), String> {
+        match self {
+            Self::S3 {
+                bucket, region, ..
+            } => {
+                if bucket.trim().is_empty() {
+                    return Err("history.rotation.backend.bucket must not be empty".into());
+                }
+                if region.trim().is_empty() {
+                    return Err("history.rotation.backend.region must not be empty".into());
+                }
+                Ok(())
+            }
+            Self::LocalPath { path } => {
+                if path.trim().is_empty() {
+                    return Err("history.rotation.backend.path must not be empty".into());
+                }
+                Ok(())
+            }
+            Self::Gdrive {
+                folder_id,
+                credentials_file,
+            } => {
+                if folder_id.trim().is_empty() {
+                    return Err("history.rotation.backend.folder_id must not be empty".into());
+                }
+                if credentials_file.trim().is_empty() {
+                    return Err(
+                        "history.rotation.backend.credentials_file must not be empty".into(),
+                    );
+                }
+                Ok(())
+            }
+            Self::Unset => Err(
+                "history.rotation.backend must be one of s3 / local_path / gdrive when rotation.enabled = true"
+                    .into(),
+            ),
         }
     }
 }
@@ -338,7 +459,7 @@ impl HistoryConfig {
                 );
             }
         }
-        Ok(())
+        self.rotation.validate()
     }
 }
 

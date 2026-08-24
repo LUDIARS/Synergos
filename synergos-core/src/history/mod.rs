@@ -6,10 +6,12 @@
 
 pub mod gc;
 pub mod index;
+pub mod rotation;
 pub mod store;
 pub mod tags;
 pub mod wiring;
 
 pub use gc::GcReport;
+pub use rotation::{OffloadedVersion, RotationReport};
 pub use store::{ArchiveOutcome, HistoryStore, StoredVersion};
 pub use tags::{Tag, TagSummary};

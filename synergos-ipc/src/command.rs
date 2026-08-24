@@ -117,6 +117,28 @@ pub enum IpcCommand {
         keep_manifests: Vec<PathBuf>,
     },
 
+    // ── 外部ストレージローテーション (spec: archive-rotation) ──
+    /// `[history.rotation]` の保持ポリシーを外部ストレージへ適用する。
+    /// `dry_run` なら候補一覧のみで実際には何もしない。
+    HistoryRotate {
+        project_id: String,
+        #[serde(default)]
+        dry_run: bool,
+        #[serde(default)]
+        keep_manifests: Vec<PathBuf>,
+    },
+    /// 退避済み版の一覧 (path / version / backend / key / size)。
+    HistoryOffloaded {
+        project_id: String,
+        rel_path: Option<String>,
+    },
+    /// 退避済みの版を明示的に取り戻す。
+    HistoryFetch {
+        project_id: String,
+        rel_path: String,
+        version: u64,
+    },
+
     // ── publish / 受信時フック (docs/hooks.md) ──
     /// 有効なフック一覧 (定義元 daemon/project の別と opt-in 状態を表示)
     HooksList { project_id: String },
@@ -404,6 +426,40 @@ impl IpcCommand {
                 check_id("project_id", project_id)?;
                 for p in keep_manifests {
                     check_path("keep_manifests[*]", p)?;
+                }
+                Ok(())
+            }
+
+            Self::HistoryRotate {
+                project_id,
+                keep_manifests,
+                ..
+            } => {
+                check_id("project_id", project_id)?;
+                for p in keep_manifests {
+                    check_path("keep_manifests[*]", p)?;
+                }
+                Ok(())
+            }
+            Self::HistoryOffloaded {
+                project_id,
+                rel_path,
+            } => {
+                check_id("project_id", project_id)?;
+                if let Some(p) = rel_path {
+                    check_rel_path("rel_path", p)?;
+                }
+                Ok(())
+            }
+            Self::HistoryFetch {
+                project_id,
+                rel_path,
+                version,
+            } => {
+                check_id("project_id", project_id)?;
+                check_rel_path("rel_path", rel_path)?;
+                if *version == 0 || *version == u64::MAX {
+                    return Err("version must be a positive file version".into());
                 }
                 Ok(())
             }

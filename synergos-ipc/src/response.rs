@@ -52,6 +52,12 @@ pub enum IpcResponse {
     /// history gc の結果
     HistoryGcReport(HistoryGcReportDto),
 
+    /// history rotate の結果
+    HistoryRotationReport(HistoryRotationReportDto),
+
+    /// history offloaded の結果
+    HistoryOffloaded(Vec<HistoryOffloadedDto>),
+
     /// 有効なフック一覧
     HooksList(Vec<HookInfoDto>),
 
@@ -122,6 +128,27 @@ pub struct HistoryGcReportDto {
     pub removed_versions: Vec<(String, u64)>,
     pub removed_objects: usize,
     pub bytes_freed: u64,
+}
+
+/// history rotate の結果 (IPC 向け DTO)
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct HistoryRotationReportDto {
+    pub offloaded: Vec<(String, u64)>,
+    pub bytes_offloaded: u64,
+    /// dry-run 時、または通常実行で確定した候補一覧
+    pub candidates: Vec<(String, u64)>,
+    /// backend 不達などでスキップした件 (rel, version, reason)
+    pub skipped: Vec<(String, u64, String)>,
+}
+
+/// 退避済み版 1 件 (IPC 向け DTO)
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HistoryOffloadedDto {
+    pub rel_path: String,
+    pub version: u64,
+    pub size: u64,
+    pub backend: String,
+    pub key: String,
 }
 
 /// 版タグ 1 件のピン内容 (IPC 向け DTO)

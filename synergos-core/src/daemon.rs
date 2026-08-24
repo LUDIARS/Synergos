@@ -342,6 +342,11 @@ impl Daemon {
         // ── 定期メンテナンスタスク ──
         let cleanup_task = spawn_periodic_cleanup(self.ctx.clone(), self.net.clone());
 
+        // 外部ストレージローテーション (spec: archive-rotation)。
+        // `[history.rotation] enabled = true` かつ `interval_hours > 0` のときだけ起動する。
+        // `interval_hours = 0` は「daemon 内タイマーは使わず CLI (`history rotate`) 手動のみ」。
+        let rotation_task = spawn_rotation_timer(self.ctx.clone(), self.ctx.shutdown_tx.subscribe());
+
         // Gossipsub ハートビート
         let heartbeat_task = spawn_gossip_heartbeat(
             self.net.gossip.clone(),
@@ -489,6 +494,9 @@ impl Daemon {
         // タスクをクリーンアップ
         signal_task.abort();
         cleanup_task.abort();
+        if let Some(t) = rotation_task {
+            t.abort();
+        }
         heartbeat_task.abort();
         quic_accept_task.abort();
         gossip_sub_task.abort();
@@ -635,6 +643,68 @@ fn spawn_periodic_cleanup(
             }
         }
     })
+}
+
+/// 外部ストレージローテーションの daemon 内タイマー (spec: archive-rotation)。
+/// `history.rotation.enabled = false` または `interval_hours = 0` ならタスクを起動しない
+/// (前者は無効化、後者は「daemon 内タイマーは使わず CLI 手動のみ」の意図)。
+/// 対象は `history.covers()` を満たす open 中の全プロジェクト。1 プロジェクトの失敗は
+/// warn するだけで他プロジェクトの実行を止めない。
+fn spawn_rotation_timer(
+    ctx: Arc<ServiceContext>,
+    mut shutdown_rx: broadcast::Receiver<()>,
+) -> Option<tokio::task::JoinHandle<()>> {
+    let rotation = &ctx.history.config().rotation;
+    if !rotation.enabled || rotation.interval_hours == 0 {
+        return None;
+    }
+    let interval_secs = rotation.interval_hours.saturating_mul(3600).max(60);
+    Some(tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
+        // 起動直後の tick は即座に発火するので 1 回読み捨て、起動直後の過負荷を避ける。
+        interval.tick().await;
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {
+                    use crate::project::ProjectConfiguration;
+                    let projects: Vec<String> = ProjectConfiguration::list_projects(&*ctx.project_manager)
+                        .into_iter()
+                        .map(|info| info.project_id)
+                        .filter(|id| ctx.history.covers(id))
+                        .collect();
+                    for project_id in projects {
+                        let Some(root) = ctx.project_manager.project_root(&project_id) else {
+                            continue;
+                        };
+                        let keep: Vec<(String, u64)> = ctx
+                            .project_manager
+                            .manifest_entries(&project_id)
+                            .into_iter()
+                            .map(|(rel, entry)| (rel, entry.version))
+                            .collect();
+                        match ctx.history.rotate(&root, &project_id, &keep, false).await {
+                            Ok(report) => {
+                                if !report.offloaded.is_empty() || !report.skipped.is_empty() {
+                                    tracing::info!(
+                                        "history rotation for {project_id}: offloaded {} version(s) ({} bytes), {} skipped",
+                                        report.offloaded.len(),
+                                        report.bytes_offloaded,
+                                        report.skipped.len()
+                                    );
+                                }
+                            }
+                            Err(error) => {
+                                tracing::warn!("history rotation for {project_id} failed: {error}");
+                            }
+                        }
+                    }
+                }
+                _ = shutdown_rx.recv() => {
+                    break;
+                }
+            }
+        }
+    }))
 }
 
 /// QUIC 着信ストリームを受け付け、magic バイトで DHT / Transfer にディスパッチする。

@@ -33,6 +33,22 @@ pub struct IndexEntry {
     /// `"published"` (自ノードの publish) / `"received"` (受信)。
     #[serde(default)]
     pub source: String,
+    /// 外部ストレージへ退避済みなら Some。ローカルの objects/sidecar は
+    /// 既に削除されており、`backend`/`key` で取り戻す (spec: archive-rotation)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offloaded: Option<OffloadedRef>,
+}
+
+/// 退避先の参照。`key` は content-addressed のまま (`<project_id_hash>/<hash>`)。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OffloadedRef {
+    /// `"s3"` | `"local_path"` | `"gdrive"`
+    pub backend: String,
+    pub key: String,
+    /// 退避時の保存先設定。後から daemon 設定が変わっても既存版を取り戻せるよう、
+    /// 認証情報そのものではなく設定上の参照先を保持する。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config: Option<synergos_net::config::RotationBackendConfig>,
 }
 
 /// 保管庫の索引本体。`entries[rel][version]`。
@@ -177,6 +193,9 @@ pub struct ObjectRef {
     pub publisher: String,
     #[serde(default)]
     pub source: String,
+    /// object 実体が外部へ退避済みでも sidecar から索引を復旧できるよう保持する。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offloaded: Option<OffloadedRef>,
 }
 
 /// `objects/<hh>/<hash>` のパス。
@@ -297,18 +316,16 @@ pub async fn rebuild_from_sidecars(store_dir: &Path, project_id: &str) -> io::Re
             if !meta.project_id.is_empty() && meta.project_id != project_id {
                 continue;
             }
-            // object 実体が無い参照は索引に入れない
-            if tokio::fs::metadata(object_path(store_dir, hash))
-                .await
-                .is_err()
-            {
-                continue;
-            }
+            let object_exists = tokio::fs::metadata(object_path(store_dir, hash)).await.is_ok();
             for r in meta.refs {
                 if crate::manifest::safe_rel_to_local(&r.rel).is_none()
                     || r.version == 0
                     || r.version == u64::MAX
                 {
+                    continue;
+                }
+                // ローカル実体も退避先参照も無いエントリは復旧不能なので除外する。
+                if !object_exists && r.offloaded.is_none() {
                     continue;
                 }
                 index.insert(
@@ -321,6 +338,7 @@ pub async fn rebuild_from_sidecars(store_dir: &Path, project_id: &str) -> io::Re
                         stored_at: r.stored_at,
                         publisher: r.publisher,
                         source: r.source,
+                        offloaded: r.offloaded,
                     },
                 );
             }
@@ -341,6 +359,7 @@ mod tests {
             stored_at,
             publisher: "peer".into(),
             source: "published".into(),
+            offloaded: None,
         }
     }
 
@@ -396,6 +415,7 @@ mod tests {
                 stored_at: 10,
                 publisher: "peer".into(),
                 source: "received".into(),
+                offloaded: None,
             },
         )
         .await

@@ -1634,6 +1634,129 @@ pub async fn dispatch_command(command: IpcCommand, ctx: &ServiceContext) -> IpcR
             }
         }
 
+        IpcCommand::HistoryRotate {
+            project_id,
+            dry_run,
+            keep_manifests,
+        } => {
+            let Some(root) = ctx.project_manager.project_root(&project_id) else {
+                return IpcResponse::Error {
+                    code: 2,
+                    message: format!("project not open: {project_id}"),
+                };
+            };
+            if !ctx.history.covers(&project_id) {
+                return IpcResponse::Error {
+                    code: 4,
+                    message: "this node is not a history node for the project".into(),
+                };
+            }
+            let mut keep: Vec<(String, u64)> = ctx
+                .project_manager
+                .manifest_entries(&project_id)
+                .into_iter()
+                .map(|(rel, entry)| (rel, entry.version))
+                .collect();
+            for path in &keep_manifests {
+                match crate::manifest::ProjectManifest::load_from_file(path, &project_id).await {
+                    Ok(manifest) => keep.extend(
+                        manifest
+                            .files
+                            .into_iter()
+                            .map(|(rel, entry)| (rel, entry.version)),
+                    ),
+                    Err(error) => {
+                        return IpcResponse::Error {
+                            code: 3,
+                            message: format!("keep manifest {} unreadable: {error}", path.display()),
+                        }
+                    }
+                }
+            }
+            match ctx.history.rotate(&root, &project_id, &keep, dry_run).await {
+                Ok(report) => IpcResponse::HistoryRotationReport(
+                    synergos_ipc::response::HistoryRotationReportDto {
+                        offloaded: report.offloaded,
+                        bytes_offloaded: report.bytes_offloaded,
+                        candidates: report.candidates,
+                        skipped: report
+                            .skipped
+                            .into_iter()
+                            .map(|s| (s.rel, s.version, s.reason))
+                            .collect(),
+                    },
+                ),
+                Err(e) => IpcResponse::Error {
+                    code: 3,
+                    message: format!("history rotate failed: {e}"),
+                },
+            }
+        }
+        IpcCommand::HistoryOffloaded {
+            project_id,
+            rel_path,
+        } => {
+            let Some(root) = ctx.project_manager.project_root(&project_id) else {
+                return IpcResponse::Error {
+                    code: 2,
+                    message: format!("project not open: {project_id}"),
+                };
+            };
+            if !ctx.history.covers(&project_id) {
+                return IpcResponse::Error {
+                    code: 4,
+                    message: "this node is not a history node for the project".into(),
+                };
+            }
+            match ctx.history.offloaded(&root, &project_id, rel_path.as_deref()).await {
+                Ok(items) => IpcResponse::HistoryOffloaded(
+                    items
+                        .into_iter()
+                        .map(|v| synergos_ipc::response::HistoryOffloadedDto {
+                            rel_path: v.rel,
+                            version: v.version,
+                            size: v.size,
+                            backend: v.backend,
+                            key: v.key,
+                        })
+                        .collect(),
+                ),
+                Err(e) => IpcResponse::Error {
+                    code: 3,
+                    message: format!("history offloaded failed: {e}"),
+                },
+            }
+        }
+        IpcCommand::HistoryFetch {
+            project_id,
+            rel_path,
+            version,
+        } => {
+            let Some(root) = ctx.project_manager.project_root(&project_id) else {
+                return IpcResponse::Error {
+                    code: 2,
+                    message: format!("project not open: {project_id}"),
+                };
+            };
+            if !ctx.history.covers(&project_id) {
+                return IpcResponse::Error {
+                    code: 4,
+                    message: "this node is not a history node for the project".into(),
+                };
+            }
+            match ctx
+                .history
+                .fetch_offloaded(&root, &project_id, &rel_path, version)
+                .await
+            {
+                Ok(()) => IpcResponse::Ok,
+                Err(e) => IpcResponse::Error {
+                    code: 3,
+                    message: format!("history fetch failed: {e}"),
+                },
+            }
+        }
+
         IpcCommand::TagAdd {
             project_id,
             name,

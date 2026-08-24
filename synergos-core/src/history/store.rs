@@ -18,6 +18,7 @@ use super::index::{
     append_object_ref, is_valid_object_hash, meta_path, object_path, remove_object_ref,
     HistoryIndex, IndexEntry, ObjectRef, OBJECTS_DIR,
 };
+use super::rotation::{self, OffloadedVersion, RotationReport};
 use super::tags::{self, Tag, TagSummary};
 
 /// 保管庫に置いた版 1 件 (lookup / list の戻り値)。
@@ -207,6 +208,7 @@ impl HistoryStore {
                     stored_at: existing.stored_at,
                     publisher: existing.publisher.clone(),
                     source: existing.source.clone(),
+                    offloaded: existing.offloaded.clone(),
                 },
             )
             .await?;
@@ -225,6 +227,7 @@ impl HistoryStore {
                 stored_at: now,
                 publisher: publisher.to_string(),
                 source: source.to_string(),
+                offloaded: None,
             },
         )
         .await?;
@@ -238,6 +241,7 @@ impl HistoryStore {
                 stored_at: now,
                 publisher: publisher.to_string(),
                 source: source.to_string(),
+                offloaded: None,
             },
         );
         index.save(&store_dir).await?;
@@ -245,6 +249,10 @@ impl HistoryStore {
     }
 
     /// (rel, version) の実体を探す。索引にあっても object が無ければ None。
+    /// 索引が `offloaded` を指しており `rotation.enabled` なら、ここで
+    /// backend から自動的に取り戻す (checkout / restore / 旧版 FileWant 応答の
+    /// 共通経路。spec: archive-rotation §取り戻し)。backend 不達時は warn して
+    /// None を返す (lookup は「無かった」を表す型なので panic/エラー伝播しない)。
     pub async fn lookup(
         &self,
         project_root: &Path,
@@ -260,6 +268,24 @@ impl HistoryStore {
         let Some(entry) = index.get(rel, version) else {
             return Ok(None);
         };
+        if entry.offloaded.is_some() {
+            if !self.config.rotation.enabled {
+                tracing::warn!(
+                    "history {rel} v{version} is offloaded but rotation is disabled; cannot serve"
+                );
+                return Ok(None);
+            }
+            if let Err(error) = self.fetch_offloaded(project_root, project_id, rel, version).await {
+                tracing::warn!("history {rel} v{version} fetch from rotation backend failed: {error}");
+                return Ok(None);
+            }
+            let refreshed = HistoryIndex::load_or_rebuild(&store_dir, project_id).await?;
+            let Some(entry) = refreshed.get(rel, version) else {
+                return Ok(None);
+            };
+            let path = object_path(&store_dir, &entry.hash);
+            return Ok(Some(to_stored(rel, version, entry, path)));
+        }
         let path = object_path(&store_dir, &entry.hash);
         if !validate_object(&path, &entry.hash, entry.size, entry.crc)
             .await
@@ -392,7 +418,8 @@ impl HistoryStore {
 
     /// 保持ポリシー (設定) を適用する。`keep` は削ってはいけない (rel, version)
     /// (手元 manifest の最新版など)。タグが指す版はここで自動的に追加保護される。
-    /// `purge = true` なら保管庫を全消去する (タグの有無に関わらず全て消える)。
+    /// `purge = true` なら保管庫を全消去する。退避済み版が残る場合は、外部 object の
+    /// orphan 化を避けるため先に fetch するよう明示エラーを返す。
     pub async fn gc(
         &self,
         project_root: &Path,
@@ -406,6 +433,18 @@ impl HistoryStore {
         let mut index = HistoryIndex::load_or_rebuild(&store_dir, project_id).await?;
         let mut report = GcReport::default();
         if purge {
+            let offloaded_count = index
+                .iter_all()
+                .filter(|(_, _, entry)| entry.offloaded.is_some())
+                .count();
+            if offloaded_count > 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "history purge refused: {offloaded_count} offloaded version(s) must be fetched first"
+                    ),
+                ));
+            }
             for (rel, version, _) in index.iter_all() {
                 report.removed_versions.push((rel.to_string(), version));
             }
@@ -469,6 +508,113 @@ impl HistoryStore {
             .bytes_freed
             .saturating_add(sweep_stale_temporaries(&store_dir).await?);
         Ok(report)
+    }
+
+    /// 保持ポリシーで残った旧版のうち、設定の `rotation.offload_after_days` より
+    /// 古いものを外部ストレージへ退避する (spec: archive-rotation)。
+    /// `keep` は gc と同じ「削ってはいけない (rel, version)」で、タグと合流して
+    /// 保護集合になる ([`Self::protected_versions`] を再利用し、gc.rs の保護
+    /// ロジックを二重実装しない)。`dry_run = true` なら候補一覧のみ返す。
+    pub async fn rotate(
+        &self,
+        project_root: &Path,
+        project_id: &str,
+        keep: &[(String, u64)],
+        dry_run: bool,
+    ) -> io::Result<RotationReport> {
+        let rotation_cfg = &self.config.rotation;
+        if !rotation_cfg.enabled {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "history.rotation.enabled is false",
+            ));
+        }
+        let store_dir = self.store_dir(project_root, project_id)?;
+        let lock = self.lock(project_id);
+        let _guard = lock.lock().await;
+        let mut index = HistoryIndex::load_or_rebuild(&store_dir, project_id).await?;
+        let now = synergos_net::types::now_ms();
+        let protected = self.protected_versions(project_root, project_id, keep).await?;
+
+        if dry_run {
+            let candidates =
+                rotation::select_candidates(&index, rotation_cfg.offload_after_days, now, &protected);
+            return Ok(RotationReport {
+                candidates,
+                ..RotationReport::default()
+            });
+        }
+
+        let backend = rotation::build_backend(&rotation_cfg.backend)?;
+        rotation::rotate(
+            &store_dir,
+            project_id,
+            backend.as_ref(),
+            &rotation_cfg.backend,
+            &mut index,
+            rotation_cfg.offload_after_days,
+            now,
+            &protected,
+            false,
+        )
+        .await
+    }
+
+    /// 退避済み版の一覧 (`synergos history offloaded`)。
+    pub async fn offloaded(
+        &self,
+        project_root: &Path,
+        project_id: &str,
+        rel: Option<&str>,
+    ) -> io::Result<Vec<OffloadedVersion>> {
+        let store_dir = self.store_dir(project_root, project_id)?;
+        let index = HistoryIndex::load_or_rebuild(&store_dir, project_id).await?;
+        Ok(rotation::list_offloaded(&index, rel))
+    }
+
+    /// 退避済みの版を明示的に取り戻す (`synergos history fetch`)。
+    /// backend 不達時は明確なエラーを返し、index / objects を変更しない。
+    pub async fn fetch_offloaded(
+        &self,
+        project_root: &Path,
+        project_id: &str,
+        rel: &str,
+        version: u64,
+    ) -> io::Result<()> {
+        let rotation_cfg = &self.config.rotation;
+        if !rotation_cfg.enabled {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "history.rotation.enabled is false",
+            ));
+        }
+        let store_dir = self.store_dir(project_root, project_id)?;
+        let lock = self.lock(project_id);
+        let _guard = lock.lock().await;
+        let index = HistoryIndex::load_or_rebuild(&store_dir, project_id).await?;
+        let mut backend_config = index
+            .get(rel, version)
+            .and_then(|entry| entry.offloaded.as_ref())
+            .and_then(|offloaded| offloaded.config.as_ref())
+            .cloned()
+            .unwrap_or_else(|| rotation_cfg.backend.clone());
+        // 保存先 folder は退避時の値を使いつつ、資格情報ファイルは現在の設定へ
+        // ローテーションできるようにする。
+        if let (
+            synergos_net::config::RotationBackendConfig::Gdrive {
+                credentials_file, ..
+            },
+            synergos_net::config::RotationBackendConfig::Gdrive {
+                credentials_file: current_credentials,
+                ..
+            },
+        ) = (&mut backend_config, &rotation_cfg.backend)
+        {
+            *credentials_file = current_credentials.clone();
+        }
+        let backend = rotation::build_backend(&backend_config)?;
+        let mut index = index;
+        rotation::fetch(&store_dir, project_id, backend.as_ref(), &mut index, rel, version).await
     }
 }
 
@@ -1063,5 +1209,417 @@ mod tests {
         // 保管中の版は無傷
         assert!(s.lookup(&root, "p", "a.bin", 1).await.unwrap().is_some());
         let _ = tokio::fs::remove_dir_all(&root).await;
+    }
+
+    // ── rotation (spec: archive-rotation) ──
+
+    fn rotation_store(
+        history_root: &str,
+        offload_after_days: u64,
+        backend_root: &std::path::Path,
+    ) -> HistoryStore {
+        HistoryStore::new(HistoryConfig {
+            enabled: true,
+            projects: vec!["*".into()],
+            root: history_root.into(),
+            rotation: synergos_net::config::HistoryRotationConfig {
+                enabled: true,
+                offload_after_days,
+                interval_hours: 0,
+                backend: synergos_net::config::RotationBackendConfig::LocalPath {
+                    path: backend_root.to_string_lossy().to_string(),
+                },
+            },
+            ..HistoryConfig::default()
+        })
+    }
+
+    /// LocalDir backend で退避→index 更新→取り戻し→blake3 一致 の統合テスト。
+    #[tokio::test]
+    async fn rotate_offloads_old_version_and_fetch_restores_it() {
+        let root = temp_project().await;
+        let backend_root = temp_project().await;
+        let s = rotation_store(".synergos/history", 30, &backend_root);
+        let f = root.join("a.bin");
+        let body = b"old-version-body";
+        tokio::fs::write(&f, body).await.unwrap();
+        s.archive(
+            &root,
+            "p",
+            "a.bin",
+            1,
+            body.len() as u64,
+            crc32fast::hash(body),
+            "peer",
+            "published",
+            &f,
+        )
+        .await
+        .unwrap();
+
+        // stored_at を閾値より古く書き換える (offload_after_days=30 → 60 日前にする)。
+        age_stored_at(&s, &root, "p", "a.bin", 1, 60).await;
+
+        let report = s.rotate(&root, "p", &[], false).await.unwrap();
+        assert_eq!(report.offloaded, vec![("a.bin".to_string(), 1)]);
+        assert!(report.skipped.is_empty());
+
+        // ローカル objects 実体は削除されている。
+        let store_dir = s.store_dir(&root, "p").unwrap();
+        let index = HistoryIndex::load_or_rebuild(&store_dir, "p").await.unwrap();
+        let entry = index.get("a.bin", 1).unwrap();
+        assert!(entry.offloaded.is_some());
+        assert!(!object_path(&store_dir, &entry.hash).exists());
+
+        let offloaded = s.offloaded(&root, "p", None).await.unwrap();
+        assert_eq!(offloaded.len(), 1);
+        assert_eq!(offloaded[0].backend, "local_path");
+        let purge_error = s.gc(&root, "p", &[], true).await.unwrap_err();
+        assert!(purge_error.to_string().contains("must be fetched first"));
+
+        // 取り戻し: fetch_offloaded → objects へ書き戻り、offloaded マークが外れる。
+        s.fetch_offloaded(&root, "p", "a.bin", 1).await.unwrap();
+        let stored = s.lookup(&root, "p", "a.bin", 1).await.unwrap().unwrap();
+        assert_eq!(tokio::fs::read(&stored.path).await.unwrap(), body);
+        let index_after = HistoryIndex::load_or_rebuild(&store_dir, "p").await.unwrap();
+        assert!(index_after.get("a.bin", 1).unwrap().offloaded.is_none());
+        assert!(!backend_root.join(&offloaded[0].key).exists());
+
+        let _ = tokio::fs::remove_dir_all(&root).await;
+        let _ = tokio::fs::remove_dir_all(&backend_root).await;
+    }
+
+    /// `lookup` は offloaded な版に自動的に当たったら取り戻して返す
+    /// (checkout / restore / FileWant 応答の共通経路)。
+    #[tokio::test]
+    async fn lookup_transparently_fetches_offloaded_version() {
+        let root = temp_project().await;
+        let backend_root = temp_project().await;
+        let s = rotation_store(".synergos/history", 1, &backend_root);
+        let f = root.join("a.bin");
+        let body = b"transparent-fetch";
+        tokio::fs::write(&f, body).await.unwrap();
+        s.archive(
+            &root,
+            "p",
+            "a.bin",
+            1,
+            body.len() as u64,
+            crc32fast::hash(body),
+            "peer",
+            "published",
+            &f,
+        )
+        .await
+        .unwrap();
+        age_stored_at(&s, &root, "p", "a.bin", 1, 10).await;
+        s.rotate(&root, "p", &[], false).await.unwrap();
+
+        let stored = s.lookup(&root, "p", "a.bin", 1).await.unwrap().unwrap();
+        assert_eq!(tokio::fs::read(&stored.path).await.unwrap(), body);
+
+        let _ = tokio::fs::remove_dir_all(&root).await;
+        let _ = tokio::fs::remove_dir_all(&backend_root).await;
+    }
+
+    /// 保護除外: 最新版 (keep) とタグが指す版は候補から外れ、ローテーションされない。
+    #[tokio::test]
+    async fn rotate_protects_keep_and_tagged_versions() {
+        let root = temp_project().await;
+        let backend_root = temp_project().await;
+        let s = rotation_store(".synergos/history", 1, &backend_root);
+        let f = root.join("a.bin");
+        for (v, body) in [(1u64, "one"), (2, "two")] {
+            tokio::fs::write(&f, body).await.unwrap();
+            s.archive(
+                &root,
+                "p",
+                "a.bin",
+                v,
+                body.len() as u64,
+                crc32fast::hash(body.as_bytes()),
+                "peer",
+                "published",
+                &f,
+            )
+            .await
+            .unwrap();
+            age_stored_at(&s, &root, "p", "a.bin", v, 10).await;
+        }
+        let mut pins = std::collections::BTreeMap::new();
+        pins.insert("a.bin".to_string(), 1);
+        s.tag_add(&root, "p", "release", pins).await.unwrap();
+
+        // v1 はタグ保護、v2 は keep (手元 manifest 相当) で保護 → 候補ゼロ。
+        let report = s
+            .rotate(&root, "p", &[("a.bin".to_string(), 2)], false)
+            .await
+            .unwrap();
+        assert!(report.offloaded.is_empty());
+
+        let store_dir = s.store_dir(&root, "p").unwrap();
+        let index = HistoryIndex::load_or_rebuild(&store_dir, "p").await.unwrap();
+        assert!(index.get("a.bin", 1).unwrap().offloaded.is_none());
+        assert!(index.get("a.bin", 2).unwrap().offloaded.is_none());
+
+        let _ = tokio::fs::remove_dir_all(&root).await;
+        let _ = tokio::fs::remove_dir_all(&backend_root).await;
+    }
+
+    /// backend 不達時 (マウントされていない local_path) は put が失敗し、
+    /// index / objects を一切変更せずスキップ一覧に積む。
+    #[tokio::test]
+    async fn rotate_leaves_index_and_objects_untouched_when_backend_unreachable() {
+        let root = temp_project().await;
+        let missing_backend_root =
+            std::env::temp_dir().join(format!("synergos-rot-missing-{}", uuid::Uuid::new_v4()));
+        let s = rotation_store(".synergos/history", 1, &missing_backend_root);
+        let f = root.join("a.bin");
+        let body = b"unreachable-backend";
+        tokio::fs::write(&f, body).await.unwrap();
+        s.archive(
+            &root,
+            "p",
+            "a.bin",
+            1,
+            body.len() as u64,
+            crc32fast::hash(body),
+            "peer",
+            "published",
+            &f,
+        )
+        .await
+        .unwrap();
+        age_stored_at(&s, &root, "p", "a.bin", 1, 10).await;
+
+        let report = s.rotate(&root, "p", &[], false).await.unwrap();
+        assert!(report.offloaded.is_empty());
+        assert_eq!(report.skipped.len(), 1);
+        assert_eq!(report.skipped[0].rel, "a.bin");
+
+        let store_dir = s.store_dir(&root, "p").unwrap();
+        let index = HistoryIndex::load_or_rebuild(&store_dir, "p").await.unwrap();
+        let entry = index.get("a.bin", 1).unwrap();
+        assert!(entry.offloaded.is_none());
+        assert!(object_path(&store_dir, &entry.hash).exists());
+        // ローカルの実体はまだ取れる。
+        assert!(s.lookup(&root, "p", "a.bin", 1).await.unwrap().is_some());
+
+        let _ = tokio::fs::remove_dir_all(&root).await;
+    }
+
+    /// dry-run は候補一覧だけ返し、何も変更しない。
+    #[tokio::test]
+    async fn rotate_dry_run_lists_candidates_without_changes() {
+        let root = temp_project().await;
+        let backend_root = temp_project().await;
+        let s = rotation_store(".synergos/history", 1, &backend_root);
+        let f = root.join("a.bin");
+        let body = b"dry-run-body";
+        tokio::fs::write(&f, body).await.unwrap();
+        s.archive(
+            &root,
+            "p",
+            "a.bin",
+            1,
+            body.len() as u64,
+            crc32fast::hash(body),
+            "peer",
+            "published",
+            &f,
+        )
+        .await
+        .unwrap();
+        age_stored_at(&s, &root, "p", "a.bin", 1, 10).await;
+
+        let report = s.rotate(&root, "p", &[], true).await.unwrap();
+        assert_eq!(report.candidates, vec![("a.bin".to_string(), 1)]);
+        assert!(report.offloaded.is_empty());
+
+        let store_dir = s.store_dir(&root, "p").unwrap();
+        let index = HistoryIndex::load_or_rebuild(&store_dir, "p").await.unwrap();
+        assert!(index.get("a.bin", 1).unwrap().offloaded.is_none());
+
+        let _ = tokio::fs::remove_dir_all(&root).await;
+        let _ = tokio::fs::remove_dir_all(&backend_root).await;
+    }
+
+    /// 同じ hash を共有する保護版が残る場合、候補版だけを退避してもローカル実体を
+    /// 削除してはならない。
+    #[tokio::test]
+    async fn rotate_keeps_shared_object_for_protected_local_version() {
+        let root = temp_project().await;
+        let backend_root = temp_project().await;
+        let s = rotation_store(".synergos/history", 1, &backend_root);
+        let f = root.join("same.bin");
+        let body = b"same-content";
+        tokio::fs::write(&f, body).await.unwrap();
+        for version in [1, 2] {
+            s.archive(
+                &root,
+                "p",
+                "same.bin",
+                version,
+                body.len() as u64,
+                crc32fast::hash(body),
+                "peer",
+                "published",
+                &f,
+            )
+            .await
+            .unwrap();
+            age_stored_at(&s, &root, "p", "same.bin", version, 10).await;
+        }
+
+        let report = s
+            .rotate(&root, "p", &[("same.bin".to_string(), 2)], false)
+            .await
+            .unwrap();
+        assert_eq!(report.offloaded, vec![("same.bin".to_string(), 1)]);
+        let protected = s.lookup(&root, "p", "same.bin", 2).await.unwrap().unwrap();
+        assert_eq!(tokio::fs::read(protected.path).await.unwrap(), body);
+
+        let _ = tokio::fs::remove_dir_all(&root).await;
+        let _ = tokio::fs::remove_dir_all(&backend_root).await;
+    }
+
+    /// dedup された外部 object は最後の退避参照を取り戻すまで削除しない。
+    #[tokio::test]
+    async fn fetch_deletes_shared_archive_only_after_last_reference() {
+        let root = temp_project().await;
+        let backend_root = temp_project().await;
+        let s = rotation_store(".synergos/history", 1, &backend_root);
+        let f = root.join("same.bin");
+        let body = b"shared-archive";
+        tokio::fs::write(&f, body).await.unwrap();
+        for version in [1, 2] {
+            s.archive(
+                &root,
+                "p",
+                "same.bin",
+                version,
+                body.len() as u64,
+                crc32fast::hash(body),
+                "peer",
+                "published",
+                &f,
+            )
+            .await
+            .unwrap();
+            age_stored_at(&s, &root, "p", "same.bin", version, 10).await;
+        }
+        s.rotate(&root, "p", &[], false).await.unwrap();
+        let offloaded = s.offloaded(&root, "p", None).await.unwrap();
+        assert_eq!(offloaded.len(), 2);
+        let archived_path = backend_root.join(&offloaded[0].key);
+
+        s.fetch_offloaded(&root, "p", "same.bin", 1).await.unwrap();
+        assert!(archived_path.exists());
+        s.fetch_offloaded(&root, "p", "same.bin", 2).await.unwrap();
+        assert!(!archived_path.exists());
+
+        let _ = tokio::fs::remove_dir_all(&root).await;
+        let _ = tokio::fs::remove_dir_all(&backend_root).await;
+    }
+
+    /// 退避先設定を変更しても、索引に記録した元の保存先から取り戻せる。
+    #[tokio::test]
+    async fn fetch_uses_backend_configuration_recorded_at_rotation_time() {
+        let root = temp_project().await;
+        let backend_a = temp_project().await;
+        let backend_b = temp_project().await;
+        let s = rotation_store(".synergos/history", 1, &backend_a);
+        let f = root.join("a.bin");
+        let body = b"original-backend";
+        tokio::fs::write(&f, body).await.unwrap();
+        s.archive(
+            &root,
+            "p",
+            "a.bin",
+            1,
+            body.len() as u64,
+            crc32fast::hash(body),
+            "peer",
+            "published",
+            &f,
+        )
+        .await
+        .unwrap();
+        age_stored_at(&s, &root, "p", "a.bin", 1, 10).await;
+        s.rotate(&root, "p", &[], false).await.unwrap();
+
+        let reconfigured = rotation_store(".synergos/history", 1, &backend_b);
+        reconfigured
+            .fetch_offloaded(&root, "p", "a.bin", 1)
+            .await
+            .unwrap();
+        let restored = reconfigured.lookup(&root, "p", "a.bin", 1).await.unwrap().unwrap();
+        assert_eq!(tokio::fs::read(restored.path).await.unwrap(), body);
+
+        let _ = tokio::fs::remove_dir_all(&root).await;
+        let _ = tokio::fs::remove_dir_all(&backend_a).await;
+        let _ = tokio::fs::remove_dir_all(&backend_b).await;
+    }
+
+    /// offloaded 参照を sidecar に残し、index.json 破損時にも一覧を再構築できる。
+    #[tokio::test]
+    async fn corrupt_index_rebuild_preserves_offloaded_versions() {
+        let root = temp_project().await;
+        let backend_root = temp_project().await;
+        let s = rotation_store(".synergos/history", 1, &backend_root);
+        let f = root.join("a.bin");
+        let body = b"recoverable-offload";
+        tokio::fs::write(&f, body).await.unwrap();
+        s.archive(
+            &root,
+            "p",
+            "a.bin",
+            1,
+            body.len() as u64,
+            crc32fast::hash(body),
+            "peer",
+            "published",
+            &f,
+        )
+        .await
+        .unwrap();
+        age_stored_at(&s, &root, "p", "a.bin", 1, 10).await;
+        s.rotate(&root, "p", &[], false).await.unwrap();
+
+        let store_dir = s.store_dir(&root, "p").unwrap();
+        tokio::fs::write(
+            store_dir.join(crate::history::index::INDEX_FILE),
+            b"not-json",
+        )
+            .await
+            .unwrap();
+        let rebuilt = s.offloaded(&root, "p", None).await.unwrap();
+        assert_eq!(rebuilt.len(), 1);
+        assert_eq!(rebuilt[0].rel, "a.bin");
+
+        let _ = tokio::fs::remove_dir_all(&root).await;
+        let _ = tokio::fs::remove_dir_all(&backend_root).await;
+    }
+
+    /// テスト補助: index エントリの `stored_at` を `days_ago` 日前に書き換える
+    /// (ローテーション候補にするための時間経過シミュレーション)。
+    async fn age_stored_at(
+        s: &HistoryStore,
+        root: &std::path::Path,
+        project_id: &str,
+        rel: &str,
+        version: u64,
+        days_ago: u64,
+    ) {
+        let store_dir = s.store_dir(root, project_id).unwrap();
+        let mut index = HistoryIndex::load_or_rebuild(&store_dir, project_id)
+            .await
+            .unwrap();
+        let mut entry = index.get(rel, version).unwrap().clone();
+        entry.stored_at = entry
+            .stored_at
+            .saturating_sub(days_ago * 24 * 60 * 60 * 1000 + 1);
+        index.insert(rel, version, entry);
+        index.save(&store_dir).await.unwrap();
     }
 }

@@ -26,6 +26,34 @@ pub enum HistoryCommand {
         #[arg(long = "keep-manifest")]
         keep_manifests: Vec<PathBuf>,
     },
+    /// `[history.rotation]` の設定で外部ストレージへ旧版を退避する
+    Rotate {
+        /// プロジェクトID
+        id: String,
+        /// 実際には退避せず候補一覧だけ表示する
+        #[arg(long)]
+        dry_run: bool,
+        /// この manifest が参照する版は退避しない (複数可)
+        #[arg(long = "keep-manifest")]
+        keep_manifests: Vec<PathBuf>,
+    },
+    /// 退避済み一覧 (path / version / backend / key / size)
+    Offloaded {
+        /// プロジェクトID
+        id: String,
+        /// 特定ファイル (プロジェクトルート相対、`/` 区切り) だけ表示
+        path: Option<String>,
+    },
+    /// 退避済みの版を明示的に取り戻す
+    Fetch {
+        /// プロジェクトID
+        id: String,
+        /// 対象ファイル (プロジェクトルート相対、`/` 区切り)
+        path: String,
+        /// 取り戻す版番号
+        #[arg(long)]
+        version: u64,
+    },
 }
 
 /// `synergos tag ...` — 版タグ (GC・ローテーション保護)。docs/versioning-design.md §3.5。
@@ -183,6 +211,78 @@ pub async fn handle_history(cmd: HistoryCommand) -> anyhow::Result<()> {
                 }
                 IpcResponse::Error { message, .. } => anyhow::bail!(message),
                 _ => anyhow::bail!("unexpected history gc response"),
+            }
+        }
+        HistoryCommand::Rotate {
+            id,
+            dry_run,
+            keep_manifests,
+        } => {
+            let resp = client
+                .send(IpcCommand::HistoryRotate {
+                    project_id: id,
+                    dry_run,
+                    keep_manifests,
+                })
+                .await?;
+            match resp {
+                IpcResponse::HistoryRotationReport(r) => {
+                    if dry_run {
+                        println!("History rotate (dry-run): {} candidate(s)", r.candidates.len());
+                        for (rel, version) in &r.candidates {
+                            println!("  {rel} v{version}");
+                        }
+                    } else {
+                        println!(
+                            "History rotate: offloaded {} version(s), {} bytes, {} skipped",
+                            r.offloaded.len(),
+                            r.bytes_offloaded,
+                            r.skipped.len()
+                        );
+                        for (rel, version, reason) in &r.skipped {
+                            println!("  skipped {rel} v{version}: {reason}");
+                        }
+                    }
+                }
+                IpcResponse::Error { message, .. } => anyhow::bail!(message),
+                _ => anyhow::bail!("unexpected history rotate response"),
+            }
+        }
+        HistoryCommand::Offloaded { id, path } => {
+            let resp = client
+                .send(IpcCommand::HistoryOffloaded {
+                    project_id: id,
+                    rel_path: path,
+                })
+                .await?;
+            match resp {
+                IpcResponse::HistoryOffloaded(items) => {
+                    if items.is_empty() {
+                        println!("No offloaded versions.");
+                    }
+                    for v in items {
+                        println!(
+                            "  {} v{} {} bytes backend={} key={}",
+                            v.rel_path, v.version, v.size, v.backend, v.key
+                        );
+                    }
+                }
+                IpcResponse::Error { message, .. } => anyhow::bail!(message),
+                _ => anyhow::bail!("unexpected history offloaded response"),
+            }
+        }
+        HistoryCommand::Fetch { id, path, version } => {
+            let resp = client
+                .send(IpcCommand::HistoryFetch {
+                    project_id: id,
+                    rel_path: path.clone(),
+                    version,
+                })
+                .await?;
+            match resp {
+                IpcResponse::Ok => println!("Fetched {path} v{version} from rotation backend."),
+                IpcResponse::Error { message, .. } => anyhow::bail!(message),
+                _ => anyhow::bail!("unexpected history fetch response"),
             }
         }
     }
