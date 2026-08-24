@@ -6,6 +6,7 @@ synergos-control-store.json
 synergos-control-store.*.tmp
 /control.toml
 /.revisor-version
+/.concordia-commit.json
 
 # Synergos project-local runtime data. manifest.json remains intentionally trackable.
 .synergos/incoming/

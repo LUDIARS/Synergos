@@ -53,6 +53,12 @@ pub mod futures_boxed {
 /// 一時ディレクトリ (`<root>/.synergos/incoming`) を返す。None なら OS temp。
 pub type IncomingDirResolver = Arc<dyn Fn(&str) -> Option<PathBuf> + Send + Sync + 'static>;
 
+/// `post-receive` フック起動。`(project_id, file_id, version, sender)`。
+/// 受信ファイルの作業ツリー反映後 (received_hook / archive_to_history の後) に
+/// daemon が注入する。転送・イベントループをブロックしないよう、呼び出し側
+/// (`crate::hooks::HookRunner::spawn_post_hooks`) が spawn するだけで待たない。
+pub type PostReceiveHook = Arc<dyn Fn(String, FileId, u64, PeerId) + Send + Sync + 'static>;
+
 /// QUIC 送信を進行しつつ 128KiB ごとに読み込んだ累積バイトを
 /// `tokio::sync::mpsc` で投げ出す `AsyncRead` ラッパ。
 ///
@@ -346,6 +352,8 @@ pub struct Exchange {
     incoming_dir_resolver: Option<IncomingDirResolver>,
     /// 受信完了フック (マニフェスト記録用)
     received_hook: Option<ReceivedHook>,
+    /// 受信完了後の `post-receive` フック起動 (docs/hooks.md)
+    post_receive_hook: Option<PostReceiveHook>,
     /// ローカルが share_file / publish_updates で登録したファイル
     /// (FileWant 受信時に send_and_share を起動する材料にする)
     shared_files: DashMap<(String, FileId), SharedFileRecord>,
@@ -382,6 +390,7 @@ impl Exchange {
             out_path_resolver: None,
             incoming_dir_resolver: None,
             received_hook: None,
+            post_receive_hook: None,
             shared_files: DashMap::new(),
             local_peer_id,
             content_store: None,
@@ -474,6 +483,11 @@ impl Exchange {
     ) {
         self.incoming_dir_resolver = Some(incoming_dir);
         self.received_hook = Some(received);
+    }
+
+    /// `post-receive` フック起動を注入する (daemon 用、`hooks` 有効時)。
+    pub fn attach_post_receive_hook(&mut self, hook: PostReceiveHook) {
+        self.post_receive_hook = Some(hook);
     }
 
     /// 起動時復元: マニフェスト由来の共有レコードを登録する (publisher 再起動後も
@@ -839,6 +853,14 @@ impl Exchange {
                 header.project_id,
                 file_id,
                 version
+            );
+        }
+        if let Some(hook) = &self.post_receive_hook {
+            hook(
+                header.project_id.clone(),
+                file_id.clone(),
+                version,
+                sender.clone(),
             );
         }
 

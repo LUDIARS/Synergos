@@ -11,18 +11,30 @@ use synergos_core::presence::PresenceService;
 use synergos_core::project::ProjectManager;
 use synergos_ipc::command::IpcCommand;
 use synergos_ipc::response::IpcResponse;
-use synergos_net::config::{HistoryConfig, QuicConfig};
+use synergos_net::config::{HistoryConfig, HooksConfig, QuicConfig};
 use synergos_net::identity::Identity;
 use synergos_net::quic::QuicManager;
 use tokio::sync::broadcast;
 
 fn make_ctx() -> Arc<ServiceContext> {
-    make_ctx_with_history(HistoryConfig::default())
+    make_ctx_with_history_and_hooks(HistoryConfig::default(), HooksConfig::default())
 }
 
-/// daemon.rs と同じ順序で履歴ノードを組み立てる (保管庫 → フック注入 → Arc)。
-/// `history.enabled = false` なら従来どおりフックを注入しない。
 fn make_ctx_with_history(history_config: HistoryConfig) -> Arc<ServiceContext> {
+    make_ctx_with_history_and_hooks(history_config, HooksConfig::default())
+}
+
+fn make_ctx_with_hooks(hooks_config: HooksConfig) -> Arc<ServiceContext> {
+    make_ctx_with_history_and_hooks(HistoryConfig::default(), hooks_config)
+}
+
+/// daemon.rs と同じ順序で履歴ノード / フックランナーを組み立てる
+/// (保管庫 → フック注入 → Arc)。`history.enabled = false` なら従来どおり
+/// 履歴フックを注入しない。hooks は常に HookRunner を組み立てる (post-receive を注入)。
+fn make_ctx_with_history_and_hooks(
+    history_config: HistoryConfig,
+    hooks_config: HooksConfig,
+) -> Arc<ServiceContext> {
     let event_bus: SharedEventBus = Arc::new(CoreEventBus::new());
     let (shutdown_tx, _) = broadcast::channel(1);
     let quic = Arc::new(QuicManager::new(
@@ -37,6 +49,7 @@ fn make_ctx_with_history(history_config: HistoryConfig) -> Arc<ServiceContext> {
     ));
     let project_manager = Arc::new(ProjectManager::new(event_bus.clone()));
     let history = Arc::new(synergos_core::history::HistoryStore::new(history_config));
+    let hook_runner = Arc::new(synergos_core::hooks::HookRunner::new(hooks_config));
     let mut exchange = Exchange::new(event_bus.clone());
     if history.enabled() {
         exchange.attach_history_hooks(synergos_core::history::wiring::build_hooks(
@@ -44,6 +57,10 @@ fn make_ctx_with_history(history_config: HistoryConfig) -> Arc<ServiceContext> {
             project_manager.clone(),
         ));
     }
+    exchange.attach_post_receive_hook(synergos_core::hooks::wiring::build_post_receive_hook(
+        hook_runner.clone(),
+        project_manager.clone(),
+    ));
     Arc::new(ServiceContext {
         event_bus: event_bus.clone(),
         project_manager,
@@ -58,6 +75,7 @@ fn make_ctx_with_history(history_config: HistoryConfig) -> Arc<ServiceContext> {
         quic,
         identity: None,
         history,
+        hooks: hook_runner,
     })
 }
 
@@ -470,4 +488,320 @@ async fn network_status_returns_hardcoded_shape() {
         IpcResponse::NetworkStatus(_) => (),
         other => panic!("expected NetworkStatus, got {other:?}"),
     }
+}
+
+// ── publish / 受信時フック (docs/hooks.md) ──
+
+fn shell_false() -> String {
+    if cfg!(windows) {
+        "exit 1".into()
+    } else {
+        "false".into()
+    }
+}
+
+/// `pre-publish` フックが非 0 exit を返すと publish 全体が中止され、
+/// manifest のバージョンは変わらない (最初の publish 分のまま)。
+#[tokio::test]
+async fn pre_publish_nonzero_exit_aborts_publish_and_manifest_is_unchanged() {
+    let ctx = make_ctx_with_hooks(HooksConfig {
+        allow_project_hooks: false,
+        hooks: vec![synergos_net::config::HookDef {
+            event: "pre-publish".into(),
+            command: shell_false(),
+            r#match: vec![],
+            timeout_sec: 5,
+        }],
+    });
+    let root = std::env::temp_dir().join(format!("synergos-ipc-hook-pp-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(root.join("assets")).unwrap();
+    let open_resp = dispatch_command(
+        IpcCommand::ProjectOpen {
+            project_id: "hist".into(),
+            root_path: root.clone(),
+            display_name: None,
+        },
+        &ctx,
+    )
+    .await;
+    assert!(matches!(open_resp, IpcResponse::Ok));
+
+    tokio::fs::write(root.join("assets").join("a.bin"), b"one")
+        .await
+        .unwrap();
+    let resp = dispatch_command(
+        IpcCommand::PublishUpdate {
+            project_id: "hist".into(),
+            file_paths: vec![std::path::PathBuf::from("assets/a.bin")],
+        },
+        &ctx,
+    )
+    .await;
+    match resp {
+        IpcResponse::Error { message, .. } => {
+            assert!(message.contains("pre-publish"), "unexpected message: {message}");
+        }
+        other => panic!("expected Error from aborted publish, got {other:?}"),
+    }
+    // manifest には publish されたエントリが存在しない (まだ 1 度も成功していない)。
+    let entries = ctx.project_manager.manifest_entries("hist");
+    assert!(
+        entries.is_empty(),
+        "manifest must be unchanged after pre-publish abort, got {entries:?}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// 複数ファイル publish の後半で pre-publish が失敗しても、前半の manifest を
+/// 部分更新しない。全 pre-publish の成功を確認してから version を発番する。
+#[tokio::test]
+async fn later_pre_publish_failure_leaves_entire_batch_unpublished() {
+    let ctx = make_ctx_with_hooks(HooksConfig {
+        allow_project_hooks: false,
+        hooks: vec![synergos_net::config::HookDef {
+            event: "pre-publish".into(),
+            command: shell_false(),
+            r#match: vec!["assets/b.bin".into()],
+            timeout_sec: 5,
+        }],
+    });
+    let root = std::env::temp_dir().join(format!(
+        "synergos-ipc-hook-batch-{}",
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(root.join("assets")).unwrap();
+    let open_resp = dispatch_command(
+        IpcCommand::ProjectOpen {
+            project_id: "batch".into(),
+            root_path: root.clone(),
+            display_name: None,
+        },
+        &ctx,
+    )
+    .await;
+    assert!(matches!(open_resp, IpcResponse::Ok));
+    tokio::fs::write(root.join("assets/a.bin"), b"one")
+        .await
+        .unwrap();
+    tokio::fs::write(root.join("assets/b.bin"), b"two")
+        .await
+        .unwrap();
+
+    let response = dispatch_command(
+        IpcCommand::PublishUpdate {
+            project_id: "batch".into(),
+            file_paths: vec!["assets/a.bin".into(), "assets/b.bin".into()],
+        },
+        &ctx,
+    )
+    .await;
+    assert!(matches!(response, IpcResponse::Error { .. }));
+    assert!(
+        ctx.project_manager.manifest_entries("batch").is_empty(),
+        "a later hook failure must not partially update the manifest"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// `allow_project_hooks = false` (既定) では `<project root>/.synergos/hooks.toml`
+/// のプロジェクトフックが実行されない: 失敗するはずのフックが無視されて publish が通る。
+#[tokio::test]
+async fn project_hooks_are_not_executed_when_opt_in_is_disabled() {
+    let ctx = make_ctx_with_hooks(HooksConfig {
+        allow_project_hooks: false,
+        hooks: vec![],
+    });
+    let root = std::env::temp_dir().join(format!("synergos-ipc-hook-optin-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(root.join(".synergos")).unwrap();
+    std::fs::write(
+        root.join(".synergos").join("hooks.toml"),
+        format!(
+            "[[hook]]\nevent = \"pre-publish\"\ncommand = \"{}\"\n",
+            shell_false()
+        ),
+    )
+    .unwrap();
+
+    open_and_publish(&ctx, &root, b"one").await;
+
+    let entries = ctx.project_manager.manifest_entries("hist");
+    assert_eq!(
+        entries.iter().find(|(p, _)| p == "assets/a.bin").map(|(_, e)| e.version),
+        Some(1),
+        "publish must succeed because project hooks are opt-in disabled"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// `hooks run` (手動発火) で `SYNERGOS_EVENT` / `SYNERGOS_PROJECT` / `SYNERGOS_FILE`
+/// が正しく渡る (手動発火はバージョン発番前 / ピア不明のため `SYNERGOS_VERSION` /
+/// `SYNERGOS_PEER` は設定しない: `runner.rs::run_manual` 参照)。
+#[tokio::test]
+async fn hooks_run_post_receive_passes_expected_env() {
+    let marker = std::env::temp_dir().join(format!("synergos-hook-env-{}.txt", uuid::Uuid::new_v4()));
+    let command = if cfg!(windows) {
+        format!(
+            "echo %SYNERGOS_EVENT%,%SYNERGOS_PROJECT%,%SYNERGOS_FILE%> \"{}\"",
+            marker.display()
+        )
+    } else {
+        format!(
+            "echo \"$SYNERGOS_EVENT,$SYNERGOS_PROJECT,$SYNERGOS_FILE\" > \"{}\"",
+            marker.display()
+        )
+    };
+    let ctx = make_ctx_with_hooks(HooksConfig {
+        allow_project_hooks: false,
+        hooks: vec![synergos_net::config::HookDef {
+            event: "post-receive".into(),
+            command,
+            r#match: vec![],
+            timeout_sec: 5,
+        }],
+    });
+    let root = std::env::temp_dir().join(format!("synergos-ipc-hook-env-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).unwrap();
+    let open_resp = dispatch_command(
+        IpcCommand::ProjectOpen {
+            project_id: "hist".into(),
+            root_path: root.clone(),
+            display_name: None,
+        },
+        &ctx,
+    )
+    .await;
+    assert!(matches!(open_resp, IpcResponse::Ok));
+
+    let resp = dispatch_command(
+        IpcCommand::HooksRun {
+            project_id: "hist".into(),
+            event: "post-receive".into(),
+            rel_path: "assets/a.bin".into(),
+        },
+        &ctx,
+    )
+    .await;
+    let results = match resp {
+        IpcResponse::HooksRunReport(results) => results,
+        other => panic!("expected HooksRunReport, got {other:?}"),
+    };
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].status, "success");
+
+    let contents = tokio::fs::read_to_string(&marker).await.unwrap();
+    let contents = contents.trim();
+    assert_eq!(contents, "post-receive,hist,assets/a.bin");
+
+    let _ = tokio::fs::remove_file(&marker).await;
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// 受信完了時の実配線 (`HookRunner::spawn_post_hooks`, `daemon.rs` / `wiring.rs` が
+/// 実際に呼ぶのと同じ経路) では `SYNERGOS_VERSION` / `SYNERGOS_PEER` も渡る。
+/// spawn は待たないので、マーカーファイルが書かれるまでポーリングする。
+#[tokio::test]
+async fn post_receive_spawn_hook_includes_version_and_peer() {
+    let marker = std::env::temp_dir().join(format!("synergos-hook-spawn-{}.txt", uuid::Uuid::new_v4()));
+    let command = if cfg!(windows) {
+        format!(
+            "echo %SYNERGOS_EVENT%,%SYNERGOS_PROJECT%,%SYNERGOS_FILE%,%SYNERGOS_VERSION%,%SYNERGOS_PEER%> \"{}\"",
+            marker.display()
+        )
+    } else {
+        format!(
+            "echo \"$SYNERGOS_EVENT,$SYNERGOS_PROJECT,$SYNERGOS_FILE,$SYNERGOS_VERSION,$SYNERGOS_PEER\" > \"{}\"",
+            marker.display()
+        )
+    };
+    let runner = std::sync::Arc::new(synergos_core::hooks::HookRunner::new(HooksConfig {
+        allow_project_hooks: false,
+        hooks: vec![synergos_net::config::HookDef {
+            event: "post-receive".into(),
+            command,
+            r#match: vec![],
+            timeout_sec: 5,
+        }],
+    }));
+    let root = std::env::temp_dir().join(format!("synergos-hook-spawn-root-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).unwrap();
+
+    runner.spawn_post_hooks(
+        root.clone(),
+        synergos_core::hooks::HookEvent::PostReceive,
+        "hist".to_string(),
+        "assets/a.bin".to_string(),
+        7,
+        Some("peer-abc".to_string()),
+    );
+
+    let mut contents = None;
+    for _ in 0..50 {
+        if let Ok(text) = tokio::fs::read_to_string(&marker).await {
+            contents = Some(text);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let contents = contents.expect("post-receive hook must write the marker within 5s");
+    assert_eq!(contents.trim(), "post-receive,hist,assets/a.bin,7,peer-abc");
+
+    let _ = tokio::fs::remove_file(&marker).await;
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// タイムアウトを超過したフックは kill され、`pre-publish` なら publish が中止される。
+#[tokio::test]
+async fn pre_publish_hook_timeout_kills_process_and_aborts_publish() {
+    let sleep_cmd = if cfg!(windows) {
+        "ping -n 5 127.0.0.1 >NUL".to_string()
+    } else {
+        "sleep 5".to_string()
+    };
+    let ctx = make_ctx_with_hooks(HooksConfig {
+        allow_project_hooks: false,
+        hooks: vec![synergos_net::config::HookDef {
+            event: "pre-publish".into(),
+            command: sleep_cmd,
+            r#match: vec![],
+            timeout_sec: 1,
+        }],
+    });
+    let root = std::env::temp_dir().join(format!("synergos-ipc-hook-to-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(root.join("assets")).unwrap();
+    let open_resp = dispatch_command(
+        IpcCommand::ProjectOpen {
+            project_id: "hist".into(),
+            root_path: root.clone(),
+            display_name: None,
+        },
+        &ctx,
+    )
+    .await;
+    assert!(matches!(open_resp, IpcResponse::Ok));
+    tokio::fs::write(root.join("assets").join("a.bin"), b"one")
+        .await
+        .unwrap();
+
+    let start = std::time::Instant::now();
+    let resp = dispatch_command(
+        IpcCommand::PublishUpdate {
+            project_id: "hist".into(),
+            file_paths: vec![std::path::PathBuf::from("assets/a.bin")],
+        },
+        &ctx,
+    )
+    .await;
+    let elapsed = start.elapsed();
+    match resp {
+        IpcResponse::Error { message, .. } => {
+            assert!(message.contains("timed out"), "unexpected message: {message}");
+        }
+        other => panic!("expected Error from timed-out publish, got {other:?}"),
+    }
+    assert!(
+        elapsed < std::time::Duration::from_secs(4),
+        "hook must be killed at the 1s timeout, not run to completion (elapsed={elapsed:?})"
+    );
+    assert!(ctx.project_manager.manifest_entries("hist").is_empty());
+    let _ = std::fs::remove_dir_all(&root);
 }

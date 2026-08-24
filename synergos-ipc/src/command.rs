@@ -117,6 +117,17 @@ pub enum IpcCommand {
         keep_manifests: Vec<PathBuf>,
     },
 
+    // ── publish / 受信時フック (docs/hooks.md) ──
+    /// 有効なフック一覧 (定義元 daemon/project の別と opt-in 状態を表示)
+    HooksList { project_id: String },
+    /// 手動発火 (デバッグ用)。`event` は `pre-publish` | `post-publish` | `post-receive`。
+    HooksRun {
+        project_id: String,
+        event: String,
+        /// プロジェクトルート相対 (`/` 区切り)
+        rel_path: String,
+    },
+
     // ── 版タグ (GC / ローテーション保護) ──
     /// タグを作成/上書きする。ピン集合の指定方法は 3 通り (排他):
     /// - `pins` を明示 (`tag add --file <path> --version N`)
@@ -395,6 +406,25 @@ impl IpcCommand {
                     check_path("keep_manifests[*]", p)?;
                 }
                 Ok(())
+            }
+
+            Self::HooksList { project_id } => check_id("project_id", project_id),
+            Self::HooksRun {
+                project_id,
+                event,
+                rel_path,
+            } => {
+                check_id("project_id", project_id)?;
+                check_id("event", event)?;
+                if !matches!(
+                    event.as_str(),
+                    "pre-publish" | "post-publish" | "post-receive"
+                ) {
+                    return Err(format!(
+                        "event must be one of pre-publish|post-publish|post-receive (got {event})"
+                    ));
+                }
+                check_rel_path("rel_path", rel_path)
             }
 
             Self::TagAdd {

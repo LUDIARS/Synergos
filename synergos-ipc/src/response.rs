@@ -52,6 +52,12 @@ pub enum IpcResponse {
     /// history gc の結果
     HistoryGcReport(HistoryGcReportDto),
 
+    /// 有効なフック一覧
+    HooksList(Vec<HookInfoDto>),
+
+    /// hooks run の結果 (発火した各フックの結果)
+    HooksRunReport(Vec<HookRunResultDto>),
+
     /// tag add / show の結果
     Tag(TagDto),
 
@@ -60,6 +66,30 @@ pub enum IpcResponse {
 
     /// イベント購読完了
     Subscribed { subscription_id: String },
+}
+
+/// フック 1 件のサマリ (IPC 向け DTO)。`hooks ls` で使う。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HookInfoDto {
+    /// `"daemon"` | `"project"`
+    pub source: String,
+    pub event: String,
+    pub command: String,
+    pub r#match: Vec<String>,
+    pub timeout_sec: u64,
+    /// プロジェクトフックだが daemon 側 `allow_project_hooks = false` で無効化されている
+    pub disabled_by_opt_in: bool,
+}
+
+/// `hooks run` の 1 フック分の実行結果 (IPC 向け DTO)。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HookRunResultDto {
+    pub source: String,
+    pub command: String,
+    /// `"success"` | `"failed"` | `"timed_out"` | `"spawn_error"`
+    pub status: String,
+    pub exit_code: Option<i32>,
+    pub detail: Option<String>,
 }
 
 /// checkout の結果 (IPC 向け DTO)

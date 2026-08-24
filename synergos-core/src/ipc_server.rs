@@ -59,6 +59,8 @@ pub struct ServiceContext {
     pub identity: Option<Arc<synergos_net::identity::Identity>>,
     /// 履歴ノードの保管庫 (無効なノードでも実体はあり、`enabled()` が false)。
     pub history: Arc<crate::history::HistoryStore>,
+    /// publish / 受信時フックランナー (docs/hooks.md)。
+    pub hooks: Arc<crate::hooks::HookRunner>,
 }
 
 /// IPC サーバー
@@ -760,6 +762,69 @@ fn now_epoch_secs() -> u64 {
         .as_secs()
 }
 
+struct ResolvedPublishPath {
+    canonical: std::path::PathBuf,
+    relative: std::path::PathBuf,
+    relative_key: String,
+}
+
+/// Resolve a publish path at the I/O boundary and reject symlink/path traversal escapes.
+/// This is called both before and after pre-publish hooks because hooks may replace paths.
+async fn resolve_publish_path(
+    project_root: &std::path::Path,
+    requested: &std::path::Path,
+) -> Result<ResolvedPublishPath, String> {
+    use synergos_net::types::redact_path;
+
+    let absolute = if requested.is_absolute() {
+        requested.to_path_buf()
+    } else {
+        project_root.join(requested)
+    };
+    let canonical = tokio::fs::canonicalize(&absolute).await.map_err(|error| {
+        format!(
+            "file not found or unreadable: {}: {error}",
+            redact_path(project_root, &absolute)
+        )
+    })?;
+    if !canonical.starts_with(project_root) {
+        return Err(format!(
+            "file outside project root: {}",
+            redact_path(project_root, &canonical)
+        ));
+    }
+
+    let metadata = tokio::fs::metadata(&canonical).await.map_err(|error| {
+        format!(
+            "metadata failed {}: {error}",
+            redact_path(project_root, &canonical)
+        )
+    })?;
+    if !metadata.is_file() {
+        return Err(format!(
+            "not a regular file: {}",
+            redact_path(project_root, &canonical)
+        ));
+    }
+
+    let relative = canonical
+        .strip_prefix(project_root)
+        .map_err(|_| "file escaped project root during path resolution".to_string())?
+        .to_path_buf();
+    let relative_key = crate::manifest::normalize_rel_path(&relative);
+    if relative_key == crate::manifest::META_DIR
+        || relative_key.starts_with(&format!("{}/", crate::manifest::META_DIR))
+    {
+        return Err(format!("cannot publish Synergos metadata: {relative_key}"));
+    }
+
+    Ok(ResolvedPublishPath {
+        canonical,
+        relative,
+        relative_key,
+    })
+}
+
 pub async fn dispatch_command(command: IpcCommand, ctx: &ServiceContext) -> IpcResponse {
     match command {
         IpcCommand::Ping => IpcResponse::Pong,
@@ -1208,86 +1273,84 @@ pub async fn dispatch_command(command: IpcCommand, ctx: &ServiceContext) -> IpcR
                 }
             };
 
-            use synergos_net::types::redact_path;
-            let mut notifications: Vec<PublishNotification> = Vec::with_capacity(file_paths.len());
+            // Validate the complete batch before running any hook. A malformed later path
+            // must not cause side effects from an earlier hook.
+            let mut prepared = Vec::with_capacity(file_paths.len());
             for path in &file_paths {
-                let absolute = if path.is_absolute() {
-                    path.clone()
-                } else {
-                    project_root.join(path)
-                };
-                let canonical = match tokio::fs::canonicalize(&absolute).await {
-                    Ok(p) => p,
-                    Err(e) => {
-                        return IpcResponse::Error {
-                            code: 3,
-                            message: format!(
-                                "file not found or unreadable: {}: {e}",
-                                redact_path(&project_root, &absolute)
-                            ),
-                        };
+                match resolve_publish_path(&project_root, path).await {
+                    Ok(resolved) => prepared.push(resolved),
+                    Err(message) => {
+                        return IpcResponse::Error { code: 3, message };
                     }
-                };
-                if !canonical.starts_with(&project_root) {
-                    return IpcResponse::Error {
-                        code: 3,
-                        message: format!(
-                            "file outside project root: {}",
-                            redact_path(&project_root, &canonical)
-                        ),
-                    };
                 }
+            }
 
-                let metadata = match tokio::fs::metadata(&canonical).await {
-                    Ok(m) => m,
-                    Err(e) => {
-                        return IpcResponse::Error {
-                            code: 3,
-                            message: format!(
-                                "metadata failed {}: {e}",
-                                redact_path(&project_root, &canonical)
-                            ),
-                        };
-                    }
-                };
-                if !metadata.is_file() {
-                    return IpcResponse::Error {
-                        code: 3,
-                        message: format!(
-                            "not a regular file: {}",
-                            redact_path(&project_root, &canonical)
-                        ),
-                    };
-                }
-                // 全体を RAM に載せずにストリーミングで CRC を取る (数百 MB のアセット対策)
-                let (crc, file_size) = match crate::manifest::crc32_of_file(&canonical).await {
-                    Ok(v) => v,
-                    Err(e) => {
-                        return IpcResponse::Error {
-                            code: 3,
-                            message: format!(
-                                "read failed {}: {e}",
-                                redact_path(&project_root, &canonical)
-                            ),
-                        };
-                    }
-                };
-
-                let rel = canonical
-                    .strip_prefix(&project_root)
-                    .map(|r| r.to_path_buf())
-                    .unwrap_or(canonical.clone());
-                // FileId は OS を跨いで同一でなければならないので `/` 区切りに正規化する
-                let rel_key = crate::manifest::normalize_rel_path(&rel);
-                if rel_key == crate::manifest::META_DIR
-                    || rel_key.starts_with(&format!("{}/", crate::manifest::META_DIR))
+            // Run every pre-publish hook before manifest/version/history mutation. Thus a
+            // failure on file N leaves all files in the batch unpublished.
+            for entry in &prepared {
+                if let Err(error) = ctx
+                    .hooks
+                    .run_pre_publish(&project_root, &project_id, &entry.relative_key)
+                    .await
                 {
                     return IpcResponse::Error {
                         code: 3,
-                        message: format!("cannot publish Synergos metadata: {rel_key}"),
+                        message: format!(
+                            "pre-publish hook rejected {}: {error}",
+                            entry.relative_key
+                        ),
                     };
                 }
+            }
 
+            // Hooks may rewrite or replace files. Re-resolve every path, re-check that it
+            // remains the same project-relative file, and compute every CRC before mutation.
+            let mut candidates = Vec::with_capacity(prepared.len());
+            for entry in prepared {
+                let resolved = match resolve_publish_path(&project_root, &entry.relative).await {
+                    Ok(resolved) => resolved,
+                    Err(message) => return IpcResponse::Error { code: 3, message },
+                };
+                if resolved.relative_key != entry.relative_key {
+                    return IpcResponse::Error {
+                        code: 3,
+                        message: format!(
+                            "pre-publish hook changed path identity: {}",
+                            entry.relative_key
+                        ),
+                    };
+                }
+                // 全体を RAM に載せずにストリーミングで CRC を取る (数百 MB のアセット対策)。
+                // pre-publish フックが書き換えた後の内容を読む。
+                let (crc, file_size) =
+                    match crate::manifest::crc32_of_file(&resolved.canonical).await {
+                        Ok(v) => v,
+                        Err(e) => {
+                            return IpcResponse::Error {
+                                code: 3,
+                                message: format!(
+                                    "read failed {}: {e}",
+                                    synergos_net::types::redact_path(
+                                        &project_root,
+                                        &resolved.canonical
+                                    )
+                                ),
+                            };
+                        }
+                    };
+                candidates.push((
+                    resolved.canonical,
+                    resolved.relative,
+                    resolved.relative_key,
+                    file_size,
+                    crc,
+                ));
+            }
+
+            let mut notifications: Vec<PublishNotification> =
+                Vec::with_capacity(candidates.len());
+            let mut published: Vec<(String, u64)> = Vec::with_capacity(candidates.len());
+            for (canonical, rel, rel_key, file_size, crc) in candidates {
                 // マニフェストでバージョン発番 (内容が同じなら据え置き = 再送しない)。
                 // ProjectManager は node-local state の観測済み最大版を下限にする。
                 let version = match ctx
@@ -1342,6 +1405,7 @@ pub async fn dispatch_command(command: IpcCommand, ctx: &ServiceContext) -> IpcR
                     };
                 }
 
+                published.push((rel_key, version));
                 notifications.push(PublishNotification {
                     project_id: project_id.clone(),
                     file_id,
@@ -1352,7 +1416,20 @@ pub async fn dispatch_command(command: IpcCommand, ctx: &ServiceContext) -> IpcR
                 });
             }
             match ctx.exchange.publish_updates(notifications).await {
-                Ok(()) => IpcResponse::Ok,
+                Ok(()) => {
+                    // post-publish: manifest 更新・Offer 送出の後。spawn するだけで待たない。
+                    for (rel_key, version) in published {
+                        ctx.hooks.spawn_post_hooks(
+                            project_root.clone(),
+                            crate::hooks::HookEvent::PostPublish,
+                            project_id.clone(),
+                            rel_key,
+                            version,
+                            None,
+                        );
+                    }
+                    IpcResponse::Ok
+                }
                 Err(e) => IpcResponse::Error {
                     code: 3,
                     message: e.to_string(),
@@ -1679,6 +1756,92 @@ pub async fn dispatch_command(command: IpcCommand, ctx: &ServiceContext) -> IpcR
                 Err(e) => IpcResponse::Error {
                     code: 3,
                     message: format!("tag rm failed: {e}"),
+                },
+            }
+        }
+
+        // ── publish / 受信時フック (docs/hooks.md) ──
+        IpcCommand::HooksList { project_id } => {
+            let Some(root) = ctx.project_manager.project_root(&project_id) else {
+                return IpcResponse::Error {
+                    code: 2,
+                    message: format!("project not open: {project_id}"),
+                };
+            };
+            match ctx.hooks.effective_hooks(&root).await {
+                Ok(hooks) => IpcResponse::HooksList(
+                    hooks
+                        .into_iter()
+                        .map(|h| synergos_ipc::response::HookInfoDto {
+                            source: h.source.as_str().to_string(),
+                            event: h.def.event,
+                            command: h.def.command,
+                            r#match: h.def.r#match,
+                            timeout_sec: h.def.timeout_sec,
+                            disabled_by_opt_in: h.disabled_by_opt_in,
+                        })
+                        .collect(),
+                ),
+                Err(e) => IpcResponse::Error {
+                    code: 3,
+                    message: format!("hooks list failed: {e}"),
+                },
+            }
+        }
+        IpcCommand::HooksRun {
+            project_id,
+            event,
+            rel_path,
+        } => {
+            let Some(root) = ctx.project_manager.project_root(&project_id) else {
+                return IpcResponse::Error {
+                    code: 2,
+                    message: format!("project not open: {project_id}"),
+                };
+            };
+            let event = match event.as_str() {
+                "pre-publish" => crate::hooks::HookEvent::PrePublish,
+                "post-publish" => crate::hooks::HookEvent::PostPublish,
+                "post-receive" => crate::hooks::HookEvent::PostReceive,
+                other => {
+                    return IpcResponse::Error {
+                        code: 1,
+                        message: format!("unknown hook event: {other}"),
+                    };
+                }
+            };
+            match ctx.hooks.run_manual(&root, event, &project_id, &rel_path).await {
+                Ok(outcomes) => IpcResponse::HooksRunReport(
+                    outcomes
+                        .into_iter()
+                        .map(|o| {
+                            let (status, exit_code, detail) = match o.status {
+                                crate::hooks::HookStatus::Success => {
+                                    ("success".to_string(), None, None)
+                                }
+                                crate::hooks::HookStatus::Failed { exit_code } => {
+                                    ("failed".to_string(), exit_code, None)
+                                }
+                                crate::hooks::HookStatus::TimedOut => {
+                                    ("timed_out".to_string(), None, None)
+                                }
+                                crate::hooks::HookStatus::SpawnError(e) => {
+                                    ("spawn_error".to_string(), None, Some(e))
+                                }
+                            };
+                            synergos_ipc::response::HookRunResultDto {
+                                source: o.source.as_str().to_string(),
+                                command: o.command,
+                                status,
+                                exit_code,
+                                detail,
+                            }
+                        })
+                        .collect(),
+                ),
+                Err(e) => IpcResponse::Error {
+                    code: 3,
+                    message: format!("hooks run failed: {e}"),
                 },
             }
         }

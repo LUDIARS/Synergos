@@ -252,6 +252,13 @@ impl Daemon {
                 project_manager.clone(),
             ));
         }
+        // publish / 受信時フック (docs/hooks.md): daemon 設定は常に有効、
+        // プロジェクト設定 (`.synergos/hooks.toml`) は `hooks.allow_project_hooks` の opt-in。
+        let hook_runner = Arc::new(crate::hooks::HookRunner::new(net.net_config.hooks.clone()));
+        exchange_inner.attach_post_receive_hook(crate::hooks::wiring::build_post_receive_hook(
+            hook_runner.clone(),
+            project_manager.clone(),
+        ));
         let exchange = Arc::new(exchange_inner);
         // 起動時復元: 各プロジェクトのマニフェストから shared_files を再構築する
         // (publisher 再起動後も FileWant に応答でき、受信側は既取得分を再 pull しない)。
@@ -284,6 +291,7 @@ impl Daemon {
             quic: net.quic.clone(),
             identity: Some(net.identity.clone()),
             history,
+            hooks: hook_runner,
         });
 
         // 永続化されていた project を restore した後、それぞれの

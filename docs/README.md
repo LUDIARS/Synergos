@@ -17,6 +17,7 @@ Synergos のセットアップと運用に必要な情報を段階別にまと�
 | [admin-ui.md](admin-ui.md) | 管理コンソール (synergos-admin-ui) のビルド・配信設定・画面構成・秘密情報の扱い |
 | [operations-readiness.md](operations-readiness.md) | 運用開始に向けた完成度の棚卸しと残作業 (P0/P1/P2) |
 | [versioning-design.md](versioning-design.md) | バージョン管理 (git) との兼ね合い、バイナリ/大容量ファイルの差分の扱い |
+| [hooks.md](hooks.md) | publish / 受信時フック (`pre-publish` / `post-publish` / `post-receive`)、`.synergos/hooks.toml` と daemon 設定の 2 層、opt-in |
 
 ## クイックリファレンス
 

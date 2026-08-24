@@ -85,6 +85,176 @@ pub struct NetConfig {
     /// 旧版の FileWant に応答する。
     #[serde(default)]
     pub history: HistoryConfig,
+    /// publish / 受信時フック (docs/hooks.md)。既定は無効。
+    #[serde(default)]
+    pub hooks: HooksConfig,
+}
+
+/// publish / 受信時フックの daemon 単位設定。
+///
+/// 定義は 2 層: この `hooks` (daemon 固有、常に有効) と、プロジェクトが
+/// git にコミットして共有する `<project root>/.synergos/hooks.toml`
+/// (`allow_project_hooks = true` のノードだけ実行。既定 false)。
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct HooksConfig {
+    /// `<project root>/.synergos/hooks.toml` (リポジトリ由来) のフックを
+    /// 実行してよいか。リポジトリ由来スクリプトの自動実行になるため既定 false。
+    /// true にしたノードだけがプロジェクトフックを実行する opt-in。
+    #[serde(default)]
+    pub allow_project_hooks: bool,
+    /// この daemon 固有のフック (ノードローカル、常に有効)。
+    #[serde(default)]
+    pub hooks: Vec<HookDef>,
+}
+
+/// フック 1 件の定義。`<project root>/.synergos/hooks.toml` の `[[hook]]` と
+/// daemon 設定の `[[hooks]] hooks = [...]` の両方で同じ形を使う。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HookDef {
+    /// `pre-publish` | `post-publish` | `post-receive`
+    pub event: String,
+    /// 実行するコマンド。project root を cwd に、シェル経由で実行する。
+    pub command: String,
+    /// 対象ファイルの glob パターン。省略 = 全ファイル。
+    #[serde(default)]
+    pub r#match: Vec<String>,
+    /// タイムアウト (秒)。超過したらプロセスを kill する。
+    #[serde(default = "default_hook_timeout_sec")]
+    pub timeout_sec: u64,
+}
+
+fn default_hook_timeout_sec() -> u64 {
+    60
+}
+
+const MAX_HOOK_TIMEOUT_SEC: u64 = 24 * 60 * 60;
+const MAX_HOOK_COMMAND_LEN: usize = 32 * 1024;
+const MAX_HOOK_PATTERN_LEN: usize = 1024;
+
+impl HookDef {
+    /// 設定ロード時に、実行不能または意図せず無視される定義を拒否する。
+    pub fn validate(&self) -> Result<(), String> {
+        if !matches!(
+            self.event.as_str(),
+            "pre-publish" | "post-publish" | "post-receive"
+        ) {
+            return Err(format!("unsupported hook event: {}", self.event));
+        }
+        if self.command.trim().is_empty() || self.command.len() > MAX_HOOK_COMMAND_LEN {
+            return Err(format!(
+                "hook command must be 1..={MAX_HOOK_COMMAND_LEN} bytes"
+            ));
+        }
+        if self.timeout_sec == 0 || self.timeout_sec > MAX_HOOK_TIMEOUT_SEC {
+            return Err(format!(
+                "hook timeout_sec must be between 1 and {MAX_HOOK_TIMEOUT_SEC}"
+            ));
+        }
+        if self
+            .r#match
+            .iter()
+            .any(|pattern| {
+                pattern.is_empty()
+                    || pattern.len() > MAX_HOOK_PATTERN_LEN
+                    || pattern.chars().any(char::is_control)
+            })
+        {
+            return Err(
+                format!(
+                    "hook match patterns must be 1..={MAX_HOOK_PATTERN_LEN} bytes and contain no control characters"
+                ),
+            );
+        }
+        Ok(())
+    }
+
+    /// `path` (プロジェクトルート相対、`/` 区切り) が `match` に該当するか。
+    /// `match` が空なら常に該当する。
+    pub fn matches(&self, path: &str) -> bool {
+        if self.r#match.is_empty() {
+            return true;
+        }
+        self.r#match
+            .iter()
+            .any(|pattern| glob_match(pattern, path))
+    }
+}
+
+/// 最小限の glob マッチャ (`*` = `/` を含まない任意文字列, `**` = 任意文字列 `/` 込み, `?` = 任意 1 文字)。
+/// 外部 crate に依存せず `assets/**/*.png` のような hooks.toml の `match` パターンだけを扱う。
+pub fn glob_match(pattern: &str, path: &str) -> bool {
+    #[derive(Clone, Copy)]
+    enum Token {
+        Literal(char),
+        One,
+        Star,
+        GlobStar,
+    }
+
+    let chars: Vec<char> = pattern.chars().collect();
+    let mut tokens = Vec::with_capacity(chars.len());
+    let mut index = 0;
+    while index < chars.len() {
+        match chars[index] {
+            '*' if chars.get(index + 1) == Some(&'*') => {
+                tokens.push(Token::GlobStar);
+                index += 2;
+                // Preserve the documented `assets/**/*.png` behavior: `**/` also matches
+                // zero directory levels, so the slash belongs to the globstar token.
+                if chars.get(index) == Some(&'/') {
+                    index += 1;
+                }
+            }
+            '*' => {
+                tokens.push(Token::Star);
+                index += 1;
+            }
+            '?' => {
+                tokens.push(Token::One);
+                index += 1;
+            }
+            literal => {
+                tokens.push(Token::Literal(literal));
+                index += 1;
+            }
+        }
+    }
+
+    let path: Vec<char> = path.chars().collect();
+    let mut previous = vec![false; path.len() + 1];
+    previous[0] = true;
+    for token in tokens {
+        let mut current = vec![false; path.len() + 1];
+        match token {
+            Token::Literal(expected) => {
+                for position in 1..=path.len() {
+                    current[position] =
+                        previous[position - 1] && path[position - 1] == expected;
+                }
+            }
+            Token::One => {
+                for position in 1..=path.len() {
+                    current[position] =
+                        previous[position - 1] && path[position - 1] != '/';
+                }
+            }
+            Token::Star => {
+                current[0] = previous[0];
+                for position in 1..=path.len() {
+                    current[position] = previous[position]
+                        || (path[position - 1] != '/' && current[position - 1]);
+                }
+            }
+            Token::GlobStar => {
+                current[0] = previous[0];
+                for position in 1..=path.len() {
+                    current[position] = previous[position] || current[position - 1];
+                }
+            }
+        }
+        previous = current;
+    }
+    previous[path.len()]
 }
 
 fn default_true_auto_promote() -> bool {
@@ -462,6 +632,7 @@ impl Default for NetConfig {
             auto_promote: true,
             control: ControlReportConfig::default(),
             history: HistoryConfig::default(),
+            hooks: HooksConfig::default(),
         }
     }
 }
@@ -472,6 +643,10 @@ impl NetConfig {
     pub fn validate(&self) -> Result<(), String> {
         self.stream_allocation.validate()?;
         self.history.validate()?;
+        for (index, hook) in self.hooks.hooks.iter().enumerate() {
+            hook.validate()
+                .map_err(|error| format!("hooks.hooks[{index}]: {error}"))?;
+        }
         Ok(())
     }
 }
@@ -659,5 +834,110 @@ restart_max_ms = 60000
         let cfg: NetConfig =
             serde_json::from_str(with_flag).expect("config with flag should parse");
         assert!(cfg.force_relay_only);
+    }
+
+    #[test]
+    fn hooks_default_disabled_and_empty() {
+        let cfg = NetConfig::default();
+        assert!(!cfg.hooks.allow_project_hooks);
+        assert!(cfg.hooks.hooks.is_empty());
+    }
+
+    #[test]
+    fn hook_def_toml_roundtrip() {
+        let text = r#"
+event = "post-receive"
+command = "python scripts/convert.py"
+match = ["assets/**/*.png"]
+timeout_sec = 120
+"#;
+        let def: HookDef = toml::from_str(text).expect("hook def parses");
+        assert_eq!(def.event, "post-receive");
+        assert_eq!(def.timeout_sec, 120);
+        assert_eq!(def.r#match, vec!["assets/**/*.png".to_string()]);
+    }
+
+    #[test]
+    fn hook_def_timeout_defaults_to_60() {
+        let text = r#"
+event = "pre-publish"
+command = "true"
+"#;
+        let def: HookDef = toml::from_str(text).expect("hook def parses");
+        assert_eq!(def.timeout_sec, 60);
+        assert!(def.r#match.is_empty());
+    }
+
+    #[test]
+    fn hook_validation_rejects_invalid_definitions() {
+        let valid = HookDef {
+            event: "pre-publish".into(),
+            command: "true".into(),
+            r#match: vec![],
+            timeout_sec: 60,
+        };
+        assert!(valid.validate().is_ok());
+
+        for invalid in [
+            HookDef {
+                event: "pre-publsih".into(),
+                ..valid.clone()
+            },
+            HookDef {
+                command: "  ".into(),
+                ..valid.clone()
+            },
+            HookDef {
+                command: "x".repeat(MAX_HOOK_COMMAND_LEN + 1),
+                ..valid.clone()
+            },
+            HookDef {
+                timeout_sec: 0,
+                ..valid.clone()
+            },
+            HookDef {
+                timeout_sec: MAX_HOOK_TIMEOUT_SEC + 1,
+                ..valid.clone()
+            },
+            HookDef {
+                r#match: vec![String::new()],
+                ..valid.clone()
+            },
+        ] {
+            assert!(invalid.validate().is_err(), "accepted {invalid:?}");
+        }
+    }
+
+    #[test]
+    fn hook_def_matches_empty_pattern_matches_everything() {
+        let def = HookDef {
+            event: "post-receive".into(),
+            command: "true".into(),
+            r#match: vec![],
+            timeout_sec: 60,
+        };
+        assert!(def.matches("anything/at/all.txt"));
+    }
+
+    #[test]
+    fn glob_match_star_does_not_cross_slash() {
+        assert!(glob_match("*.png", "a.png"));
+        assert!(!glob_match("*.png", "dir/a.png"));
+        assert!(glob_match("assets/*.png", "assets/a.png"));
+        assert!(!glob_match("assets/*.png", "assets/sub/a.png"));
+    }
+
+    #[test]
+    fn glob_match_double_star_crosses_slash() {
+        assert!(glob_match("assets/**/*.png", "assets/a.png"));
+        assert!(glob_match("assets/**/*.png", "assets/sub/a.png"));
+        assert!(glob_match("assets/**/*.png", "assets/sub/deep/a.png"));
+        assert!(!glob_match("assets/**/*.png", "other/a.png"));
+    }
+
+    #[test]
+    fn glob_match_question_mark_matches_single_char_not_slash() {
+        assert!(glob_match("a?c", "abc"));
+        assert!(!glob_match("a?c", "a/c"));
     }
 }

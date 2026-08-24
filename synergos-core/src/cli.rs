@@ -50,6 +50,10 @@ pub enum Command {
     #[command(subcommand)]
     History(crate::cli_history::HistoryCommand),
 
+    /// publish / 受信時フック (ls / run)
+    #[command(subcommand)]
+    Hooks(crate::cli_hooks::HooksCommand),
+
     /// 版タグ (GC・ローテーション保護)
     #[command(subcommand)]
     Tag(crate::cli_history::TagCommand),
@@ -223,6 +227,8 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Peer(cmd) => handle_peer(cmd).await?,
         Command::Transfer(cmd) => handle_transfer(cmd).await?,
         Command::History(cmd) => crate::cli_history::handle_history(cmd).await?,
+        Command::Hooks(cmd) => crate::cli_hooks::handle_hooks(cmd).await?,
+
         Command::Tag(cmd) => crate::cli_history::handle_tag(cmd).await?,
         Command::Network => {
             let mut client = synergos_ipc::IpcClient::connect().await?;

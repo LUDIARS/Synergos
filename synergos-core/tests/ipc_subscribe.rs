@@ -50,6 +50,7 @@ fn make_ctx() -> Arc<ServiceContext> {
         quic,
         identity: None,
         history: Arc::new(synergos_core::history::HistoryStore::new(Default::default())),
+        hooks: Arc::new(synergos_core::hooks::HookRunner::new(Default::default())),
     })
 }
 
