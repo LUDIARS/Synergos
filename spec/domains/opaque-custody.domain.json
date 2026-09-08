@@ -1,0 +1,9 @@
+{
+  "name": "opaque-custody",
+  "description": "Cu Serverの受付に基づく不透明な実体の耐久保管。内容検証、受領証、取得と回収を担い、版・提出・保持許可はCuへ委ねる。",
+  "presetRules": [],
+  "templateRules": [],
+  "membership": [
+    { "pathPattern": "(^|/)synergos-custody/(?:.*/)?[^/]+$" }
+  ]
+}

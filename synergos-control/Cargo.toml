@@ -9,6 +9,7 @@ name = "synergos-control"
 path = "src/main.rs"
 
 [dependencies]
+synergos-custody = { path = "../synergos-custody" }
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.7", default-features = false, features = ["http1", "json", "tokio"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "http2"] }

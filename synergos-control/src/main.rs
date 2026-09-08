@@ -73,7 +73,11 @@ async fn serve(config_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
         cf_account_id: config.cloudflare.account_id.clone(),
         ui_dist: config.ui.dist_path.clone(),
     });
-    let router = api::build_router(state, AdminToken(secrets.admin_token));
+    let mut router = api::build_router(state, AdminToken(secrets.admin_token));
+    if let Some(custody) = synergos_custody::config::Config::from_env()? {
+        router = router.merge(synergos_custody::router(custody).await?);
+        info!("opaque durable custody enabled; Curare owns version and retention policy");
+    }
 
     let listener = tokio::net::TcpListener::bind(config.bind_addr).await?;
     info!(addr = %config.bind_addr, "synergos-control listening");
