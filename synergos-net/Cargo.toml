@@ -35,7 +35,10 @@ aes-gcm = "0.10"
 argon2 = "0.5"
 
 # DNS
-hickory-resolver = { version = "0.24", features = ["dns-over-https-rustls"] }
+# 0.24 系は rustls 0.21 / rustls-webpki 0.101 経由で RUSTSEC-2026-0098/0099/0104 に、
+# 0.25 系は hickory-proto の RUSTSEC-2026-0118/0119 に該当するため 0.26 系を使う。
+# `https-ring` は旧 `dns-over-https-rustls` 相当 (rustls 0.23 + ring プロバイダの DoH)。
+hickory-resolver = { version = "0.26", features = ["https-ring"] }
 
 # WebSocket Relay (fallback transport)
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
