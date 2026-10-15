@@ -566,10 +566,12 @@ impl HistoryStore {
             backend.as_ref(),
             &rotation_cfg.backend,
             &mut index,
-            rotation_cfg.offload_after_days,
-            now,
-            &protected,
-            false,
+            rotation::RotationParams {
+                offload_after_days: rotation_cfg.offload_after_days,
+                now_ms: now,
+                protected: &protected,
+                dry_run: false,
+            },
         )
         .await
     }

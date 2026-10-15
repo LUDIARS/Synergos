@@ -137,24 +137,39 @@ pub fn select_candidates(
     out
 }
 
-/// ローテーションを実行する。`dry_run = true` なら候補一覧を返すだけで何も変更しない。
+/// [`rotate`] の実行条件 (退避候補の選定ポリシーと dry-run 指定)。
+#[derive(Debug, Clone, Copy)]
+pub struct RotationParams<'a> {
+    /// `stored_at` がこの日数より古い版を退避候補にする。
+    pub offload_after_days: u64,
+    /// 判定の基準時刻 (epoch ms)。
+    pub now_ms: u64,
+    /// 退避対象から除外する `(rel, version)` (最新版・タグ保護など)。
+    pub protected: &'a [(String, u64)],
+    /// `true` なら候補一覧を返すだけで何も変更しない。
+    pub dry_run: bool,
+}
+
+/// ローテーションを実行する。`params.dry_run = true` なら候補一覧を返すだけで何も変更しない。
 pub async fn rotate(
     store_dir: &Path,
     project_id: &str,
     backend: &dyn RotationBackend,
     backend_config: &RotationBackendConfig,
     index: &mut HistoryIndex,
-    offload_after_days: u64,
-    now_ms: u64,
-    protected: &[(String, u64)],
-    dry_run: bool,
+    params: RotationParams<'_>,
 ) -> io::Result<RotationReport> {
-    let candidates = select_candidates(index, offload_after_days, now_ms, protected);
+    let candidates = select_candidates(
+        index,
+        params.offload_after_days,
+        params.now_ms,
+        params.protected,
+    );
     let mut report = RotationReport {
         candidates: candidates.clone(),
         ..RotationReport::default()
     };
-    if dry_run {
+    if params.dry_run {
         return Ok(report);
     }
 
@@ -553,10 +568,12 @@ mod tests {
             &WrongSizeBackend,
             &config,
             &mut index,
-            1,
-            2 * 24 * 60 * 60 * 1000,
-            &[],
-            false,
+            RotationParams {
+                offload_after_days: 1,
+                now_ms: 2 * 24 * 60 * 60 * 1000,
+                protected: &[],
+                dry_run: false,
+            },
         )
         .await
         .unwrap();

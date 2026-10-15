@@ -346,7 +346,7 @@ fn default_rotation_interval_hours() -> u64 {
 }
 
 /// `[history.rotation.backend]` — 退避先。`type` タグで 3 種を選ぶ。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RotationBackendConfig {
     /// AWS S3 (または互換 API)。認証は環境変数 / workload identity — 設定ファイルに鍵を書かない。
@@ -365,13 +365,8 @@ pub enum RotationBackendConfig {
     },
     /// 未設定 (既定)。`rotation.enabled = true` のときはこのままだと validate が失敗する。
     #[serde(other)]
+    #[default]
     Unset,
-}
-
-impl Default for RotationBackendConfig {
-    fn default() -> Self {
-        Self::Unset
-    }
 }
 
 impl RotationBackendConfig {

@@ -285,7 +285,7 @@ pub async fn all_pins(store_dir: &Path, project_id: &str) -> io::Result<Vec<(Str
             continue;
         }
         validate_tag(&tag, project_id, stem)?;
-        out.extend(tag.pins.into_iter());
+        out.extend(tag.pins);
     }
     Ok(out)
 }

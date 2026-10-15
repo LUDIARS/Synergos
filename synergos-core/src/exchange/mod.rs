@@ -444,9 +444,7 @@ impl Exchange {
         version: u64,
     ) -> Option<PinnedFetch> {
         let key = (project_id.to_string(), file_id.clone());
-        let Some(pin) = self.pinned_fetches.get(&key).map(|pin| *pin) else {
-            return None;
-        };
+        let pin = self.pinned_fetches.get(&key).map(|pin| *pin)?;
         if pin.expires_at < now_ms() {
             self.unpin_fetch_version(project_id, file_id, pin.version);
             return None;
