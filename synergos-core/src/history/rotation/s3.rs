@@ -54,10 +54,7 @@ impl S3Backend {
         if self.prefix.is_empty() {
             ObjectPath::from(key)
         } else {
-            ObjectPath::from(format!(
-                "{}/{key}",
-                self.prefix.trim_end_matches('/')
-            ))
+            ObjectPath::from(format!("{}/{key}", self.prefix.trim_end_matches('/')))
         }
     }
 }
@@ -68,7 +65,10 @@ impl RotationBackend for S3Backend {
         let store = self.store()?;
         let bytes = tokio::fs::read(path).await?;
         store
-            .put(&self.object_path(key), PutPayload::from_bytes(Bytes::from(bytes)))
+            .put(
+                &self.object_path(key),
+                PutPayload::from_bytes(Bytes::from(bytes)),
+            )
             .await
             .map_err(|error| io::Error::other(format!("s3 put failed: {error}")))?;
         Ok(())
@@ -127,10 +127,7 @@ mod tests {
     #[test]
     fn object_path_applies_prefix() {
         let backend = S3Backend::new("bucket".into(), "myteam/".into(), "ap-northeast-1".into());
-        assert_eq!(
-            backend.object_path("aa/bb").to_string(),
-            "myteam/aa/bb"
-        );
+        assert_eq!(backend.object_path("aa/bb").to_string(), "myteam/aa/bb");
         let no_prefix = S3Backend::new("bucket".into(), String::new(), "ap-northeast-1".into());
         assert_eq!(no_prefix.object_path("aa/bb").to_string(), "aa/bb");
     }

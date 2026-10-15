@@ -135,9 +135,7 @@ fn validate_tag(tag: &Tag, project_id: &str, expected_name: &str) -> io::Result<
         ));
     }
     if tag.pins.iter().any(|(rel, version)| {
-        crate::manifest::safe_rel_to_local(rel).is_none()
-            || *version == 0
-            || *version == u64::MAX
+        crate::manifest::safe_rel_to_local(rel).is_none() || *version == 0 || *version == u64::MAX
     }) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -157,9 +155,7 @@ pub async fn save(
 ) -> io::Result<Tag> {
     let _ = tag_path(store_dir, name)?;
     if pins.iter().any(|(rel, version)| {
-        crate::manifest::safe_rel_to_local(rel).is_none()
-            || *version == 0
-            || *version == u64::MAX
+        crate::manifest::safe_rel_to_local(rel).is_none() || *version == 0 || *version == u64::MAX
     }) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,

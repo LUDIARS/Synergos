@@ -39,7 +39,9 @@ pub(super) fn OrgForm(
             return;
         }
         if member_list.iter().any(|member| !member.contains('@')) {
-            error.set(Some("メンバーはメールアドレスで入力してください".to_string()));
+            error.set(Some(
+                "メンバーはメールアドレスで入力してください".to_string(),
+            ));
             return;
         }
 

@@ -100,9 +100,8 @@ pub fn object_key(project_id: &str, hash: &str) -> String {
 
 fn is_valid_object_key(key: &str) -> bool {
     let mut segments = key.split('/');
-    let valid_segment = |segment: &str| {
-        segment.len() == 64 && segment.bytes().all(|byte| byte.is_ascii_hexdigit())
-    };
+    let valid_segment =
+        |segment: &str| segment.len() == 64 && segment.bytes().all(|byte| byte.is_ascii_hexdigit());
     matches!(
         (segments.next(), segments.next(), segments.next()),
         (Some(project), Some(object), None) if valid_segment(project) && valid_segment(object)
@@ -242,10 +241,8 @@ pub async fn rotate(
             });
             continue;
         }
-        let verification_tmp = obj.with_extension(format!(
-            "rotation-verify-{}.tmp",
-            uuid::Uuid::new_v4()
-        ));
+        let verification_tmp =
+            obj.with_extension(format!("rotation-verify-{}.tmp", uuid::Uuid::new_v4()));
         let downloaded = backend.get(&key, &verification_tmp).await;
         let integrity = match downloaded {
             Ok(()) => validate_fetched(&verification_tmp, &entry).await,
@@ -438,14 +435,15 @@ pub async fn fetch(
 
     // 取り戻しは move semantics。削除に失敗した場合は offloaded 参照を残し、
     // 次回 fetch でローカル実体を再利用して delete から再試行する。
-    let has_other_offloaded_reference = index.iter_all().any(|(other_rel, other_version, other)| {
-        (other_rel != rel || other_version != version)
-            && other.offloaded.as_ref().is_some_and(|other_offloaded| {
-                other_offloaded.key == offloaded.key
-                    && other_offloaded.config == offloaded.config
-                    && other_offloaded.backend == offloaded.backend
-            })
-    });
+    let has_other_offloaded_reference =
+        index.iter_all().any(|(other_rel, other_version, other)| {
+            (other_rel != rel || other_version != version)
+                && other.offloaded.as_ref().is_some_and(|other_offloaded| {
+                    other_offloaded.key == offloaded.key
+                        && other_offloaded.config == offloaded.config
+                        && other_offloaded.backend == offloaded.backend
+                })
+        });
     if !has_other_offloaded_reference {
         backend.delete(&offloaded.key).await.map_err(|error| {
             io::Error::other(format!(
@@ -523,13 +521,13 @@ mod tests {
 
     #[tokio::test]
     async fn rotate_does_not_delete_local_object_when_uploaded_size_is_wrong() {
-        let store_dir = std::env::temp_dir().join(format!(
-            "synergos-rotation-size-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let store_dir =
+            std::env::temp_dir().join(format!("synergos-rotation-size-{}", uuid::Uuid::new_v4()));
         let hash = "a".repeat(64);
         let obj = object_path(&store_dir, &hash);
-        tokio::fs::create_dir_all(obj.parent().unwrap()).await.unwrap();
+        tokio::fs::create_dir_all(obj.parent().unwrap())
+            .await
+            .unwrap();
         tokio::fs::write(&obj, b"local data").await.unwrap();
         let mut index = HistoryIndex::new("p");
         index.insert(
@@ -570,4 +568,3 @@ mod tests {
         let _ = tokio::fs::remove_dir_all(&store_dir).await;
     }
 }
-

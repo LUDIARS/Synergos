@@ -115,7 +115,8 @@ mod tests {
 
     #[tokio::test]
     async fn put_get_exists_delete_roundtrip() {
-        let root = std::env::temp_dir().join(format!("synergos-rot-local-{}", uuid::Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("synergos-rot-local-{}", uuid::Uuid::new_v4()));
         tokio::fs::create_dir_all(&root).await.unwrap();
         let backend = LocalDirBackend::new(root.clone());
 
@@ -142,7 +143,8 @@ mod tests {
 
     #[tokio::test]
     async fn unreachable_root_returns_clear_error() {
-        let missing = std::env::temp_dir().join(format!("synergos-rot-missing-{}", uuid::Uuid::new_v4()));
+        let missing =
+            std::env::temp_dir().join(format!("synergos-rot-missing-{}", uuid::Uuid::new_v4()));
         let backend = LocalDirBackend::new(missing);
         let src = std::env::temp_dir().join(format!("synergos-rot-src-{}", uuid::Uuid::new_v4()));
         tokio::fs::write(&src, b"x").await.unwrap();
@@ -154,13 +156,20 @@ mod tests {
 
     #[tokio::test]
     async fn unsafe_key_is_rejected() {
-        let root = std::env::temp_dir().join(format!("synergos-rot-local-{}", uuid::Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("synergos-rot-local-{}", uuid::Uuid::new_v4()));
         tokio::fs::create_dir_all(&root).await.unwrap();
         let backend = LocalDirBackend::new(root.clone());
         let src = root.join("src.bin");
         tokio::fs::write(&src, b"x").await.unwrap();
 
-        for bad in ["../escape", "a/../b", "a//b", "aa\\..\\escape", "C:\\escape"] {
+        for bad in [
+            "../escape",
+            "a/../b",
+            "a//b",
+            "aa\\..\\escape",
+            "C:\\escape",
+        ] {
             assert!(backend.put(bad, &src).await.is_err());
         }
         let _ = tokio::fs::remove_dir_all(&root).await;

@@ -76,10 +76,14 @@ impl GdriveBackend {
         let path = shellexpand_home(&self.credentials_file);
         let text = tokio::fs::read_to_string(&path).await.map_err(|error| {
             // 個人名を含み得る絶対パスは IPC 応答や daemon log に流さない。
-            io::Error::new(error.kind(), format!("gdrive credentials_file unreadable: {error}"))
+            io::Error::new(
+                error.kind(),
+                format!("gdrive credentials_file unreadable: {error}"),
+            )
         })?;
-        serde_json::from_str(&text)
-            .map_err(|error| io::Error::other(format!("gdrive credentials_file invalid JSON: {error}")))
+        serde_json::from_str(&text).map_err(|error| {
+            io::Error::other(format!("gdrive credentials_file invalid JSON: {error}"))
+        })
     }
 
     /// service account の JWT assertion を組み立て、OAuth2 token endpoint と交換する。
@@ -104,8 +108,9 @@ impl GdriveBackend {
         };
         let encoding_key = EncodingKey::from_rsa_pem(key.private_key.as_bytes())
             .map_err(|error| io::Error::other(format!("gdrive private_key invalid: {error}")))?;
-        let assertion = jsonwebtoken::encode(&Header::new(Algorithm::RS256), &claims, &encoding_key)
-            .map_err(|error| io::Error::other(format!("gdrive JWT signing failed: {error}")))?;
+        let assertion =
+            jsonwebtoken::encode(&Header::new(Algorithm::RS256), &claims, &encoding_key)
+                .map_err(|error| io::Error::other(format!("gdrive JWT signing failed: {error}")))?;
 
         let client = gdrive_client()?;
         let resp = client
@@ -141,7 +146,11 @@ impl GdriveBackend {
         let resp = client
             .get(FILES_URL)
             .bearer_auth(token)
-            .query(&[("q", query.as_str()), ("fields", "files(id,size)"), ("spaces", "drive")])
+            .query(&[
+                ("q", query.as_str()),
+                ("fields", "files(id,size)"),
+                ("spaces", "drive"),
+            ])
             .send()
             .await
             .map_err(|error| io::Error::other(format!("gdrive files.list failed: {error}")))?;
@@ -151,10 +160,9 @@ impl GdriveBackend {
                 "gdrive files.list returned {status}"
             )));
         }
-        let listed: FileListResponse = resp
-            .json()
-            .await
-            .map_err(|error| io::Error::other(format!("gdrive files.list response invalid: {error}")))?;
+        let listed: FileListResponse = resp.json().await.map_err(|error| {
+            io::Error::other(format!("gdrive files.list response invalid: {error}"))
+        })?;
         Ok(listed.files.into_iter().next())
     }
 }
@@ -210,7 +218,9 @@ impl RotationBackend for GdriveBackend {
                 .body(bytes)
                 .send()
                 .await
-                .map_err(|error| io::Error::other(format!("gdrive update upload failed: {error}")))?;
+                .map_err(|error| {
+                    io::Error::other(format!("gdrive update upload failed: {error}"))
+                })?;
             if !resp.status().is_success() {
                 let status = resp.status();
                 return Err(io::Error::other(format!(
@@ -227,9 +237,15 @@ impl RotationBackend for GdriveBackend {
         });
         let boundary = format!("synergos-{}", uuid::Uuid::new_v4());
         let mut body = Vec::new();
-        body.extend_from_slice(format!("--{boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n").as_bytes());
+        body.extend_from_slice(
+            format!("--{boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n")
+                .as_bytes(),
+        );
         body.extend_from_slice(metadata.to_string().as_bytes());
-        body.extend_from_slice(format!("\r\n--{boundary}\r\nContent-Type: application/octet-stream\r\n\r\n").as_bytes());
+        body.extend_from_slice(
+            format!("\r\n--{boundary}\r\nContent-Type: application/octet-stream\r\n\r\n")
+                .as_bytes(),
+        );
         body.extend_from_slice(&bytes);
         body.extend_from_slice(format!("\r\n--{boundary}--").as_bytes());
 
@@ -244,7 +260,9 @@ impl RotationBackend for GdriveBackend {
             .body(body)
             .send()
             .await
-            .map_err(|error| io::Error::other(format!("gdrive multipart upload failed: {error}")))?;
+            .map_err(|error| {
+                io::Error::other(format!("gdrive multipart upload failed: {error}"))
+            })?;
         if !resp.status().is_success() {
             let status = resp.status();
             return Err(io::Error::other(format!(
@@ -276,10 +294,9 @@ impl RotationBackend for GdriveBackend {
                 "gdrive download returned {status}"
             )));
         }
-        let bytes = resp
-            .bytes()
-            .await
-            .map_err(|error| io::Error::other(format!("gdrive download body read failed: {error}")))?;
+        let bytes = resp.bytes().await.map_err(|error| {
+            io::Error::other(format!("gdrive download body read failed: {error}"))
+        })?;
         tokio::fs::write(dest, &bytes).await?;
         Ok(())
     }
@@ -318,9 +335,7 @@ impl RotationBackend for GdriveBackend {
             .map_err(|error| io::Error::other(format!("gdrive delete failed: {error}")))?;
         if !resp.status().is_success() && resp.status().as_u16() != 404 {
             let status = resp.status();
-            return Err(io::Error::other(format!(
-                "gdrive delete returned {status}"
-            )));
+            return Err(io::Error::other(format!("gdrive delete returned {status}")));
         }
         Ok(())
     }

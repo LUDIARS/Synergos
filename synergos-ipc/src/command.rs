@@ -271,10 +271,7 @@ impl IpcCommand {
                 || path.starts_with(".synergos/")
                 || path.chars().any(char::is_control)
                 || path.split('/').any(|segment| {
-                    segment.is_empty()
-                        || segment == "."
-                        || segment == ".."
-                        || segment.contains(':')
+                    segment.is_empty() || segment == "." || segment == ".." || segment.contains(':')
                 })
             {
                 return Err(format!(

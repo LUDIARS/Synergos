@@ -345,7 +345,8 @@ impl Daemon {
         // 外部ストレージローテーション (spec: archive-rotation)。
         // `[history.rotation] enabled = true` かつ `interval_hours > 0` のときだけ起動する。
         // `interval_hours = 0` は「daemon 内タイマーは使わず CLI (`history rotate`) 手動のみ」。
-        let rotation_task = spawn_rotation_timer(self.ctx.clone(), self.ctx.shutdown_tx.subscribe());
+        let rotation_task =
+            spawn_rotation_timer(self.ctx.clone(), self.ctx.shutdown_tx.subscribe());
 
         // Gossipsub ハートビート
         let heartbeat_task = spawn_gossip_heartbeat(

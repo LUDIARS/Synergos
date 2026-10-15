@@ -115,22 +115,22 @@ impl HistoryIndex {
         let path = store_dir.join(INDEX_FILE);
         match tokio::fs::read(&path).await {
             Ok(bytes) => match serde_json::from_slice::<HistoryIndex>(&bytes) {
-                Ok(index) if index.format != 1 || index.project_id != project_id => Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!(
+                Ok(index) if index.format != 1 || index.project_id != project_id => {
+                    Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
                         "history index belongs to project {} (format {}), expected {project_id}",
                         index.project_id, index.format
                     ),
-                )),
+                    ))
+                }
                 Ok(index)
-                    if !index
-                        .iter_all()
-                        .all(|(rel, version, entry)| {
-                            crate::manifest::safe_rel_to_local(rel).is_some()
-                                && version > 0
-                                && version < u64::MAX
-                                && is_valid_object_hash(&entry.hash)
-                        }) =>
+                    if !index.iter_all().all(|(rel, version, entry)| {
+                        crate::manifest::safe_rel_to_local(rel).is_some()
+                            && version > 0
+                            && version < u64::MAX
+                            && is_valid_object_hash(&entry.hash)
+                    }) =>
                 {
                     tracing::warn!(
                         "history index {} contains an invalid object hash; rebuilding from sidecars",
@@ -316,7 +316,9 @@ pub async fn rebuild_from_sidecars(store_dir: &Path, project_id: &str) -> io::Re
             if !meta.project_id.is_empty() && meta.project_id != project_id {
                 continue;
             }
-            let object_exists = tokio::fs::metadata(object_path(store_dir, hash)).await.is_ok();
+            let object_exists = tokio::fs::metadata(object_path(store_dir, hash))
+                .await
+                .is_ok();
             for r in meta.refs {
                 if crate::manifest::safe_rel_to_local(&r.rel).is_none()
                     || r.version == 0
