@@ -16,6 +16,8 @@ use synergos_net::types::{PeerId, Route, TopicId};
 
 use crate::event_bus::{PeerConnectedEvent, PeerDisconnectedEvent, SharedEventBus};
 
+mod connection_observer;
+
 // ── 型定義 ──
 
 /// ピアの接続状態
@@ -125,6 +127,9 @@ pub struct PresenceService {
     gossip: Option<Arc<GossipNode>>,
     /// relay-only モードフラグ。true なら自ノードの Direct route を広告から外す。
     is_relay_only: bool,
+    /// 切断時に張り直す先 (peer_id → `/peer-info` URL)。`peer add-url` /
+    /// 招待 join / `bootstrap_urls` で接続したピアだけが載る (B5 再接続)。
+    reconnect_urls: DashMap<PeerId, String>,
 }
 
 impl PresenceService {
@@ -160,6 +165,7 @@ impl PresenceService {
             dht,
             gossip,
             is_relay_only,
+            reconnect_urls: DashMap::new(),
         }
     }
 
@@ -314,19 +320,9 @@ impl NodeRegistry for PresenceService {
         let mut local = self.local_node.write().await;
         *local = Some(registration.clone());
 
-        // 自分自身も nodes テーブルに登録 (フィルタ済み endpoints)
-        let node = RegisteredNode {
-            peer_id: registration.peer_id.clone(),
-            display_name: registration.display_name.clone(),
-            endpoints: registration.endpoints.clone(),
-            state: PeerState::Connected,
-            rtt_ms: Some(0),
-            project_ids: registration.project_ids.clone(),
-            bandwidth_bps: 0,
-            last_seen: Instant::now(),
-            synergos_version: registration.synergos_version.clone(),
-        };
-        self.nodes.insert(registration.peer_id.clone(), node);
+        // 自ノードは nodes テーブル (= `peer list` / 接続数の集計元) に入れない。
+        // 入れると自分が相手ピアとして一覧・接続数に数えられる。
+        drop(local);
 
         // DHT に announce (フィルタ済み)
         self.dht_announce(&registration).await;
@@ -407,6 +403,8 @@ impl NodeRegistry for PresenceService {
     }
 
     async fn unregister_node(&self, peer_id: &PeerId) -> Result<(), NodeRegistryError> {
+        // 明示的に外したピアへは自動で張り直さない
+        self.reconnect_urls.remove(peer_id);
         let removed = self.nodes.remove(peer_id);
 
         match removed {

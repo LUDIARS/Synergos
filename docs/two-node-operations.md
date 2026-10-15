@@ -13,7 +13,7 @@ LAN 内 (家 / オフィス) と、インターネット越し (Cloudflare Mesh)
 
 | 事項 | 内容 |
 |---|---|
-| **同期は publish 起点** | 自動監視はしない。A で `project publish <id> <files...>` した瞬間に B へ流れる。ファイル単位・全体転送 (差分転送は未実装、[versioning-design.md](versioning-design.md)) |
+| **同期は publish 起点** | 自動監視はしない。A で `project publish <id> <files...>` (または変更分をまとめて `project publish <id> --all`) した瞬間に B へ流れる。ファイル単位・全体転送 (差分転送は未実装、[versioning-design.md](versioning-design.md)) |
 | **削除 / リネームは伝搬しない** | 消したいファイルは B でも手で消す (P1 残作業) |
 | **接続の向きは B → A** | B が A の `/peer-info` を GET → QUIC で A に接続する。**A 側だけ**が inbound を受ける必要がある (QUIC/UDP + peer-info/TCP)。接続後は双方向なので B → A の publish も流れる |
 | **AWS/Cloudflare Tunnel 経由は不可** | Tunnel は UDP を通さない (SETUP.md)。インターネット越しは Cloudflare Mesh か、A に直接到達できる IP (VPS / ポート開放) が要る |
@@ -168,6 +168,26 @@ synergos-core transfer list
 
 同期の台帳はプロジェクトルートの `.synergos/manifest.json` (両側) に残る。
 再起動しても引き継がれる。
+
+ファイルを 1 つずつ指定しなくてよい。作業ツリーと台帳の差は `project status` で見られ、
+変更・新規のファイルは `project publish --all` でまとめて流せる。
+
+```bash
+synergos-core project status myproj        # Modified / Untracked / Missing を一覧
+synergos-core project publish myproj --all # Modified + Untracked を publish
+synergos-core project checkout myproj      # Missing (手で消した等) を取り直す
+```
+
+`.synergos/` `.git/` `.synergosignore` は常に対象外。他に外したいものは
+プロジェクトルートの `.synergosignore` に 1 行 1 パターンで書く
+(`*` は `/` を跨がない、`**` は跨ぐ、
+`build` のようにディレクトリ名だけ書くと配下すべてを除外、`#` 以降の行はコメント)。
+削除は伝搬しない (台帳に残り、`status` では Missing と出る)。
+
+接続は張りっぱなしで良い。daemon は QUIC の keep-alive をアイドルタイムアウトの
+1/3 間隔 (既定 10 秒) で送り、切れたら相手を `Disconnected` にして、
+`invite --url` / `peer add-url` / `bootstrap_urls` で繋いだ相手へは 15 秒ごとに張り直す。
+接続を受けた側の `peer list` にも相手が出る。
 
 ---
 

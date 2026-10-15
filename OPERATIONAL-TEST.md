@@ -193,7 +193,7 @@ dd if=/dev/urandom of=C:\synergos-test\A\big-2.bin bs=1M count=500        # 500M
 for i in {1..50}; do dd if=/dev/urandom of=C:\synergos-test\A\small-$i.txt bs=1K count=10; done
 
 # A で publish
-synergos-core project publish myproj
+synergos-core project publish myproj --all
 ```
 
 **確認** (B, C, D で):
@@ -226,7 +226,7 @@ $fs.Write($bytes, 0, $bytes.Length)
 $fs.Close()
 
 # A で更新通知
-synergos-core project publish myproj
+synergos-core project publish myproj --all
 ```
 
 **確認** (B, C, D で並行観測):
@@ -257,7 +257,7 @@ synergos-core stop   # または Ctrl+C
 
 # C: A 不在中にファイル更新
 echo "modified by C" >> /home/syn/synergos-test/C/notes.txt
-synergos-core project publish myproj
+synergos-core project publish myproj --all
 # → B と D には伝搬する (T4 と同じ経路)
 
 # A: 数分後に復帰
@@ -280,10 +280,10 @@ synergos-core start
 
 ```bash
 # A
-echo "line from A" >> shared.txt && synergos-core project publish myproj
+echo "line from A" >> shared.txt && synergos-core project publish myproj --all
 
 # B (同じタイミングで)
-echo "line from B" >> shared.txt && synergos-core project publish myproj
+echo "line from B" >> shared.txt && synergos-core project publish myproj --all
 
 # C, D も同様
 ```

@@ -345,7 +345,8 @@ impl Daemon {
         // 外部ストレージローテーション (spec: archive-rotation)。
         // `[history.rotation] enabled = true` かつ `interval_hours > 0` のときだけ起動する。
         // `interval_hours = 0` は「daemon 内タイマーは使わず CLI (`history rotate`) 手動のみ」。
-        let rotation_task = spawn_rotation_timer(self.ctx.clone(), self.ctx.shutdown_tx.subscribe());
+        let rotation_task =
+            spawn_rotation_timer(self.ctx.clone(), self.ctx.shutdown_tx.subscribe());
 
         // Gossipsub ハートビート
         let heartbeat_task = spawn_gossip_heartbeat(
@@ -360,6 +361,32 @@ impl Daemon {
             self.ctx.clone(),
             self.ctx.shutdown_tx.subscribe(),
         );
+
+        // 発信接続にも同じ振り分けを張る (B3)。bootstrap_urls の接続より先に
+        // 購読しておく必要があるので、bootstrap_task より前に起動する。
+        let outbound_dispatch_task = crate::peer_link::spawn_outbound_dispatch(
+            self.net.clone(),
+            self.ctx.clone(),
+            self.ctx.shutdown_tx.subscribe(),
+        );
+
+        // 切断したピアへの張り直し (B5)
+        let reconnect_task = crate::peer_link::spawn_reconnect_loop(
+            self.ctx.clone(),
+            self.ctx.shutdown_tx.subscribe(),
+        );
+
+        // 自ノードを DHT / gossip へ告知する (B4)。shutdown 時の unregister_self と対。
+        let self_registration = crate::presence::NodeRegistration {
+            peer_id: self.net.local_peer_id.clone(),
+            display_name: self.net.local_peer_id.to_string(),
+            endpoints: vec![],
+            project_ids: crate::peer_link::open_project_ids(&self.ctx),
+            synergos_version: env!("CARGO_PKG_VERSION").to_string(),
+        };
+        if let Err(e) = self.ctx.presence.register_self(self_registration).await {
+            tracing::warn!("register_self failed: {e}");
+        }
 
         // Gossip サブスクライバ: FileWant / FileOffer を Exchange に配線する。
         // これで Synergos 既存の gossip チャネルだけで自動更新がドライブする。
@@ -467,16 +494,11 @@ impl Daemon {
                                 project_ids,
                                 synergos_version: result.synergos_version,
                             };
-                            if let Err(e) = presence.register_node(registration).await {
+                            if let Err(e) = presence.register_or_merge(registration).await {
                                 tracing::warn!("bootstrap {url}: register_node failed: {e}");
                                 continue;
                             }
-                            let _ = presence
-                                .update_node_state(
-                                    &result.peer_id,
-                                    crate::presence::PeerState::Connected,
-                                )
-                                .await;
+                            presence.remember_reconnect_url(&result.peer_id, &url);
                         }
                         Err(e) => {
                             tracing::warn!("bootstrap {url} failed: {e}");
@@ -499,6 +521,8 @@ impl Daemon {
         }
         heartbeat_task.abort();
         quic_accept_task.abort();
+        outbound_dispatch_task.abort();
+        reconnect_task.abort();
         gossip_sub_task.abort();
         gossip_fanout_task.abort();
         catalog_sync_task.abort();
@@ -726,25 +750,7 @@ fn spawn_quic_accept_loop(
                 accepted = net.quic.accept() => {
                     match accepted {
                         Ok(Some(acc)) => {
-                            let dht = net.dht.clone();
-                            let gossip = net.gossip.clone();
-                            let exchange = ctx.exchange.clone();
-                            let content_store = ctx.content_store.clone();
-                            let sender = acc.peer_id.clone();
-                            let connection = acc.connection;
-                            let event_bus = ctx.event_bus.clone();
-                            tokio::spawn(async move {
-                                dispatch_peer_streams(
-                                    connection,
-                                    sender,
-                                    dht,
-                                    gossip,
-                                    exchange,
-                                    content_store,
-                                    event_bus,
-                                )
-                                .await;
-                            });
+                            crate::peer_link::spawn_peer_connection(net.clone(), ctx.clone(), acc);
                         }
                         Ok(None) => {
                             tracing::debug!("quic accept returned None (endpoint closed); exiting loop");
@@ -763,7 +769,7 @@ fn spawn_quic_accept_loop(
 
 /// 1 つの QUIC コネクションから bidi ストリームをループで受け、先頭 magic で
 /// DHT / Gossip / Transfer / Bitswap に振り分ける。コネクションが閉じられたらループを抜ける。
-async fn dispatch_peer_streams(
+pub(crate) async fn dispatch_peer_streams(
     connection: quinn::Connection,
     sender: PeerId,
     dht: Arc<DhtNode>,
