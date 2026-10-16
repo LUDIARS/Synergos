@@ -1,0 +1,548 @@
+{
+  "coverage_notes": "Lens: game-studio workflow gaps vs Perforce / Unity VCS (Plastic) / Git LFS. Read all 11 available maps (sy-transport, sy-discovery, sy-content, sy-core-versioning, sy-history-hooks-ipc, sy-control-custody, cu-auth-access, cu-storage-transfer, cu-versioning-core, cu-workflow-infra, cu-docs) and the 4 research notes in full. The map sy-clients-docs.md was absent at start and still absent after one retry following the other 11 maps, so the client/docs side (Tauri GUI, Dioxus admin UI, ars plugin, CLI, docs) was verified directly from source instead: ars-plugin-synergos/src/{lib,bridge}.rs, synergos-tauri/frontend/src/{pages/Dashboard.tsx,components/PublishModal.tsx,lib/tauri.ts}, synergos-gui/src/ui/mod.rs, synergos-core/src/cli.rs, docs/versioning-design.md, docs/hooks.md, spec/feature/opaque-custody.md. Every file:line quoted below was opened in this session; map claims were re-checked and in several places tightened (e.g. SyncMode::Selective can never carry patterns because project.rs:55 parses 'selective' into an empty pattern list). Capabilities mapped: exclusive locking (GW-01), auto-pull/dirty-tree safety (GW-02), branches/streams/release composition (GW-03), the Synergos-vs-Curare version split (GW-04), shelving/drafts (GW-05), partial workspaces (GW-06), engine/DCC integration (GW-07), visual diff/preview (GW-08), artist UX incl. clone naming (GW-09), offline/reconnection (GW-10), build/cook artifacts and DDC (GW-11), review workflow (GW-12), vendor magic links/assignments (GW-13), text-asset merge and manifest.json merge conflicts (GW-14), rename/move/delete (GW-15), migration from P4/SVN/LFS (GW-16), scale ceilings (GW-17), per-path policy/typemap (GW-18), OFPA many-small-files (GW-19). Not covered by this lens (left to the security/transfer finders): HLO1 replay, inbound project ACL, custody token design, CDC/chunking economics. Industry facts come from scratchpad/research/vcs-game-ai.md unless another note is named; several of those vendor claims are marked unverified in the note itself and should be re-read before numbers are copied into a spec.",
+  "findings": [
+    {
+      "id": "AGD-GW-01",
+      "title": "No exclusive checkout / lock for unmergeable binaries in either repo; lost updates are undetectable",
+      "theme": "ai-game",
+      "repo": "both",
+      "area": "Synergos exchange/manifest + Curare access policy",
+      "severity": "high",
+      "kind": "missing-feature",
+      "evidence": [
+        {"file_line": "/home/user/Synergos/docs/versioning-design.md:13", "quote": "自動マージはしない (バイナリはマージ不能)。退避・選択 UI とロック機構は Phase 3"},
+        {"file_line": "/home/user/Synergos/docs/versioning-design.md:337-339", "quote": "**防止 (任意)**: `synergos project lock <id> <path>` — git-LFS の file locking 相当。... 少人数チームでは「Slack で一言」で足りることが多いので、Phase 3 で必要になってから"},
+        {"file_line": "/home/user/Synergos/synergos-ipc/src/command.rs (grep -i lock)", "quote": "No matches found — there is no Lock/Unlock IpcCommand variant"},
+        {"file_line": "/home/user/Synergos/synergos-core/src/manifest.rs:207-211", "quote": "e.version = e.version.saturating_add(1).max(floor.saturating_add(1));  // no parent hash, no lock check"},
+        {"file_line": "/home/user/Synergos/synergos-core/src/daemon.rs:957-960", "quote": "let content_conflict = local.as_ref().is_some_and(|record| { record.version == version && (record.file_size != size || record.crc != crc) });"},
+        {"file_line": "/home/user/Curare/curare-server/src/access/policy.ts:2", "quote": "export const permissions = ['view', 'save', 'submit', 'download', 'review', 'release', 'manage'] as const;  // no 'lock' / 'checkout' verb; src/routes has no lock route"}
+      ],
+      "scenario": "Artist A and artist B both open assets/hero.psd (v2 on every node). A publishes v3 at 10:00; B, who already had v2 and never saw a lock, publishes her own edit at 10:05: bump_at_least yields max(2+1, floor+1)=3 on B's node only if v3 has not arrived yet, otherwise 4. Either B's push is silently refused as 'conflicting content for existing version' (exchange/mod.rs:780) and logged at debug, or it becomes v4 and overwrites A's work on every peer. Nothing warned either artist before they spent the hours. Curare has no 'who is editing' signal at all, so the same happens at submission time.",
+      "impact_ai_game": "Exclusive open (+l) via typemap is the single feature every P4 studio relies on for .psd/.mb/.uasset/.unity; Unity Smart Locks and Git LFS /locks exist for the same reason. Without it the platform cannot replace Perforce for any team larger than the 'Slack で一言' assumption. For AI pipelines, a generation job that rewrites a dataset shard while a human edits the same file has the same lost-update problem.",
+      "current_state": "Synergos: optimistic per-path u64 counter, conflict detected only for equal-version/different-content, no parent hash, no lock command, Phase 3 deferred. Curare: 7-verb grant model with no lock state, no lock API, no lock visibility in the Web UI. Neither side has a lock policy by path pattern.",
+      "proposed_redesign": "Introduce a lock service with three layers. (1) Policy: a per-project `.synergos/policy.toml` (also mirrored as a Curare project setting) with typemap-style rules `[[rule]] match=[\"**/*.psd\",\"**/*.uasset\"] lock=\"exclusive\"|\"soft\"|\"none\"`, applied at add time like P4 typemap. (2) State: Curare owns the authoritative `asset_locks` table `{logical_asset_id, resource_id, path, holder_user_id, device_id, destination_ref, state ∈ {held, retained, released}, acquired_at, expires_at}` exposed as an LFS-compatible API `POST /locks`, `GET /locks?path|refspec`, `POST /locks/verify`, `POST /locks/:id/unlock {force}` so Anchorpoint/Unreal/Unity LFS plugins work unchanged; Synergos gossips a signed `LockAnnounce{project, path, holder_peer, lock_id, exp}` and the publish path (ipc_server PublishUpdate) refuses to bump a locked path unless the local identity holds the lock. (3) Semantics: adopt Unity Smart-Lock 'destination branch + Retained' so a lock survives until the change lands on the destination ref; admin force-release writes an audit row and warns the next checker-out. Add `parent_hash` (BLAKE3 of the previous version) to FileOffer/TransferHeader/ManifestEntry so forks are detected even for soft-locked files; materialize the loser as `<name>.conflict-<peer>-v<N>` instead of dropping it. Client UX: set the read-only bit on lockable files (SVN needs-lock trick). 4軸: AI学習量=中 (LFS locking JSON + typemap are documented formats, no novel algorithm); 作業コスト=M (table+4 routes in Cu, one gossip message + publish gate + conflict-copy in Sy); 解決度=高 (closes lost-update for binaries, enables plugin compatibility); 主目的との一致度=高 (core promise 'アセットの競合が起きにくい' listed as Perforce's strength in spec/plan/competitive-analysis.md:23).",
+      "alternatives": [
+        "Soft locks only (Diversion model: prompt the second editor, allow override) — lower friction, but does not prevent the overwrite and gives no plugin compatibility.",
+        "Locks held only in Synergos gossip without Curare authority — works offline-ish but cannot be enforced for Web/CLI saves and cannot be queried by an LFS plugin.",
+        "Rely on git-lfs locks on the existing git remote — contradicts spec/plan/versioning-types.md:4 'Git は製品利用の前提にしない'."
+      ],
+      "enforcement": "runtime",
+      "confidence": 0.9,
+      "sources": ["scratchpad/research/vcs-game-ai.md §1.2 (P4 +l / typemap)", "§2.2 (Unity Smart Locks: destination branch, Retained)", "§3.2 (LFS File Locking API)", "§3.11 (svn:needs-lock read-only bit)", "§6 lesson 1"]
+    },
+    {
+      "id": "AGD-GW-02",
+      "title": "Auto-pull overwrites unpublished local edits; sync_mode manual/selective is accepted but never consulted and 'selective' can never carry patterns",
+      "theme": "ai-game",
+      "repo": "synergos",
+      "area": "synergos-core daemon gossip subscriber / exchange receive path / project settings",
+      "severity": "high",
+      "kind": "design-gap",
+      "evidence": [
+        {"file_line": "/home/user/Synergos/synergos-core/src/daemon.rs:978-980", "quote": "let auto_pull_eligible = sender != *ctx.exchange.local_peer_id() && !ctx.exchange.has_shared_file(&project_id, &file_id, version) && ctx.project_manager.project_root(&project_id).is_some();"},
+        {"file_line": "/home/user/Synergos/synergos-core/src/exchange/mod.rs:767-772", "quote": "if let Some(local) = self.shared_file_record(&header.project_id, &file_id) { let is_stale = local.version > version; let is_conflict = local.version == version && (local.file_size != header.total_size || local.crc != crc); // (working-tree bytes are never compared)"},
+        {"file_line": "/home/user/Synergos/synergos-core/src/project.rs:27-34", "quote": "pub enum SyncMode { /// 全ファイルを自動同期 Full, /// 変更通知のみ（ダウンロードは手動） Manual, /// 指定パターンのみ同期 Selective { patterns: Vec<String> }, }"},
+        {"file_line": "/home/user/Synergos/synergos-core/src/project.rs:55", "quote": "\"selective\" => Self::Selective { patterns: vec![] },  // patterns can never be set"},
+        {"file_line": "grep SyncMode|sync_mode synergos-core/src", "quote": "only project.rs (type/settings), cli.rs (flag echo) and ipc_server.rs:938-944 (ProjectUpdate) reference it — daemon.rs/exchange never read sync_mode"},
+        {"file_line": "/home/user/Synergos/synergos-core/src/conflict/mod.rs:242", "quote": "entry.state = ConflictState::Resolved { resolution };  // resolve_conflict flips state only; no file is written or fetched"}
+      ],
+      "scenario": "Artist opens levels/01.unity, edits for three hours without publishing. A teammate publishes v2 of the same path. The FileOffer arrives; eligibility is only 'project open && not already holding v2', so the daemon fetches v2 and replace_file_atomically() overwrites the dirty working copy (exchange/mod.rs:798). Setting `project update --sync-mode manual` beforehand changes nothing because sync_mode is never read on the pull path; `selective` cannot even carry patterns. The GUI conflict buttons (Keep Local / Accept Remote) only flip an in-memory state.",
+      "impact_ai_game": "This is the inverse of Perforce's 'writable only after p4 edit' and Plastic's checkout semantics: every incumbent protects an artist's uncommitted work by construction. For AI data work, an in-progress dataset shard or a safetensors file being written by a training job can be clobbered mid-write by a teammate's publish.",
+      "current_state": "Pull is fire-and-forget on every offer in an open project; receive compares only the last published/received record, never the on-disk bytes; sync_mode is decorative; conflict resolution is state-only; conflict copies (docs §4 Phase 3) are not implemented.",
+      "proposed_redesign": "Make the receive path dirty-aware and policy-driven: (1) before replace, hash the current working file (BLAKE3, or size+mtime fast path keyed off the manifest entry) and if it differs from the manifest's recorded content, write the incoming bytes to `<name>.conflict-<peer>-v<N>` and emit ConflictDetectedEvent instead of replacing; (2) honour SyncMode: Full = pull+apply, Manual = record offer in a per-project 'available updates' ledger and expose `project pull <id> [paths]` over IPC/GUI, Selective = only paths matching the stored glob list (fix project.rs:55 to parse `selective:<pattern>,<pattern>` or add a `patterns` field to ProjectUpdate); (3) add a `sync_mode` + `patterns` column to the Tauri/CLI project settings UI; (4) resolve_conflict must act: KeepLocal republishes the local bytes as a new version with parent_hash, AcceptRemote renames the conflict copy into place. 4軸: AI学習量=低 (hashing + rename logic already exists in manifest.rs); 作業コスト=S〜M; 解決度=高 (eliminates silent loss of work); 主目的との一致度=高 (spec/feature/ux-definition.md:92 '既存の編集は勝手に上書きしない' is the stated product rule).",
+      "alternatives": [
+        "Only honour Manual mode (no dirty check) — cheaper, but Full mode users still lose work.",
+        "Rely on exclusive locks (GW-01) to prevent the situation — necessary but insufficient: unlocked text assets and lock-free teams still need the dirty check."
+      ],
+      "enforcement": "runtime",
+      "confidence": 0.92,
+      "sources": ["scratchpad/research/vcs-game-ai.md §2.8 (adopt: lock release must not silently re-enable conflicts)", "§3.7 (Diversion soft locks)", "scratchpad/maps/sy-core-versioning.md W-16"]
+    },
+    {
+      "id": "AGD-GW-03",
+      "title": "No branches/streams: one monotonic lineage per path (Synergos) and per resource (Curare); releases are id-set snapshots with no fork, hotfix or merge-down path",
+      "theme": "ai-game",
+      "repo": "both",
+      "area": "Synergos manifest/version_state + Curare asset_versions/releases",
+      "severity": "medium",
+      "kind": "missing-feature",
+      "evidence": [
+        {"file_line": "/home/user/Curare/curare-server/src/db/schema.ts:92", "quote": "uniqueIndex('idx_asset_version_unique').on(t.assetId, t.versionNum),  // one integer sequence per resource, no ref/branch column"},
+        {"file_line": "/home/user/Curare/curare-server/src/db/release-repository.ts:63", "quote": "const snapshot = { submissionIds: [...release.submissionIds], versionIds: [...selected].sort() };"},
+        {"file_line": "/home/user/Curare/curare-server/src/routes/releases.ts:11-13", "quote": "const ids = z.array(z.string().uuid()).min(1).max(500); ... name: z.string().trim().min(1).max(500), submissionIds: ids"},
+        {"file_line": "/home/user/Synergos/docs/versioning-design.md:42", "quote": "**バージョン (version)** | 「同じパスの内容が何回変わったか」の単調増加番号"},
+        {"file_line": "/home/user/Synergos/docs/versioning-design.md:188-190", "quote": "checkout / restore で v1 に戻したノードが再 publish すると、単純な +1 では他ノードが既に持つ v2 と番号が衝突する ... publish の版は `max(手元 + 1, ... 最大版 + 1)` にする"},
+        {"file_line": "/home/user/Curare/spec/plan/competitive-analysis.md:22", "quote": "- Stream管理が便利  (listed as Perforce's strength)"},
+        {"file_line": "/home/user/Curare/spec/feature/ux-definition.md:111", "quote": "確定したリリース集合は不変。後から「最新」を追従させず、修正リリースとして新しい集合を作る。"}
+      ],
+      "scenario": "Studio ships 1.0 from release R1 and keeps developing. A hotfix needs hero.fbx changed only for 1.0.1. In Curare the only option is to save a new working version (v9) on the same resource and make a new submission; v9 now sits in the main lineage and every later main submission must deliberately skip it. In Synergos, restoring hero.fbx to the 1.0 version and republishing mints v10 for everyone (docs §3.4), so the hotfix version becomes the newest version on main. There is no way to say 'this version belongs to release/1.0.1 only'.",
+      "impact_ai_game": "Perforce streams (mainline/release/dev with merge-down/copy-up) and Unity task branches are how studios run parallel milestones; Horde even requires a stream. AI teams need the same for dataset snapshots (Iceberg/lakeFS tags vs branches with per-ref retention).",
+      "current_state": "Curare: linear version_num per resource; release = frozen set of submission ids; no ref/branch entity. Synergos: linear u64 per path with node-local floor; git branches of manifest.json give a 'branch' only on the text side, and version numbers minted on two git branches collide (same number, different content = conflict).",
+      "proposed_redesign": "Add a ref model on both sides. Curare: `refs{project_id, name, kind: tag|branch, head_manifest_hash, parent_ref, retention{min_versions, max_age}}` and a `manifests{hash, entries[{path, version_id, blake3, size}]}` table (Iceberg manifest-list shape); a release becomes a tag whose manifest is content-hashed and verifiable offline (fixes the id-only snapshot). Working saves target a branch ref; 'promote' copies a manifest pointer (zero-copy, lakeFS style). Synergos: make the revision identity content-addressed `{blake3, parent}` and let `version` be a per-ref display counter; FileOffer carries `ref` and `parent_hash`; conflicts become forks rather than number collisions. Lock destination branch (GW-01) refers to these refs. 4軸: AI学習量=中〜高 (ref/manifest model is well documented in Iceberg/lakeFS but touches core schema); 作業コスト=L; 解決度=高 (hotfix/milestone/mergeback flows, dataset snapshots); 主目的との一致度=中〜高 (release composition is a core domain; branching was not promised but Stream management is the competitor feature the spec admires).",
+      "alternatives": [
+        "Branch only in git (manifest.json per git branch) and make Synergos version numbers branch-scoped by hashing the ref name into the floor — cheap but keeps Curare branchless.",
+        "Release-only 'cherry' overrides: a release may pin a version not in main's latest — minimal, but no merge-down and no dev branches."
+      ],
+      "enforcement": "runtime",
+      "confidence": 0.85,
+      "sources": ["scratchpad/research/vcs-game-ai.md §1.2 (streams)", "§2.3 (task branches)", "§5.2 (lakeFS zero-copy branch)", "§5.9 (Iceberg refs with retention)", "scratchpad/research/ai-dev-data.md §1.4, §6"]
+    },
+    {
+      "id": "AGD-GW-04",
+      "title": "Two disconnected version systems: Synergos project manifests/history nodes and Curare catalog versions share no identity; custody is an opaque blob store keyed by sha256(blobRef)",
+      "theme": "ai-game",
+      "repo": "both",
+      "area": "Curare storage port / Synergos custody / versioning-design boundary",
+      "severity": "high",
+      "kind": "design-gap",
+      "evidence": [
+        {"file_line": "/home/user/Synergos/spec/feature/opaque-custody.md:5", "quote": "Synergosはopaque objectの転送と保管の実行を担当し、制作履歴や承認を作らない。"},
+        {"file_line": "/home/user/Synergos/synergos-custody/src/signature.rs:5-7", "quote": "pub fn object_key(id: &str) -> String { format!(\"{:x}\", Sha256::digest(id.as_bytes())) }"},
+        {"file_line": "/home/user/Curare/curare-server/src/routes/upload.ts:28", "quote": "const proposedBlobRef = `uploads/${body.assetId}/${uuidv4()}`;"},
+        {"file_line": "/home/user/Curare/curare-server/src/storage/synergos-storage.ts:36-38", "quote": "await command('admissions',{ operationId:admission.operationId,opaqueObjectId:admission.blobRef,contentHash:admission.contentHash,byteLength:admission.fileSize,expiresAt:...,contentType, })"},
+        {"file_line": "grep -rniE 'manifest|synergos.?project' /home/user/Curare/curare-server/src", "quote": "(no matches) — Curare has no column, route or type referencing a Synergos project, manifest or history-node object"},
+        {"file_line": "/home/user/Synergos/docs/versioning-design.md:12", "quote": "**git-LFS の P2P 版**。git はテキスト + `manifest.json` (=ポインタ集合) を管理し、実体 (blob) は Synergos が運ぶ。**履歴ノード = LFS サーバに相当**"},
+        {"file_line": "/home/user/Curare/spec/plan/versioning-types.md:3-4", "quote": "Synergos が制作履歴の意味を管理する案を置き換える。Git は製品利用の前提にしない。"}
+      ],
+      "scenario": "An artist publishes assets/hero.mb v7 through the Synergos daemon (manifest.json + history node). QC wants to review it in Curare. Nothing links the Synergos object to a Curare resource version, so the artist must re-upload the same 800 MB file via the Web UI (4 API calls + full PUT) into a different blob namespace (uploads/<uuid>) on a custody store that keys by sha256(blobRef), not by content. The history node and the custody node now hold two copies; a Curare release snapshot cannot be checked out into a Synergos working tree and a Synergos manifest cannot be submitted for review.",
+      "impact_ai_game": "A game team needs one answer to 'what is hero.mb v7 and who approved it'. P4 + Helix DAM, Plastic + Unity Dashboard, and git + LFS server each have a single object identity across workspace and review tooling. The current split means neither a working tree nor a dataset snapshot can round-trip through review/release without re-transfer and re-identification.",
+      "current_state": "Synergos: P2P manifest versions (path→u64, CRC32) with content-addressed history-node objects (BLAKE3). Curare: resource versions (uuid, SHA-256) stored in MinIO or Synergos custody under random blobRef keys; custody deliberately opaque. No shared manifest, no shared digest set (SHA-256 vs BLAKE3), no 'register existing Synergos object as Curare version' API.",
+      "proposed_redesign": "Define one object identity and one manifest format across both repos. (1) Digest set: every version/object carries `digests: [{algo:'blake3', value}, {algo:'sha256', value}]` (Curare's planned digests[] in versioning-types.md:59-60); custody object key becomes the BLAKE3 digest so the same bytes are one object whether published by a daemon or uploaded by the Web UI (refcounted reclaim). (2) Manifest object: Synergos `.synergos/manifest.json` and Curare `manifests` (GW-03) are the same schema `{path → {blake3, size, parent, publisher, version}}`, content-addressed by its own BLAKE3; Curare stores manifest hashes, Synergos exports/imports them. (3) Bridge API: `POST /api/v1/projects/:id/manifests` (register a Synergos manifest as a Curare working snapshot; history node is the storage backend, no re-upload), `POST /api/v1/releases/:id/checkout-manifest` (emit a manifest the daemon can `project checkout --manifest`). (4) Custody becomes a history node role (same binary, `history.enabled` + HTTP capability surface) so there is one blob store with one retention policy. 4軸: AI学習量=中 (one schema, two serializers); 作業コスト=M〜L (digest migration is additive; custody re-keying needs a migration job); 解決度=高 (single truth, no double transfer, review/checkout round-trip); 主目的との一致度=高 (README promises Synergos handles transfer for Curare; today MinIO is the live path).",
+      "alternatives": [
+        "Keep two systems but add a mapping table {synergos_project, path, version} → curare version_id and a 'promote from Synergos' command — cheaper, still two blob copies and two digests.",
+        "Drop Synergos projects entirely and make the daemon a Curare client (DCC common commands over IPC) — simplest story, loses P2P LAN fan-out for working trees."
+      ],
+      "enforcement": "runtime",
+      "confidence": 0.85,
+      "sources": ["scratchpad/research/vcs-game-ai.md §3.1 (LFS batch API shape), §3.5 (large-object promisor), §6 lesson 7", "scratchpad/research/ai-dev-data.md §0 takeaway 1 (manifest + CAS pattern)", "scratchpad/maps/cu-docs.md §1.2"]
+    },
+    {
+      "id": "AGD-GW-05",
+      "title": "No shelving, pending changelist or draft: Synergos publish broadcasts immediately per file, Curare working saves are permanent immutable versions and submissions are sealed on creation",
+      "theme": "ai-game",
+      "repo": "both",
+      "area": "Synergos PublishUpdate / Curare asset_versions + submissions",
+      "severity": "medium",
+      "kind": "missing-feature",
+      "evidence": [
+        {"file_line": "/home/user/Synergos/synergos-core/src/ipc_server.rs:1418", "quote": "match ctx.exchange.publish_updates(notifications).await {  // runs right after the per-file loop; no staging state"},
+        {"file_line": "/home/user/Synergos/synergos-core/src/exchange/mod.rs:1328-1333", "quote": "Step 1 transfer ledger に Offer を登録 ... Step 3 Gossipsub で FileOffer をブロードキャスト (to all peers)"},
+        {"file_line": "/home/user/Curare/curare-server/migrations/005_releases.sql:24", "quote": "IF TG_OP='DELETE' THEN RAISE EXCEPTION 'retain resource versions'; END IF;"},
+        {"file_line": "/home/user/Curare/curare-server/src/db/submission-repository.ts:59-61", "quote": "const [submission] = await tx.insert(schema.submissions).values({ sealed: false, ... }).returning(); ... await tx.update(schema.submissions).set({ sealed: true })"},
+        {"file_line": "/home/user/Curare/spec/feature/ux-definition.md:115", "quote": "| 提出 | 下書き/準備中/提出済み/確認中/修正依頼/承認/取消 | 業務上の合意を表す |"},
+        {"file_line": "/home/user/Curare/spec/plan/versioning-types.md:28-29", "quote": "同じ提出中の試行エクスポートは登録しない。reproducible を提出したい場合は、別の submission リソースとして最終出力を登録する。"}
+      ],
+      "scenario": "A rigger wants a colleague on another machine to look at an experimental rig before committing to it. Synergos: `project publish` is the only way to move bytes and it gossips a FileOffer to every peer in the project, auto-pulling onto all working trees (GW-02). Curare: the only way is `POST /assets/:id/versions purpose=working`, which creates a permanent version that can never be deleted (005:24) and shows up in the resource's history forever; there is no draft/pending state before a sealed submission even though the UX spec lists 下書き/準備中.",
+      "impact_ai_game": "P4 shelving and Plastic's pending changes are daily tools: WIP hand-offs, pre-submit review, and parking work before switching tasks. Without them artists either pollute permanent history (storage grows with every trial) or fall back to Slack/Drive — the exact 'Google Drive' failure mode the vision doc wants to replace.",
+      "current_state": "No shelf object, no targeted (peer-scoped) transfer, no draft version class, no deletion of working versions, no pre-submission 'preparing' state.",
+      "proposed_redesign": "Synergos: add `IpcCommand::Shelve{project, files, to_peers?, ttl}` producing a signed `ShelfOffer{shelf_id, entries[{path, blake3, size}], ttl}` gossiped only to named peers (or kept local until `project shelf share`); receivers store shelf bytes under `.synergos/shelves/<id>/` and apply with `project unshelve <id>` (dirty-check from GW-02). Curare: add a `draft` version class with `expires_at` and a GC job (first class where DELETE is allowed, distinct from working/submission/reproducible), a `submissions.state='draft'` (unsealed, editable item set) that becomes `submitted` on finalize, and `POST /drafts/:id/promote` to turn a draft into a working version without re-upload. Reuse upload admission, so the transfer path is unchanged. 4軸: AI学習量=低〜中; 作業コスト=M; 解決度=高 for WIP exchange and history hygiene; 主目的との一致度=中〜高 (ux-definition already lists 下書き/準備中 states).",
+      "alternatives": [
+        "Model a shelf as a Synergos project branch/ref (GW-03) named shelf/<user>/<n> — elegant once refs exist, but refs are the larger project.",
+        "Allow deletion of working versions after a grace period instead of a draft class — simpler schema, weaker semantics (reviewers may have referenced the version)."
+      ],
+      "enforcement": "runtime",
+      "confidence": 0.8,
+      "sources": ["scratchpad/research/vcs-game-ai.md §1.2 (P4 shelves on commit server)", "§2.1 (Gluon check-in)", "§5.9 (tombstone + grace + GC)"]
+    },
+    {
+      "id": "AGD-GW-06",
+      "title": "No server-known partial/sparse workspace (Gluon/sparse-checkout): checkout and auto-pull operate on the whole manifest; Curare acquisition is a client-chosen id list with no path tree",
+      "theme": "ai-game",
+      "repo": "both",
+      "area": "Synergos checkout/auto-pull + Curare acquisition plan",
+      "severity": "high",
+      "kind": "missing-feature",
+      "evidence": [
+        {"file_line": "/home/user/Synergos/synergos-core/src/checkout.rs:80-81", "quote": "for (rel, entry) in &target.files { let Some(path) = resolve_local(&root, rel) else {  // every manifest entry is reconciled"},
+        {"file_line": "/home/user/Synergos/synergos-core/src/daemon.rs:978-980", "quote": "let auto_pull_eligible = sender != *ctx.exchange.local_peer_id() && !ctx.exchange.has_shared_file(&project_id, &file_id, version) && ctx.project_manager.project_root(&project_id).is_some();"},
+        {"file_line": "/home/user/Synergos/synergos-core/src/project.rs:55", "quote": "\"selective\" => Self::Selective { patterns: vec![] },"},
+        {"file_line": "/home/user/Curare/curare-server/src/db/acquisition-repository.ts:33-34", "quote": "export async function acquisitionPlan(actor: Actor, ids: string[], knownHashes: string[]) { const entries = await resolveVersionClosure(actor, ids);"},
+        {"file_line": "/home/user/Curare/curare-server/src/db/schema.ts:60", "quote": "name: text('name').notNull(),  // resources have a flat name, no path/tree"},
+        {"file_line": "/home/user/Curare/spec/feature/features.md:9", "quote": "コミット機能を一通り提供しつつ、全データをダウンロードせずに運用できる設計にする。"},
+        {"file_line": "/home/user/Curare/spec/plan/use-cases.md:16", "quote": "- **速度感**: 全データをcloneせず、必要なものだけ取得することで作業速度を向上"}
+      ],
+      "scenario": "A 2 TB Unreal project with 300k files. A UI artist only needs Content/UI/**. Synergos: the moment the project is open, every FileOffer for every path triggers fetch_file; checkout reconciles all 300k entries and the daemon's startup restore CRC-scans whatever is on disk. There is no way to say 'only Content/UI'. Curare: the artist can pick version ids by hand in the Web UI, but there is no directory structure to select from and the server cannot enforce or plan a workspace selection, so the next person repeats the manual selection.",
+      "impact_ai_game": "Gluon partial workspaces and P4 client views are what make console-scale depots usable on artist laptops; Unreal Virtual Assets and P4VFS go further with per-payload hydration. For AI, lakeFS Mount and sparse clone bound disk to the working set. 'Necessary data only' is the central promise of the Curare vision (features.md:9) and is unmet on both sides.",
+      "current_state": "Synergos: whole-project sync, SyncMode::Selective inert and pattern-less. Curare: per-version-id plans, no path tree, no saved workspace, no path-level ACL enforced on read.",
+      "proposed_redesign": "Introduce a first-class, server-known workspace spec. Synergos: `.synergos/workspace.toml` (node-local, not committed) `include=[\"Content/UI/**\"] exclude=[...]`, consulted by the gossip subscriber (skip offers outside), by checkout (reconcile only included entries, report the rest as 'not materialized'), and by startup restore; `project configure +/path -/path` IPC (Gluon `cm partial configure`). Curare: add `path` to resources and a `workspaces{id, user_id, project_id, include[], exclude[]}` table; `POST /acquisition/plan` accepts `{workspaceId | include[]}` and resolves the current ref manifest (GW-03) to a plan; path ACL (per-folder view grants) is evaluated on read, as Plastic secured paths do. Later: lazy hydration via ProjFS on Windows / NFS loopback on macOS using the same plan. 4軸: AI学習量=中 (Gluon/sparse-checkout semantics are documented); 作業コスト=M (filter at three call sites in Sy; schema+plan change in Cu); 解決度=高; 主目的との一致度=高 (explicit product promise).",
+      "alternatives": [
+        "Client-side filter only (daemon ignores offers it doesn't want) — no server planning, no path ACL on read, no bandwidth planning.",
+        "Per-project split into many small Synergos projects (one per folder) — works today but multiplies project ids, invites and gossip topics."
+      ],
+      "enforcement": "runtime",
+      "confidence": 0.9,
+      "sources": ["scratchpad/research/vcs-game-ai.md §2.1 (Gluon partial workspace), §2.7 (secured paths checked on update), §3.5 (sparse checkout + promisor), §6 lesson 3", "scratchpad/research/transfer-efficiency.md §5 (P4VFS/ProjFS/lakeFS Mount), §6 row 'Unity/Unreal project trees'"]
+    },
+    {
+      "id": "AGD-GW-07",
+      "title": "Engine/DCC integration is absent: ars plugin is an event bridge, Tauri GUI only opens/publishes, Curare SDK has no in-repo caller, and no Git-LFS-compatible wire exists for existing Unity/Unreal plugins",
+      "theme": "ai-game",
+      "repo": "both",
+      "area": "ars-plugin-synergos / synergos-tauri / Curare client SDK",
+      "severity": "high",
+      "kind": "missing-feature",
+      "evidence": [
+        {"file_line": "/home/user/Synergos/ars-plugin-synergos/src/bridge.rs:1-4", "quote": "//! IpcEvent → Ars EventBus ブリッジ ... synergos-core デーモンからの IPC イベントを受信し、対応する Ars EventBus イベントに変換して配信する。"},
+        {"file_line": "/home/user/Synergos/ars-plugin-synergos/src/bridge.rs:14-21", "quote": "pub enum BridgedEvent { PeerConnected(..), PeerDisconnected(..), TransferProgress(..), TransferCompleted(..), NetworkStatus(..), ConflictDetected(..), }  // no commands toward the daemon"},
+        {"file_line": "/home/user/Synergos/synergos-tauri/frontend/src/lib/tauri.ts:85-129", "quote": "daemonStatus, daemonPing, projectList, projectOpen, projectClose, projectPublish, projectInvite, peerList, peerAddUrl, peerDisconnect, networkStatus, transferList, configGet, configSet, configPaths  // no checkout/restore/lock/history"},
+        {"file_line": "/home/user/Curare/spec/feature/server-client-architecture.md:35", "quote": "現在のClientはWebとNode SDK。常駐Rust Client、Arsプラグイン、Maya等の個別UIは別の実装段階。"},
+        {"file_line": "/home/user/Curare/spec/plan/pr1514-anatomia-review.md:30", "quote": "`client/curare-client.ts` の `CurareClient.constructor` / `save` / `submit` / `plan` | 4 | 外部DCC向け公開入口。リポジトリ内での呼出元はまだなく、実DCCへの接続・動作確認は未実施"},
+        {"file_line": "/home/user/Curare/spec/feature/features.md:79-80", "quote": "- **Unity**: Editorからワンクリックでモデル更新を実行（ツールを開かずに完結）... - **Maya**: 比較機能等を含むより深い統合。"},
+        {"file_line": "grep -i 'git lfs|lfs' /home/user/Synergos (excluding target)", "quote": "only docs/versioning-design.md:12,103,337 mention LFS — no /objects/batch or /locks endpoint in Synergos or Curare routes"}
+      ],
+      "scenario": "A Unity team wants the Perforce-like flow: open scene → check out → save → submit, from inside the editor. Today they must leave Unity, open the Tauri GUI (which can only add a project, add a peer and publish a file picker selection) or paste a Cernere token into the Curare Web UI and upload files one by one. Existing plugins (Unity's Perforce/Plastic providers, Unreal's revision-control plugins, Anchorpoint's LFS lock plugin) cannot be pointed at Synergos/Curare because neither speaks the LFS batch/locks JSON or any engine-known protocol.",
+      "impact_ai_game": "Every incumbent wins or loses on editor integration: P4 (Unity/Unreal built-in), Plastic (Unity-owned), LFS (Anchorpoint/Diversion plugins), Alienbrain (Maya/Photoshop). For AI tooling the analogue is a `hf`/`dvc`-style CLI plus a Python SDK; Curare's Node SDK has no Python surface and no caller.",
+      "current_state": "Synergos: CLI + IPC; Tauri GUI (open/publish/peers/transfers/settings); egui GUI (overview/peers/transfers/conflicts/settings); ars plugin converts 6 events, sends nothing. Curare: Web UI + Node CLI/SDK (save/history/submit/plan/acquire/clone), no DCC adapters, no LFS compatibility.",
+      "proposed_redesign": "Two tracks. (A) Wire compatibility first: implement the Git LFS batch API (`POST /objects/batch` returning `actions{href,header,expires_in,verify}`) and the LFS locking API (GW-01) in Curare, backed by upload admission + custody/history-node capability URLs, plus a Synergos custom-transfer agent (`lfs.customtransfer.synergos`) so existing Unity/Unreal/Anchorpoint LFS plugins and plain `git lfs` work with zero client changes; optionally expose a Git large-object promisor from history nodes. (B) Native adapters on the DCC common command entry (SPEC-CU-dcc-commands): a Unity Editor package and an Unreal `ISourceControlProvider` that call `checkout(lock)/save/submit/compare/acquire` through a local daemon HTTP/IPC endpoint; Maya/Blender via Python calling the same endpoint; Unreal Virtual Assets backend speaking BLAKE3 payload ids. Turn the ars plugin into a bidirectional adapter (commands + events). 4軸: AI学習量=中 (LFS JSON formats are public; engine provider APIs are documented); 作業コスト=M for (A), L for (B); 解決度=高; 主目的との一致度=高 (features.md explicitly promises Unity/Maya integration).",
+      "alternatives": [
+        "Only the Tauri GUI with a 'watch folder' auto-publish — no in-editor checkout/lock, no review from DCC.",
+        "Only native plugins without LFS compatibility — more polished, but blocks studios already on LFS tooling and delays the first usable integration."
+      ],
+      "enforcement": "runtime",
+      "confidence": 0.9,
+      "sources": ["scratchpad/research/vcs-game-ai.md §3.1 (batch API, custom transfer agents), §3.2 (locks API), §3.5 (large-object promisor), §3.8 (Anchorpoint), §4 (UE Virtual Assets BLAKE3-160), §6 lesson 7"]
+    },
+    {
+      "id": "AGD-GW-08",
+      "title": "No visual diff, preview or thumbnails: version compare is metadata/hash only, submission compare is a table, no preview generation anywhere",
+      "theme": "ai-game",
+      "repo": "curare",
+      "area": "Curare versioning/version-diff, submission-comparison, Web UI",
+      "severity": "medium",
+      "kind": "missing-feature",
+      "evidence": [
+        {"file_line": "/home/user/Curare/curare-server/src/versioning/version-diff.ts:2-6", "quote": "/** Metadata and hash comparison between two versions of one resource. Pure; no binary diff. */ export const comparedVersionFields = ['contentHash', 'fileSize', 'versioningType', 'purpose', 'submissionKey', 'pinName', 'comment', 'storageBackend', 'createdBy'] as const;"},
+        {"file_line": "/home/user/Curare/spec/feature/version-compare.md (VC-INV-05)", "quote": "同じ内容でも別の版であることは消さない ... バイナリ差分は返さない"},
+        {"file_line": "grep -rniE 'thumbnail|preview|サムネイル|プレビュー' curare-server/src curare-server/public", "quote": "only public/acquisition.js:17 (a comment) — no thumbnail/preview code"},
+        {"file_line": "/home/user/Curare/curare-server/public/submission-comparison.js:21-23", "quote": "for (const [label,show] of [['版',...],['容量',v => bytes(v.fileSize)],['生成ツール',...],['元の版',...],['設定',...]])"},
+        {"file_line": "/home/user/Curare/spec/feature/ux-definition.md:51", "quote": "| ライブラリ | 名前、種類、サムネイル、タグ、使用可能版、取得状態 | 検索・絞り込み→詳細。メタデータだけで閲覧できる |"},
+        {"file_line": "/home/user/Curare/spec/feature/ux-definition.md:81-82", "quote": "5. QC担当は「前回と比較」を選択。画像はWeb、Maya等は対応ツールへ正確な2版を渡す。プレビューが元データそのものではない時は表示し、元版の取得口を用意する。"},
+        {"file_line": "/home/user/Curare/docs/architecture.md:279", "quote": "bucket: curare-thumbnails"}
+      ],
+      "scenario": "A QC lead has 40 submissions in the queue. For each one the only comparison the server offers is 'contentHash changed, fileSize 812 MB → 815 MB'. To judge a texture change she must issue a download capability, pull both versions, and open them in Photoshop; for a Maya scene she must open Maya twice. The library list shows names only, so finding 'the blue variant of the hero banner' means opening assets one by one.",
+      "impact_ai_game": "Helix DAM, Alienbrain, P4 One/Snowtrack and Anchorpoint all ship thumbnails, image diff and Blueprint/3D previews because QC throughput is the bottleneck in asset production. For AI datasets, previews (sample grids, parquet schema/row previews, safetensors header) are how reviewers sanity-check a snapshot without downloading terabytes.",
+      "current_state": "Metadata diff only; no preview pipeline; `reproducible` type explicitly excludes previews from storage (versioning-types.md:22) with nothing that produces them instead; CDN/thumbnail bucket exists only in the superseded G2 docs.",
+      "proposed_redesign": "Add a derived-preview service: a sandboxed worker (gVisor/bubblewrap, no network) that on `ResourceVersionStored` renders previews keyed by `(source blake3, renderer id, renderer version, params)` — image → WebP thumbnail + 2-up/onion-skin diff tiles; PSD/TGA/EXR → flattened preview; FBX/glTF/OBJ → glTF viewer asset + turntable PNG; Maya/Blender → headless render job (optional, licensed) or embedded preview extraction; safetensors/parquet → header/schema/row-sample JSON. Store under a `derived_artifacts{source_version_id, kind, key_hash, blob, ttl}` table (recomputable, GC'd, pinned when a release references it) — this is the home for 'reproducible' outputs the current policy rejects. API: `GET /assets/:id/versions/:n/preview?kind=`, `GET /assets/:id/versions/compare?from&to&kind=image-diff`. Web UI: thumbnail grid in library, side-by-side/slider in review. Keep `version-diff.ts` as the metadata layer. Consume the outbox to trigger generation (GW-12). 4軸: AI学習量=中 (format parsers are third-party; sandboxing per breach-containment P1-2); 作業コスト=M〜L (worker + storage + 2 routes + UI); 解決度=高 for QC throughput; 主目的との一致度=高 (ux-definition lists thumbnails and 'compare' as primary QC operations).",
+      "alternatives": [
+        "Client-side previews only (browser renders images/glTF from the download capability) — no thumbnails in lists, each reviewer re-downloads.",
+        "Delegate entirely to DCC ('Maya等は対応ツールへ正確な2版を渡す') — valid for deep diffs but leaves list/queue views blind."
+      ],
+      "enforcement": "runtime",
+      "confidence": 0.9,
+      "sources": ["scratchpad/research/vcs-game-ai.md §3.9 (P4 One renders GLTF/FBX/PSD), §3.10 (Alienbrain), §3.12 (Helix DAM thumbnails incl. USD)", "scratchpad/research/breach-containment.md §4.3 (sandboxed parsers), §8 P1-2", "scratchpad/research/ai-dev-data.md §1.3 (HF side-ref derived previews), §4"]
+    },
+    {
+      "id": "AGD-GW-09",
+      "title": "Artist UX gaps: clone materializes files as <versionId>.<ext> with path rewriting forbidden, Web UI requires pasting a raw Cernere token, and the promised 'my work / review queue / board' screens do not exist",
+      "theme": "ai-game",
+      "repo": "curare",
+      "area": "Curare client clone + Web UI",
+      "severity": "medium",
+      "kind": "design-gap",
+      "evidence": [
+        {"file_line": "/home/user/Curare/curare-server/src/client/local-acquisition.ts:7-10", "quote": "export function acquisitionFileName(item) { ... return item.versionId + (item.name.match(/\\.[a-z0-9]{1,16}$/i)?.[0].toLowerCase() ?? ''); }"},
+        {"file_line": "/home/user/Curare/spec/feature/macos-asset-clone.md:44", "quote": "取得ファイル名は版IDと安全な拡張子。元の表示名は要求と完了JSONに保持する。MB/FBX内の参照パスの自動書換えは行わない。"},
+        {"file_line": "/home/user/Curare/curare-server/public/index.html:4", "quote": "<label>Cernere のアクセストークン<input id=\"token\" type=\"password\" autocomplete=\"off\" required></label><button>接続する</button>"},
+        {"file_line": "/home/user/Curare/curare-server/public/index.html:3", "quote": "<nav><button data-view=\"library\">ライブラリ</button><button data-view=\"pending\">再送待ち</button><button data-view=\"organization\">所属・権限</button><button data-view=\"nodes\">共有ノード</button><button data-view=\"releases\">提供集合</button><button data-view=\"synergos\">Synergos 管理・テスト</button></nav>"},
+        {"file_line": "/home/user/Curare/spec/feature/ux-definition.md:52-55", "quote": "| 自分の作業 | 担当、変更あり、保存待ち、確認結果 | DCCで開く→作業を保存/確認に出す | ... | 確認待ち | 提出ID、提出者、対象版、前回指摘 | ... | 進行ボード | 担当、期日、工程、待ち理由 |"},
+        {"file_line": "/home/user/Synergos/synergos-tauri/frontend/src/pages/Dashboard.tsx:15,93,175,256", "quote": "function ProjectsSection / function TransfersSection / function PeersSection / function StatusSection  // daemon-centric: no files, no history, no conflicts view"}
+      ],
+      "scenario": "An animator clones 'hero' (hero.mb + 12 textures) with the Node client. The output directory contains 8c1f…-a3.mb and twelve <uuid>.png; Maya opens the .mb and reports every texture missing because the file references textures/hero_albedo.png and the client refuses to rewrite or even name files as they were. In the Web UI she had first to obtain a 60-minute Cernere JWT by other means and paste it into a password box; after an hour uploads start failing with 401. Her lead looks for a review queue and finds only 'ライブラリ' and '提供集合'.",
+      "impact_ai_game": "Alienbrain, Anchorpoint ('2 buttons') and P4 One exist because artists will not use a tool that breaks DCC references or needs token handling. For AI datasets the same flattening breaks relative paths inside manifests (WebDataset shards, COCO json, DVC .dir) — a clone that renames files is unusable as a dataset.",
+      "current_state": "Clone: version-id names, no workspace manifest, no reference rewriting, hard-link-only publish. Web UI: token paste, library/pending/org/nodes/releases/synergos views only; no assignments, review queue, board or thumbnails. Tauri GUI: projects/transfers/peers/status with a publish file picker.",
+      "proposed_redesign": "(1) Workspace materialization: the acquisition plan carries each item's relative `path` (GW-06/GW-15) and the client writes `<dest>/<path>` plus a `.curare/workspace.json` {versionId → path, blake3}; keep the exclusive hard-link publish but add an atomic-rename fallback for NAS; offer opt-in reference rewriting hooks per format (Maya `filePathEditor`, FBX relative paths) run in the DCC adapter, not in the server. (2) Auth: replace token paste with an OAuth/OIDC authorization-code + PKCE flow against Cernere for the Web UI and a device-code flow for CLI/DCC, refresh handling, OS keychain storage. (3) Screens: implement 'My work' (assignments/mine + dirty state from the daemon), 'Review queue' (submissions state=submitted with compare + decision), and 'Board' (assignments by state/due) on top of the existing APIs; surface lock state (GW-01) and preview thumbnails (GW-08). 4軸: AI学習量=低〜中; 作業コスト=M (client path change S, auth flow M, three screens M); 解決度=高 for adoption; 主目的との一致度=高 (vision.md: 'ツールに運用（人間）をあわせなくてもいい').",
+      "alternatives": [
+        "Keep version-id names but emit a sidecar mapping only — safe, but every DCC still sees broken references.",
+        "Build screens in the mandated React/Vite SPA (RULE_TECH_STACK) instead of the vanilla modules — governance decision; the data needs are the same."
+      ],
+      "enforcement": "runtime",
+      "confidence": 0.9,
+      "sources": ["scratchpad/research/vcs-game-ai.md §3.8 (Anchorpoint artist UI), §3.10 (Alienbrain DCC check-out), §3.9 (P4 One)", "scratchpad/maps/cu-auth-access.md W23", "scratchpad/maps/cu-storage-transfer.md G1, T13"]
+    },
+    {
+      "id": "AGD-GW-10",
+      "title": "Offline work and reconnection are brittle: no QUIC keepalive, no resumable transfer, 5-minute pins and 300-second capabilities, clone refresh re-plans everything, and no resident client to retry while the browser is closed",
+      "theme": "ai-game",
+      "repo": "both",
+      "area": "synergos-net quic/transfer + Curare acquisition/clone + Web client",
+      "severity": "high",
+      "kind": "design-gap",
+      "evidence": [
+        {"file_line": "/home/user/Synergos/synergos-net/src/quic/mod.rs:477-483", "quote": "let mut transport = quinn::TransportConfig::default(); transport.max_concurrent_bidi_streams(...); transport.max_idle_timeout(Some(Duration::from_millis(self.config.idle_timeout_ms)...  // grep keep_alive: no matches"},
+        {"file_line": "/home/user/Synergos/synergos-net/src/transfer/mod.rs:11-12", "quote": "- 再送 / 並列取得 / resume は追って拡張する。現バージョンは単一ストリームで順次送る最小仕様。"},
+        {"file_line": "/home/user/Synergos/synergos-core/src/exchange/mod.rs:26", "quote": "const PINNED_FETCH_TTL_MS: u64 = 5 * 60 * 1000;"},
+        {"file_line": "/home/user/Curare/curare-server/src/db/acquisition-repository.ts:41", "quote": "downloadUrl: items[i]!.needsDownload ? await (await storagePort(version.storageBackend)).download(version.blobRef, 300, ...) : null"},
+        {"file_line": "/home/user/Curare/curare-server/src/client/clone-assets.ts:30-33", "quote": "const files = await acquireFiles(plan, outputDirectory, async item => { const refreshed = await getPlan(); return refreshed.items.find(entry => entry.versionId === item.versionId)!; });"},
+        {"file_line": "/home/user/Curare/spec/feature/macos-asset-clone.md:43", "quote": "再試行はファイル単位であり、部分バイトの再開ではない。"},
+        {"file_line": "/home/user/Curare/spec/feature/server-client-architecture.md:70", "quote": "Webを閉じた後は同一ブラウザ・本人の再接続で再試行できる。閉じている間の自動実行は保証しない。"},
+        {"file_line": "/home/user/Synergos/spec/feature/opaque-custody.md:40", "quote": "中断後は同じ受付から再PUTできる。バイト位置からの途中再開ではなく、未完成オブジェクト全体の再送。"}
+      ],
+      "scenario": "A remote artist on hotel Wi-Fi restores a 4 GB level from the history node. The QUIC connection idles 30 s during a Wi-Fi hiccup and dies (no keepalive), the TXFR stream restarts from byte 0, and because the restore pin expired after 5 min the arriving older version is rejected as stale. Switching to the Curare clone path: capabilities last 300 s, downloads are sequential, so after the first 5 minutes every remaining file 403s, refresh re-resolves the whole closure and re-issues N capabilities per file; closing the laptop lid aborts everything and nothing resumes at wake. Working offline is impossible on both sides: saves need Cernere per request, publishes need peers.",
+      "impact_ai_game": "Perforce/Plastic clients tolerate flaky links with resumable sync and local pending state; artists at home and outsourcers on slow links are the norm. AI jobs pulling 100 GB checkpoints need ranged, resumable, verifiable fetches (Xet/S3 range model).",
+      "current_state": "Sy: single-stream, no resume, no keepalive, pin TTL wall-clock, Queued transfers leak. Cu: single PUT/GET, no Range, 300 s GET, 24 h admission, per-file retry, Web IndexedDB journal only while open, Node CLI has no daemon.",
+      "proposed_redesign": "(1) Transport: set `keep_alive_interval` < idle/2 on both quinn configs; add resumable ranged transfer keyed by content hash (header `{blake3, offset, len}`) with a Bao outboard tree stored beside each history/custody object so any range verifies against the file hash; pins keyed to the in-flight transfer id, not wall clock. (2) Curare: HTTP Range + If-Range on custody/MinIO GET, multipart/tus-style PUT (IETF resumable-upload headers), per-item lazy capability issuance with renewal instead of bulk 300 s URLs, and a `GET /acquisition/plan/:id/renew` that re-signs without re-resolving the closure. (3) Offline-first client: a resident Cu client (the deferred 常駐Rust Client, or the Synergos daemon gaining Curare commands) that journals saves/submits on disk, retries with the same operationId, and queues publishes while peers are unreachable; Cernere identity cached with a bounded TTL for read/save queuing, re-validated before destructive ops. 4軸: AI学習量=中 (Bao/tus/Range are standard); 作業コスト=M (keepalive S, Range+resume M, resident client M〜L); 解決度=高; 主目的との一致度=高 (transfer reliability is core; ux-definition.md:14 promises retry on reconnect).",
+      "alternatives": [
+        "Only raise TTLs (pins 1 h, capabilities 30 min) — cheap, improves large files, but no resume and larger replay window for leaked URLs.",
+        "Resume by re-admission only (current custody model) — no partial-byte resume; multi-GB files on slow links never complete (custody PUT has an 1800 s cap)."
+      ],
+      "enforcement": "runtime",
+      "confidence": 0.9,
+      "sources": ["scratchpad/research/transfer-efficiency.md §1.4 (Bao verified streaming), §4.1 (quinn keep_alive_interval None by default), §4.3 (tus / IETF resumable upload / Range + If-Range), §6 cross-cutting rec. 2,5", "scratchpad/maps/cu-storage-transfer.md T1-T3", "scratchpad/maps/sy-transport.md W-24"]
+    },
+    {
+      "id": "AGD-GW-11",
+      "title": "Build/cook artifacts and derived-data cache have no home: 'reproducible' content is rejected outright, pipelines exist only as shell hooks that mutate the source tree, and there is no DDC-style keyed cache",
+      "theme": "ai-game",
+      "repo": "both",
+      "area": "Curare versioning policy / Synergos hooks",
+      "severity": "medium",
+      "kind": "missing-feature",
+      "evidence": [
+        {"file_line": "/home/user/Curare/curare-server/src/versioning/policy.ts:23-26", "quote": "export function assertVersionStorageAllowed(type: VersioningType, intent: SaveIntent): void { if (type === 'reproducible') { throw new VersioningError('reproducible_content_is_not_versioned', 409); }"},
+        {"file_line": "/home/user/Curare/spec/plan/versioning-types.md:22", "quote": "| reproducible | 再生成可能な中間物 | 拒否 | 拒否 | 一時 FBX、プレビュー、変換キャッシュ |"},
+        {"file_line": "/home/user/Synergos/docs/hooks.md:28-30", "quote": "| `pre-publish` | version 発番・manifest 更新の**前** (オートコンバート用: フックがファイルを書き換えたら書換後の内容で publish) ... | `post-receive` | 受信ファイルの作業ツリー反映後 (CI/コンバート起動用) |"},
+        {"file_line": "/home/user/Synergos/docs/hooks.md:136-147", "quote": "publish 前に大きい PSD をリポジトリ標準の PNG に変換してから配る (フックが書き換えた後の内容で publish される): ... command = \"python scripts/flatten_psd.py \\\"$SYNERGOS_FILE\\\"\""},
+        {"file_line": "/home/user/Curare/spec/feature/features.md:43-46", "quote": "## リリースパイプライン  リソースの開発完了後のデータコンバートフローを提供する。任意のスクリプトを挟める設計にする。"},
+        {"file_line": "grep -rniE 'pipeline|bullmq|worker' /home/user/Curare/curare-server/src", "quote": "only download-acquisition.ts stream `pipeline` import — no pipeline/run/job code"}
+      ],
+      "scenario": "Fifty developers each cook the same 30 GB of textures locally every morning because there is no shared derived-data cache; CI produces a build whose cooked .pak must be attached to the release for QA, but Curare refuses to store anything typed 'reproducible' and a 'submission' resource requires a human submission. The only automation hook is a shell script that rewrites the artist's PSD in place before publish (and on failure leaves it rewritten, hooks map W37).",
+      "impact_ai_game": "Unreal's DDC/Zen/Cloud DDC and Virtual Assets, Unity's cache server, and P4's build-only edges exist because derived data dominates iteration time; AI pipelines are the same shape (DVC run cache: outputs keyed by hash(inputs, params, cmd)). A platform with no derived tier forces either re-cooking or polluting source history.",
+      "current_state": "Curare: three types, derived data forbidden, no pipeline/run entities, provenance only as a flat record. Synergos: pre/post hooks (sh -c, daemon env inherited) with no output registry; history node stores only published/received working versions.",
+      "proposed_redesign": "Add a derived-data tier with recipe-keyed identity: `recipes{hash = blake3(tool_id, tool_version_hash, params_canonical, input_manifest_hash)}` and `derived_artifacts{recipe_hash, output_manifest_hash, blobs, ttl, pinned_by_release?}`; `POST /recipes/:hash/results` registers outputs produced by CI/hooks/workers (service principal, GW-13), `GET /recipes/:hash` answers cache hits (DVC run-cache semantics). This becomes the storage class for `reproducible` instead of a 409: stored with TTL, GC'd unless a release pins it, never shown as 'history'. Expose an Unreal-compatible surface (Zen/Cloud DDC-style `GET/PUT /ddc/{bucket}/{hash}` with OIDC) and a Synergos backend for UE Virtual Assets (payload id = BLAKE3-160). Synergos hooks: make pre-publish conversion write to a derived output path (never mutate the source) and register the result with the recipe API; run hooks in a sandbox with a scrubbed env. Releases may reference derived artifacts (cooked build) alongside submissions. 4軸: AI学習量=中 (DVC run-cache and DDC are documented; Zen protocol partially); 作業コスト=M〜L; 解決度=高 for iteration time and release packaging; 主目的との一致度=中〜高 (features.md promises a release pipeline; main purpose is source custody, so keep derived data a separate class).",
+      "alternatives": [
+        "Store cooked outputs as 'submission' resources via a bot user — abuses review semantics, no cache keying, immutable forever.",
+        "Leave DDC to engine-native tools and only pin cooked builds on releases — minimal, but no cross-team cache and no AI run cache."
+      ],
+      "enforcement": "runtime",
+      "confidence": 0.8,
+      "sources": ["scratchpad/research/vcs-game-ai.md §4 (Virtual Assets BLAKE3-160, Zen, Cloud DDC with OIDC), §5.1 (DVC run cache)", "scratchpad/research/transfer-efficiency.md §3.4 (version sources, build derived textures as DDC)", "scratchpad/research/ai-dev-data.md §2.4 (store inputs + recipe, recompute derived)", "scratchpad/research/breach-containment.md §4.3 (sandbox hooks)"]
+    },
+    {
+      "id": "AGD-GW-12",
+      "title": "Review workflow is a single terminal decision per submission with self-approval allowed, no threads or per-item feedback, no supersession of open submissions, unauthorable workflow definitions with roles ignored, and an outbox nobody consumes",
+      "theme": "ai-game",
+      "repo": "curare",
+      "area": "Curare submissions/review/workflow/outbox",
+      "severity": "medium",
+      "kind": "design-gap",
+      "evidence": [
+        {"file_line": "/home/user/Curare/curare-server/src/db/review-repository.ts:19-21", "quote": "if (submission.state !== 'submitted') throw new VersioningError('review_already_decided', 409); const [decision] = await tx.insert(schema.reviewDecisions)...; await tx.update(schema.submissions).set({ state: input.decision })"},
+        {"file_line": "/home/user/Curare/curare-server/src/access/policy.ts:16", "quote": "&& (actor.userId === creatorId || granted.includes(permission) || granted.includes('manage'));  // creator holds 'review' and 'release' on their own asset"},
+        {"file_line": "/home/user/Curare/curare-server/src/db/submission-repository.ts:59-61", "quote": "number: (latest?.number ?? 0) + 1 ... // earlier 'submitted' submissions are left open"},
+        {"file_line": "/home/user/Curare/curare-server/src/workflow/transition-policy.ts:62-63,70", "quote": "Role restrictions are not evaluated here (the actor carries no project roles yet ...) ... if (definitions.length === 0) return { ok: true };"},
+        {"file_line": "/home/user/Curare/spec/feature/workflow-guards.md:35", "quote": "- `roles` による遷移権限 (例: `release_ready → released` はリードのみ)。Curare の Actor にプロジェクト内ロールが無いため検査していない。"},
+        {"file_line": "grep -rn 'domainEvents|domain_events' curare-server/src (excluding insert)", "quote": "src/db/submission-schema.ts:40 export const domainEvents = pgTable('domain_events', ... — the only non-insert reference; no consumer"},
+        {"file_line": "/home/user/Curare/spec/feature/ux-definition.md:54", "quote": "| 確認待ち | 提出ID、提出者、対象版、前回指摘 | 前回と比較→承認/修正依頼 |"}
+      ],
+      "scenario": "A lead submits her own model set and, being the logical-asset creator, approves it herself. A reviewer who wants to say 'texture 3 is wrong, mesh fine' can only post one changes_requested comment for the whole set, after which the submission is terminal; the artist resubmits as 提出2 while 提出1 … 提出N from earlier remain 'submitted' and approvable. No one is notified of anything because domain_events are written and never read; the project's status vocabulary is whatever string a saver sends because workflow definitions cannot be authored and roles are ignored.",
+      "impact_ai_game": "Helix DAM/Swarm, Plastic code review and ShotGrid (the stated model, features.md:27) all have threaded, per-item review with assignable reviewers and notifications; separation of duties is a baseline audit expectation for release approval. AI dataset gates (lakeFS pre-merge hooks, data-quality assertions) need the same hook points.",
+      "current_state": "One decision row per submission; creator omnipotence; no reviewer assignment; no supersession; no comments on items; outbox write-only; workflow definitions read-only via GET, roles unimplemented.",
+      "proposed_redesign": "(1) Separation of duties: `recordDecision` rejects `actor.userId === submission.createdBy` unless project policy allows self-review; require explicit `review` grant (creator implicit rights exclude review/release). (2) Review threads: `review_comments{submission_id, item_version_id?, anchor{kind: region|frame|path, data}, author, body, resolved}` and `review_requests{submission_id, reviewer_id, state}`; decision becomes a summary over threads; allow 'approve with notes'. (3) Supersession: a new submission on the same logical asset marks older `submitted` ones `superseded` unless flagged parallel. (4) Workflow authoring: `PUT /projects/:id/workflow` (project manage), definitions include `transitions[].roles` evaluated against Cernere org roles or Curare project roles once GW-13's principal model lands; project templates seed definitions. (5) Outbox consumer: a worker that turns domain_events into notifications (web inbox, email/Slack webhooks) and into derived-artifact/preview jobs (GW-08/GW-11); pre-release gate hooks (lakeFS style) that can block finalize. 4軸: AI学習量=低〜中; 作業コスト=M; 解決度=高 for QC; 主目的との一致度=高 (QC is a core use case).",
+      "alternatives": [
+        "Keep single decision but add reviewer assignment and notifications only — fixes the 'who' but not the 'what' of feedback.",
+        "Delegate review to an external tracker (Jira/ShotGrid) via webhooks — features.md mentions JIRA; still needs the outbox consumer and SoD."
+      ],
+      "enforcement": "runtime",
+      "confidence": 0.85,
+      "sources": ["scratchpad/research/vcs-game-ai.md §3.12 (Helix DAM comments, Kanban review states)", "scratchpad/research/ai-dev-data.md §2.6 (lakeFS pre-merge gates, dataQualityAssertions)", "scratchpad/maps/cu-versioning-core.md W1, A9, A10", "scratchpad/maps/cu-workflow-infra.md W3"]
+    },
+    {
+      "id": "AGD-GW-13",
+      "title": "Vendor/outsourcer workflow is unimplemented: no Magic Link, assignees are unchecked UUIDs, every request needs a Cernere token, and there is no machine/service principal for pipelines",
+      "theme": "ai-game",
+      "repo": "curare",
+      "area": "Curare assignments / auth / access",
+      "severity": "medium",
+      "kind": "missing-feature",
+      "evidence": [
+        {"file_line": "/home/user/Curare/spec/feature/assignments.md:51", "quote": "### 未実装  - Magic Link による外部担当者への資料案内、期日超過の通知、進行ボード UI。"},
+        {"file_line": "/home/user/Curare/curare-server/src/routes/assignments.ts:18", "quote": "assigneeId: z.string().uuid(),"},
+        {"file_line": "/home/user/Curare/curare-server/src/db/assignment-repository.ts:81-83", "quote": "const [row] = await tx.insert(assetAssignments).values({ resourceId, assigneeId: input.assigneeId, requestedBy: actor.userId,  // no membership/existence check on assigneeId"},
+        {"file_line": "/home/user/Curare/curare-server/src/auth/cernere-actor.ts:7-13", "quote": "export function resolveCernereActor(token: string): Promise<Actor> { ... const socket = new WebSocket(url, ['bearer', token]);  // every /api/v1 call needs a Cernere user token"},
+        {"file_line": "/home/user/Curare/spec/feature/ux-definition.md:103-104", "quote": "外部担当者には許可された資料だけのMagic Linkを渡す。リンクの期限切れ・取消・権限外は取得不可。外部受託者に内部検索権限を暗黙付与しない。"},
+        {"file_line": "/home/user/Curare/spec/feature/features.md:87-93", "quote": "## マジックリンク  特定の人に対してアセットファイルをダウンロード可能にする共有リンク機能。... リソースの一部データだけを指定して送ることも可能"}
+      ],
+      "scenario": "A producer orders a weapon model from an external studio. She creates an assignment, but assigneeId must be a UUID — the vendor has no Cernere account, so she types a random one and the assignment is invisible to everyone. To deliver reference files she must either onboard the vendor into the org (giving them org-wide view of every logical asset they are granted, with no expiry) or export files out of the system. The vendor's delivery comes back by email. A render farm that should register cooked outputs has to borrow a human's 60-minute token.",
+      "impact_ai_game": "Outsourcing is the dominant production model in Japanese game studios (use-cases.md: ソシャゲのモデル発注管理); every incumbent in competitive-analysis.md that scores well on 発注管理 (Alienbrain, SavePoint) has scoped external sharing. AI teams need service principals for training/generation jobs so provenance can name the job, not a person.",
+      "current_state": "Assignments store free UUIDs; grants are per-user Cernere UUIDs with no expiry; no external principal, no link/token capability, no service identity; Magic Link designed in G2 docs as unauthenticated /dl/:token with recipient_email (conflicts with no-PII rule).",
+      "proposed_redesign": "Implement Magic Link as a scoped capability, not an anonymous download: `share_links{id, assignment_id|release_id, scope{versionIds|manifest_hash, actions: download|upload}, expires_at, max_uses, revoked_at, created_by}` minted by Curare, encoded as an attenuated Biscuit (or Cernere-issued guest token) whose audience is Curare; the vendor exchanges it for a short-lived session that can only list/plan/acquire the scoped items and upload a delivery to the assignment (creating a submission attributed to the link + Cernere guest id). No email stored (link delivered out of band; optional Cernere guest account for accountability). Validate assigneeId against Cernere org membership or a share link at creation. Add service principals (Cernere Tool Client / client_credentials) with grants limited to spaces and purposes (`save`, `register recipe result`) so CI, render farms and generation jobs act under their own identity. 4軸: AI学習量=中 (Biscuit/attenuation or Cernere guest flow); 作業コスト=M; 解決度=高 for outsourcing; 主目的との一致度=高 (発注管理 is the first listed use case).",
+      "alternatives": [
+        "Unauthenticated presigned bundle links (G2 design) — simplest, but unrevocable, unattributable, violates the org's Cernere-centralized-auth rule.",
+        "Require every vendor to get a Cernere account — works for long-term partners, fails for one-off deliveries and still needs scoped grants with expiry."
+      ],
+      "enforcement": "runtime",
+      "confidence": 0.85,
+      "sources": ["scratchpad/research/breach-containment.md §1.3 (Biscuit attenuation, third-party blocks), §1.4 (short-lived scoped credentials), §8 P0-1", "scratchpad/research/vcs-game-ai.md §3.10 (Alienbrain sharing)", "scratchpad/maps/cu-auth-access.md W10, W24, W25"]
+    },
+    {
+      "id": "AGD-GW-14",
+      "title": "Text-asset merge: manifest.json committed to git is a whole-file pretty-JSON map with no merge driver, so two artists publishing different files conflict in git; Synergos has no merge-driver registry and rejects (does not quarantine) conflicting text assets",
+      "theme": "ai-game",
+      "repo": "synergos",
+      "area": "synergos-core manifest / git integration / conflict handling",
+      "severity": "medium",
+      "kind": "design-gap",
+      "evidence": [
+        {"file_line": "/home/user/Synergos/synergos-core/src/manifest.rs:55,169", "quote": "pub files: BTreeMap<String, ManifestEntry>, ... let json = serde_json::to_vec_pretty(self)"},
+        {"file_line": "/home/user/Synergos/docs/versioning-design.md:184-186", "quote": "想定フロー: `git pull` → `manifest.json` が更新される → `synergos project checkout myproj` → ... アセットを publish したら `manifest.json` が変わるので**それをコミットして push** する。"},
+        {"file_line": "ls /home/user/Synergos/.gitattributes; grep -rn 'merge=union|merge driver|マージドライバ' docs DESIGN.md README.md SETUP.md", "quote": "No such file or directory / no matches — no merge driver or union-merge attribute is shipped or documented"},
+        {"file_line": "/home/user/Synergos/docs/versioning-design.md:349-350", "quote": "5. テキストの diff は git の仕事。Synergos は種別を区別せず全部ファイル単位で運ぶ  6. 競合は通知してローカル版を保持する。Phase 3 で別名退避と手動選択を追加し、自動マージはしない"},
+        {"file_line": "/home/user/Synergos/synergos-core/src/exchange/mod.rs:772-782", "quote": "if (is_stale || is_conflict) && !pinned { let _ = tokio::fs::remove_file(&tmp_path).await; ... \"refusing conflicting content for existing version v{version}\""},
+        {"file_line": "/home/user/Synergos/synergos-net/src/chain/file_chain.rs:135", "quote": "TextDiff { patch: String, result_crc: u32 },  // dormant; no caller in synergos-core"}
+      ],
+      "scenario": "Two level designers each publish a different OFPA actor file in the morning. Both daemons rewrite `.synergos/manifest.json` (pretty JSON, every entry's updated_at/version/crc changes) and both commit. The second `git push` is rejected; `git pull` produces a conflict in a machine-generated file with thousands of entries and no merge driver, so the designer hand-edits JSON or discards one side (losing the pointer to a published version). Separately, if both edit `Scenes/Main.unity` (Unity YAML) and git merges it with UnityYAMLMerge, Synergos still has two different v3 bytes for the same path and the loser's push is silently refused at debug level with no conflict copy.",
+      "impact_ai_game": "Unity scenes/prefabs and Unreal OFPA actors are text or many-small-file formats precisely so teams can merge; Unity ships UnityYAMLMerge as a git merge driver keyed by extension. A pointer manifest that itself conflicts on every parallel publish negates the 'git holds text' split (DVC's .dir files have the same problem, mitigated by one .dvc per directory).",
+      "current_state": "Single pretty-JSON manifest per project committed to git, rewritten whole on every publish/receive; no .gitattributes/merge driver; no per-directory manifests; conflicting text versions rejected without quarantine; TextDiff chain dormant.",
+      "proposed_redesign": "(1) Manifest layout: line-oriented, sorted, one entry per line (`path\\tversion\\tblake3\\tsize`) or one manifest per directory, with a shipped `.gitattributes` (`.synergos/manifest.* merge=synergos-manifest`) and a `synergos git-merge-manifest %O %A %B` driver that unions entries and takes max(version)/newest-by-parent per path, flagging true per-path conflicts; `synergos project init` writes both files. (2) Merge-driver registry for text assets: `.synergos/policy.toml` `[[merge]] match=[\"**/*.unity\",\"**/*.prefab\"] driver=\"UnityYAMLMerge merge -p %O %B %A %A\"` with premerge/fallback semantics; Synergos invokes it only for pinned conflict resolution (never auto-merge binaries), otherwise writes `<name>.conflict-<peer>-v<N>` (GW-02). (3) Include parent_hash in entries so the git-side merge can detect divergent lineage. 4軸: AI学習量=低 (git merge drivers are standard); 作業コスト=S for (1), M for (2); 解決度=高 for parallel publishing; 主目的との一致度=高 ('git はテキスト + manifest' is the chosen architecture).",
+      "alternatives": [
+        "Stop committing the manifest; make the history node the index of record and export manifests only at release tags — contradicts the current 'index lives in git' decision but removes the conflict class entirely.",
+        "Keep one JSON but commit only from a single 'integration' node — operationally fragile."
+      ],
+      "enforcement": "hook",
+      "confidence": 0.85,
+      "sources": ["scratchpad/research/vcs-game-ai.md §2.4 (UnityYAMLMerge as extension-keyed merge driver with premerge/fallback), §4 (OFPA), §5.5 (manifest as Merkle/prolly structure), §6 lesson 4", "scratchpad/research/ai-dev-data.md §1.1 (DVC .dir manifests)"]
+    },
+    {
+      "id": "AGD-GW-15",
+      "title": "Rename, move and delete are not modeled: Synergos FileId is the path (rename = full retransfer + version reset, deletions resurrect), Curare resources have a mutable name and no path, and snapshots store ids only",
+      "theme": "ai-game",
+      "repo": "both",
+      "area": "Synergos manifest/checkout + Curare assets schema",
+      "severity": "medium",
+      "kind": "design-gap",
+      "evidence": [
+        {"file_line": "/home/user/Synergos/synergos-core/src/manifest.rs:35-46", "quote": "pub struct ManifestEntry { pub version: u64, pub size: u64, pub crc: u32, pub updated_at: u64, pub publisher: String, }  // no content hash, no tombstone, no previous path"},
+        {"file_line": "/home/user/Synergos/synergos-core/src/manifest.rs:218-219", "quote": "None => { let version = 1u64.max(floor.saturating_add(1));  // a renamed path is a brand-new entry"},
+        {"file_line": "/home/user/Synergos/synergos-core/src/checkout.rs:111-114", "quote": "report.extra = previous.into_iter().filter(|rel| !target.files.contains_key(rel)).collect();  // extra files are reported, never removed"},
+        {"file_line": "/home/user/Curare/curare-server/src/db/schema.ts:60", "quote": "name: text('name').notNull(),"},
+        {"file_line": "/home/user/Curare/curare-server/migrations/007_snapshot_integrity.sql:43-44", "quote": "IF NEW.logical_asset_id<>OLD.logical_asset_id OR NEW.versioning_type<>OLD.versioning_type OR NEW.resource_role<>OLD.resource_role THEN RAISE EXCEPTION  // name stays mutable, unrecorded"},
+        {"file_line": "/home/user/Curare/curare-server/src/db/release-repository.ts:63", "quote": "const snapshot = { submissionIds: [...release.submissionIds], versionIds: [...selected].sort() };  // no names/paths captured"}
+      ],
+      "scenario": "A tech artist reorganizes Textures/ into Textures/Characters/ (4 GB). Synergos treats every moved file as new: version 1 (or floor+1), full retransfer to every peer and history node (no content-hash dedup on the live path), and the old paths stay in every peer's working tree because checkout never deletes 'extra' files — a deleted placeholder asset resurrects on the next node that still offers it. In Curare, renaming a resource rewrites `name` in place, so release R1's items now display the new name and nobody can answer 'what was this file called when R1 shipped'.",
+      "impact_ai_game": "P4 `p4 move`, Plastic's move detection and git's rename heuristics keep history across reorganizations, which happen constantly in Unity/Unreal projects; datasets get re-sharded and re-labeled the same way. Without tombstones, 'delete this asset from the game' is not expressible.",
+      "current_state": "Sy: path-keyed entries, no tombstones, no hash, extras untouched. Cu: flat mutable name, no path, no rename history, id-only release snapshots.",
+      "proposed_redesign": "Make entries content-addressed with explicit ops. Synergos manifest entry gains `blake3` and `state ∈ {present, deleted}` (tombstone with version) and an optional `moved_from`; `project mv` and `project rm` IPC commands produce signed ops; receivers apply deletes to the working tree only with the dirty check (GW-02) and keep tombstones through GC grace; FileOffer carries blake3 so a rename is answered from local bytes without transfer (history node dedups by hash already). Curare: add `path` (unique per project per ref) to resources, record `{path, name}` on every `asset_versions` row and in submission items/release manifests (GW-03), add `POST /assets/:id/move` that writes a rename event instead of mutating in place, and an archive/delete op that writes a tombstone in the manifest rather than flipping visibility. 4軸: AI学習量=低〜中; 作業コスト=M (schema + 2 ops each side); 解決度=高; 主目的との一致度=高 ('what was shipped in R1' is a release-composition guarantee).",
+      "alternatives": [
+        "Rename detection by hash only (no explicit op) — cheap on Synergos once blake3 is in the manifest, but still no delete semantics.",
+        "Keep names mutable but snapshot names into release.snapshot JSON — fixes the audit question only."
+      ],
+      "enforcement": "runtime",
+      "confidence": 0.85,
+      "sources": ["scratchpad/research/vcs-game-ai.md §3.2 (path-only identity breaks on rename), §5.9 (tombstone + grace + GC), §6 lesson 1 and 5", "scratchpad/maps/sy-core-versioning.md W-27", "scratchpad/maps/cu-versioning-core.md A1"]
+    },
+    {
+      "id": "AGD-GW-16",
+      "title": "No migration path from Perforce, SVN or Git LFS: no importer, no changelist/revision metadata model, no LFS pointer or API compatibility, and git itself is declared a non-prerequisite",
+      "theme": "ai-game",
+      "repo": "both",
+      "area": "Curare catalog import / Synergos history node ingestion",
+      "severity": "medium",
+      "kind": "missing-feature",
+      "evidence": [
+        {"file_line": "/home/user/Curare/spec/plan/overview.md:14-17", "quote": "グラフィックリソース管理は既存のバージョン管理ツール（git/SVN/Perforce）と相性が悪い。... - SVNはレガシー - Perforceは高コスト"},
+        {"file_line": "/home/user/Curare/spec/plan/competitive-analysis.md:19-28", "quote": "## Perforce ... - Stream管理が便利 - アセットの競合が起きにくい ... - 高い - 初期のとっつきが悪い - 発注管理には使えない"},
+        {"file_line": "ls /home/user/Curare/curare-server/src/routes", "quote": "acquisition assets assignments identity logical-assets projects releases search shared-nodes storage-operations submissions synergos ui upload versions workflow — no import/bulk-ingest route"},
+        {"file_line": "grep -i 'perforce|p4 |svn|git lfs|lfs|plastic|migrate from' /home/user/Synergos (excl. target)", "quote": "only docs/versioning-design.md:12,103,337 (LFS as analogy) — no importer, no LFS endpoint"},
+        {"file_line": "/home/user/Curare/spec/plan/versioning-types.md:4", "quote": "Git は製品利用の前提にしない。"},
+        {"file_line": "/home/user/Curare/curare-server/src/db/schema.ts:83-88", "quote": "versionNum: integer('version_num').notNull(), blobRef, fileSize, contentHash, pinName, comment, createdBy, createdAt  // no external changelist/revision/author-of-record fields"}
+      ],
+      "scenario": "A studio with a 1.5 TB Perforce depot (Warhorse scale) wants to adopt the platform. There is no `p4 → curare` importer, no way to record the original changelist number, submitter and timestamp on a version (createdBy must be the API caller's Cernere UUID, createdAt is now()), no bulk ingest (4 API calls + per-file Cernere WS auth per file), and no LFS compatibility so an existing LFS-based project cannot be re-pointed. The only option is to start history from zero.",
+      "impact_ai_game": "Every studio already has a VCS; migration cost decides adoption (Perforce's own positioning is 19/20 AAA). Hugging Face's Xet migration kept an LFS bridge for exactly this reason. AI teams likewise arrive with DVC/LFS repos.",
+      "current_state": "No importer, no external-revision metadata, no LFS batch/locks/pointer support, bulk ingest is per-file and auth-bound.",
+      "proposed_redesign": "(1) Metadata: add `origin{system: p4|svn|git-lfs|plastic, revision, changelist, author_name_hash?, submitted_at}` to asset_versions/manifest entries (hashed author, no PII) and allow trusted importers (service principal, GW-13) to set createdAt/origin. (2) Bulk ingest API: `POST /import/manifests` accepting a manifest (GW-03/GW-04) plus a batch admission (`POST /upload/batch` returning N capability URLs under one auth) so a 1M-file depot is ingested in manifest-sized units; history-node side `synergos history import --from p4 //depot/... ` streaming revisions into objects + index with origin tags. (3) Importers as CLI tools: `curare-import p4` (p4 filelog/print), `curare-import svn`, `curare-import lfs` (reads pointers + LFS objects), mapping branches/streams to refs; keep LFS wire compatibility (GW-07) so LFS-based teams can switch servers without rewriting history. (4) Dry-run report (files, bytes, dedup ratio by whole-file hash) before import. 4軸: AI学習量=中 (p4 filelog/svn dump formats are documented; LFS spec public); 作業コスト=M〜L; 解決度=高 for adoption; 主目的との一致度=中〜高 (external sale goal in use-cases.md:19-21 depends on it).",
+      "alternatives": [
+        "Import latest state only (no history) — cheap, loses the archive that studios keep P4 for.",
+        "Run Synergos as an LFS custom-transfer/promisor behind an existing git+LFS host and skip Curare import — preserves git history for LFS teams only."
+      ],
+      "enforcement": "runtime",
+      "confidence": 0.8,
+      "sources": ["scratchpad/research/vcs-game-ai.md §1.1, §1.3 (scale), §3.1 (LFS pointer spec, custom transfer), §5.3 (Xet kept an LFS bridge)", "scratchpad/maps/cu-storage-transfer.md T1 (per-file call chain)"]
+    },
+    {
+      "id": "AGD-GW-17",
+      "title": "Scale ceilings far below studio size: 500/500/1000 hard caps on submissions/releases/closures, unpaginated lists, whole-manifest and whole-index JSON rewrites, startup CRC scan of every asset, 1 MiB IPC frames, per-request Cernere WebSocket auth, and one storage node",
+      "theme": "ai-game",
+      "repo": "both",
+      "area": "Curare limits/queries + Synergos manifest/history/IPC/storage allocation",
+      "severity": "high",
+      "kind": "design-gap",
+      "evidence": [
+        {"file_line": "/home/user/Curare/curare-server/src/submissions/contract.ts:16", "quote": "versionIds: z.array(z.string().uuid()).min(1).max(500),"},
+        {"file_line": "/home/user/Curare/curare-server/src/routes/releases.ts:11", "quote": "const ids = z.array(z.string().uuid()).min(1).max(500);"},
+        {"file_line": "/home/user/Curare/curare-server/src/db/acquisition-repository.ts:17", "quote": "if (visited.size >= 1000) throw new VersioningError('acquisition_too_large', 409);"},
+        {"file_line": "/home/user/Curare/curare-server/src/db/repository.ts:179-182", "quote": "async findByAssetId(assetId: string) { return db.select().from(schema.assetVersions).where(eq(schema.assetVersions.assetId, assetId)).orderBy(desc(schema.assetVersions.versionNum)); }  // unpaginated"},
+        {"file_line": "/home/user/Curare/curare-server/src/auth/middleware.ts:18", "quote": "const actor = await resolveCernereActor(authorization.slice(7));  // new WebSocket to Cernere on every /api/v1 request"},
+        {"file_line": "/home/user/Synergos/synergos-core/src/manifest.rs:165-171", "quote": "pub async fn save(&self, root: &Path) -> std::io::Result<()> { ... let json = serde_json::to_vec_pretty(self) ... tokio::fs::write(&tmp, json).await?;  // whole manifest per file event"},
+        {"file_line": "/home/user/Synergos/synergos-core/src/restore.rs:44", "quote": "let Ok((actual_crc, actual_size)) = crc32_of_file(&path).await else {  // every manifest file is read at daemon start"},
+        {"file_line": "/home/user/Synergos/synergos-ipc/src/transport.rs:39", "quote": "pub const MAX_MESSAGE_SIZE: u32 = 1024 * 1024;"},
+        {"file_line": "/home/user/Curare/curare-server/src/db/storage-node-allocation.ts:10,21", "quote": "const configured=z.string().uuid().safeParse(process.env.SYNERGOS_STORAGE_NODE_ID); ... return configured.data;  // always the one configured node"},
+        {"file_line": "/home/user/Synergos/docs/versioning-design.md:103-104", "quote": "少人数チームでは **常駐ノード 1 台 (例: AWS Linux) を履歴ノード**にする ... 履歴ノードは複数あってよい ... 相互の同期はしない (各自が見た版を持つ)"}
+      ],
+      "scenario": "A console project: 60 seats, 400k files, 3 TB. Curare: a milestone release of 2,000 approved assets cannot be finalized (closure cap 1000) and a single logical asset with 600 resources cannot be submitted (500); `GET /assets/:id/versions` returns every version of a PSD saved 50×/day; each of the ~5 API calls per file opens a Cernere WebSocket, so a 10k-file ingest is 50k handshakes. Synergos: a checkout of 400k files rewrites a multi-MB manifest.json 400k times under the project mutex, `history ls` on the history node dies at 1 MiB IPC frame, and daemon restart CRC-reads 3 TB before serving. All org saves land on one custody node.",
+      "impact_ai_game": "Reference scale is public: Ubisoft 24M files/166M revisions/5 TB, Warhorse 1.5 TB/75 users; HF caps 10k entries per folder and 100k files per repo and still had to move to block-level CAS. The current ceilings exclude every console studio and most dataset work.",
+      "current_state": "Hard caps 500/500/1000; OFFSET pagination capped at 100 with unpaginated version/submission/assignment lists; O(n²) manifest/index rewrites; startup full scan; 1 MiB IPC; per-request WS auth; single storage node; no quotas.",
+      "proposed_redesign": "(1) Replace per-item caps with manifest objects (GW-03): submissions/releases reference a manifest hash, closure resolution becomes a set operation on manifest entries (recursive CTE + one grant query), acquisition plans are paged and lazily signed. (2) Cursor pagination on every list; `GET /versions?latest=1`. (3) Synergos: append-only manifest journal (one line per event) compacted into the committed manifest at publish/checkout boundaries, sqlite/redb for history index and version_state, lazy verification on first want with a size+mtime+inode cache instead of startup CRC. (4) IPC: streamed/paginated responses (`HistoryList{cursor}`) and a raised local frame cap. (5) Auth: short-TTL actor cache keyed by token hash with CAEP/SSF revocation hooks, request-time re-check only for destructive ops. (6) Storage topology: declared node roles (history/custody primary, replica, site cache) with per-org/site allocation and replication factor in receipts (P4 proxy/forwarding-replica/edge as one binary in modes). 4軸: AI学習量=中; 作業コスト=L overall (each item S〜M); 解決度=高 (unblocks real studios); 主目的との一致度=高.",
+      "alternatives": [
+        "Raise the numeric caps to 50k and add indexes — buys time but keeps O(items) API bodies and per-file auth.",
+        "Keep one history node and accept startup scan — acceptable only for indie-scale projects."
+      ],
+      "enforcement": "runtime",
+      "confidence": 0.9,
+      "sources": ["scratchpad/research/vcs-game-ai.md §1.3 (Ubisoft/Warhorse scale), §1.2 (proxy/replica/edge topologies), §5.2/§5.5 (metarange / prolly manifests), §6 lessons 2 and 4", "scratchpad/research/ai-dev-data.md §0 takeaway 3 (HF limits), §1.7", "scratchpad/maps/cu-versioning-core.md A2, A4, T1", "scratchpad/maps/sy-core-versioning.md W-20, W-29", "scratchpad/maps/sy-history-hooks-ipc.md W16, W17"]
+    },
+    {
+      "id": "AGD-GW-18",
+      "title": "No per-path policy (P4 typemap analogue): retention caps, lock mode, compression and syncability cannot be declared by pattern; working versions are retained forever and history retention is one global knob",
+      "theme": "ai-game",
+      "repo": "both",
+      "area": "Synergos history config / Curare retention",
+      "severity": "low",
+      "kind": "missing-feature",
+      "evidence": [
+        {"file_line": "/home/user/Synergos/synergos-net/src/config.rs:296-307", "quote": "impl Default for HistoryConfig { fn default() -> Self { Self { enabled: false, projects: default_history_projects(), root: default_history_root(), max_versions_per_file: 0, max_age_days: 0, max_bytes: 0, rotation: ... } } }  // global, 0 = unlimited"},
+        {"file_line": "/home/user/Synergos/docs/versioning-design.md:206", "quote": "- 削除候補 = `max_versions_per_file` / `max_age_days` / `max_bytes` のいずれかを超えた版  (same policy for every path)"},
+        {"file_line": "/home/user/Curare/curare-server/migrations/005_releases.sql:24", "quote": "IF TG_OP='DELETE' THEN RAISE EXCEPTION 'retain resource versions'; END IF;"},
+        {"file_line": "/home/user/Curare/spec/feature/features.md:15-17", "quote": "### アーカイブ  更新がないデータを保管庫へ移す仕組み。"},
+        {"file_line": "/home/user/Curare/spec/feature/workflow-guards.md:38-39", "quote": "## [id: SPEC-CU-catalog-archive] ... 既定の検索・一覧はアーカイブ済み (`visibility='archived'`) を返さない。  (archive is a flag, blobs stay in hot storage)"}
+      ],
+      "scenario": "The art director wants: 'keep only the last 10 working versions of *.psd, keep every *.uasset, never compress *.png, exclusive-lock *.mb'. Synergos offers a single max_versions_per_file for the whole project (applied only when someone runs `history gc` by hand); Curare keeps every working PSD version forever (no delete, no cold tier) so a 500 MB PSD saved 20×/day costs 10 GB/day indefinitely.",
+      "impact_ai_game": "P4's typemap (`binary+lS10`) is how studios bound storage without losing source history; Iceberg/Delta refs carry per-ref retention. For AI data, per-path retention classes map to checkpoints (keep last N) vs datasets (keep all tagged).",
+      "current_state": "Sy: three global knobs, manual GC, tags protect but are node-local. Cu: versions immutable and undeletable; archive = visibility flag.",
+      "proposed_redesign": "A shared `policy` document per project (committed `.synergos/policy.toml`, mirrored in Curare `projects.settings.policy`) with ordered rules `[[rule]] match=[glob] lock=exclusive|soft|none retain={versions:N, days:D} compress=none|lz4|zstd sync=true|false chunk=true|false`; applied at add/publish time (recorded on the entry so later policy edits do not require reopening files — avoiding P4's lock-as-filetype pain) and consulted by history GC (per-path retention), by Curare's working-version GC (tombstone + grace, never for submission/release-referenced versions), by the lock service (GW-01) and by workspace filters (GW-06). Scheduled GC with dry-run report and audit. 4軸: AI学習量=低; 作業コスト=S〜M; 解決度=中〜高 (storage bounded, policies explicit); 主目的との一致度=高 (保持ポリシー is listed as Curare's responsibility in versioning-types.md:7).",
+      "alternatives": [
+        "Per-resource settings in the Curare UI only — no pattern defaults, no Synergos enforcement.",
+        "Keep everything and rely on rotation to cold storage — cost grows linearly; still no lock/compression policy."
+      ],
+      "enforcement": "runtime",
+      "confidence": 0.8,
+      "sources": ["scratchpad/research/vcs-game-ai.md §1.2 (typemap, +Sn, +F), §1.6 (adopt per-path policy declared by pattern; avoid lock as file type), §5.9 (per-ref retention)"]
+    },
+    {
+      "id": "AGD-GW-19",
+      "title": "Many-small-files (Unreal OFPA, Unity meta files, dataset samples) efficiency: one gossip stream per file per peer, one TXFR stream per file, and in Curare two DB rows plus four authenticated API calls per file",
+      "theme": "ai-game",
+      "repo": "both",
+      "area": "Synergos gossip fan-out/exchange + Curare upload path",
+      "severity": "medium",
+      "kind": "inefficiency",
+      "evidence": [
+        {"file_line": "/home/user/Synergos/synergos-core/src/daemon.rs:872-879", "quote": "for peer in peers { let wire = GossipWireMessage { topic: ..., signed: outbound.signed.clone() }; ... tokio::spawn(async move { match quic.open_stream(&peer, StreamType::Control).await {  // one QUIC stream per (message, peer)"},
+        {"file_line": "/home/user/Synergos/synergos-core/src/exchange/mod.rs:1328-1330", "quote": "Step 1 transfer ledger に Offer を登録 ... Step 3 Gossipsub で FileOffer をブロードキャスト (to all peers)  // per file"},
+        {"file_line": "/home/user/Curare/curare-server/public/persistent-operations.js:54-61", "quote": "const admission = await api('upload','POST',{...}); ... await fetch(admission.uploadUrl,{method:'PUT',...}); ... await api('upload/confirm','POST',{blobRef:admission.blobRef}); return api(`assets/${payload.assetId}/versions`,'POST',{...});"},
+        {"file_line": "/home/user/Curare/curare-server/src/db/catalog-repository.ts:47-55", "quote": "const logical = input.logicalAssetId ? ... : await createLogicalAsset(actor, {...}, tx); ... const [resource] = await tx.insert(schema.assets).values({ ...input, logicalAssetId: logical.id, createdBy: actor.userId }).returning();"},
+        {"file_line": "/home/user/Curare/curare-server/src/auth/middleware.ts:18", "quote": "const actor = await resolveCernereActor(authorization.slice(7));"}
+      ],
+      "scenario": "A World Partition level with 20,000 OFPA actor files is published to a 10-peer project: Synergos opens 20,000 FileOffer streams × 10 peers, then each peer sends 20,000 FileWant streams and receives 20,000 TXFR streams, each doing a manifest rewrite (GW-17). Uploading the same actors as Curare resources costs 20,000 logical_assets + 20,000 assets rows, 80,000 API calls, and 80,000 Cernere WebSocket handshakes.",
+      "impact_ai_game": "OFPA is the default for new Unreal levels and ImageNet-style datasets are millions of small objects; S3's 100–200 ms first-byte makes per-object I/O the dominant cost, which is why HF caps files per folder and every CAS packs small blobs (Xet xorbs, WebDataset shards).",
+      "current_state": "Per-file everything on both sides; no batching of offers/wants, no packed small-object transfer, no batch admission, one catalog row pair per file.",
+      "proposed_redesign": "(1) Synergos: batch gossip — `FileOfferBatch{entries[]}` / `FileWantBatch` (≤ 256 KiB frame) and a `TXFR` pack mode that streams many small blobs in one QUIC stream with per-entry BLAKE3 (Bao-verified), driven by the manifest diff rather than per-file events; coalesce manifest writes per batch. (2) Curare: `POST /upload/batch` (one admission call → N capability URLs, one confirm with N hashes, one `POST /manifests` registering N versions) and a 'collection' resource kind whose versions are manifests (directory-as-asset) so an OFPA level or a dataset shard set is one logical asset with one row per version, not one per file. (3) Pack small blobs into xorb-like 64 MiB containers on history/custody nodes with a chunk-length table for ranged reads. 4軸: AI学習量=中; 作業コスト=M; 解決度=高 for OFPA/datasets; 主目的との一致度=高 (fast transfer is the main purpose).",
+      "alternatives": [
+        "Only batch gossip (no pack transfer) — removes the n×m control streams, keeps n data streams.",
+        "Recommend Unity/Unreal users keep levels monolithic — contradicts engine defaults."
+      ],
+      "enforcement": "runtime",
+      "confidence": 0.85,
+      "sources": ["scratchpad/research/vcs-game-ai.md §4 (OFPA: thousands of small files; manifest must handle many small blobs), §5.3 (xorbs)", "scratchpad/research/ai-dev-data.md §0 takeaway 3, §1.7 (S3 first-byte latency)", "scratchpad/research/transfer-efficiency.md §6 rows 'Unity/Unreal project trees' and '10 M-file image datasets'", "scratchpad/maps/cu-versioning-core.md A4"]
+    }
+  ]
+}

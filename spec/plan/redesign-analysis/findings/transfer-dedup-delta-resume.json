@@ -1,0 +1,955 @@
+{
+  "findings": [
+    {
+      "id": "TRN-DD-01",
+      "title": "2026-08-16 'whole-file, no CDC' decision rests on a LAN-bandwidth premise and leaves 50-60% of bytes on the table for iteratively edited large assets",
+      "theme": "transfer",
+      "repo": "both",
+      "area": "Synergos transfer policy (docs/versioning-design.md §0/§3.7), history store, Curare blob storage",
+      "severity": "high",
+      "kind": "design-gap",
+      "evidence": [
+        {
+          "file_line": "/home/user/Synergos/docs/versioning-design.md:11",
+          "quote": "| バイナリ / 大きいファイルの **差分転送** をするか | **しない**。転送は Phase 1 のまま全体転送 (blake3 検証)。差分の検知は `version` + size + CRC で足りる。CDC チャンク重複排除案は neco 決定 (2026-08-16) で取り下げ |"
+        },
+        {
+          "file_line": "/home/user/Synergos/docs/versioning-design.md:25",
+          "quote": "差分転送はしない (帯域は LAN/Mesh で足りる前提)"
+        },
+        {
+          "file_line": "/home/user/Synergos/docs/versioning-design.md:319",
+          "quote": "差分転送は帯域の最適化であり、LAN / Cloudflare Mesh の帯域では必須ではない"
+        },
+        {
+          "file_line": "/home/user/Synergos/docs/versioning-design.md:322-323",
+          "quote": "将来「大容量の一部更新が頻繁で帯域が足りない」が実測で出たら、履歴ノードの objects をチャンク化する形で案 B を**履歴ノードの内側だけに**後付けできる (通常ノードの挙動は変えない)"
+        },
+        {
+          "file_line": "/home/user/Synergos/synergos-net/src/transfer/mod.rs:11-12",
+          "quote": "//! - 再送 / 並列取得 / resume は追って拡張する。現バージョンは単一ストリームで\n//!   順次送る最小仕様。"
+        },
+        {
+          "file_line": "/home/user/Synergos/synergos-core/src/history/store.rs:164-176",
+          "quote": "let object_is_valid = match validate_object(&obj, &snapshot.hash, expected_size, crc).await { ... ArchiveOutcome::Deduplicated"
+        },
+        {
+          "file_line": "/home/user/Curare/curare-server/src/routes/upload.ts:29",
+          "quote": "const proposedBlobRef = `uploads/${body.assetId}/${uuidv4()}`;"
+        }
+      ],
+      "scenario": "An artist saves a 500 MB layered PSD 20 times a day. Every save is a new whole-file BLAKE3 (Synergos) or a new random blobRef (Curare); whole-file dedup matches 0 of 20 saves. Synergos publishes 10 GB/day per artist per PSD to every auto-pulling peer and to the history node; a 10-artist team moves ~100 GB/day over the Cloudflare WARP mesh or relay (~10% of peer pairs end up relayed per the Tailscale data, and the relay is single-stream WebSocket). A 60 GB fine-tune checkpoint saved after each epoch re-uploads 60 GB although 30-85% of its chunks are identical to the previous epoch. The decision's premise ('LAN / Cloudflare Mesh の帯域で足りる') does not hold for outsourcers, home workers or the relay path, and the document itself reserves chunking 'inside history nodes only' for when measurements show it is needed, but nothing measures it.",
+      "impact_ai_game": "Iterative PSD/MB/EXR saves and LLM/diffusion checkpoints are exactly the class where whole-file dedup is provably ~0% and chunk-level dedup gives 50-60% (Xet CORD-19 50-update benchmark: storage 8.9 GB -> 3.52 GB, upload 47 -> 24 min; GPT-2 two safetensors versions 1.2 GB -> 645 MB; fine-tunes 30-85%). Meyer-Bolosky: whole-file dedup captures ~75% of block-level savings on general file trees, so the loss is concentrated in large iteratively edited files, i.e. the studio's heaviest assets. For derived textures (BCn/DDS) and PNG/JPEG the loss is ~0, so a blanket 'no CDC' is right for those and wrong for the former.",
+      "current_state": "No sub-file dedup anywhere: TXFR streams the whole file (transfer/mod.rs:71-112); history store dedups only whole objects by BLAKE3 after a full staging copy (store.rs:146,164-176); custody keys objects by sha256(opaqueObjectId) (synergos-custody/src/signature.rs:5-7); Curare stores every admission under a fresh UUID blobRef. Decision text explicitly defers CDC until 'measured', but no transfer-volume telemetry exists.",
+      "proposed_redesign": "Minimal-regret tiering, keeping the 2026-08-16 invariants (identity = whole-file BLAKE3; git manifest = pointer set; normal nodes unchanged): (1) Keep whole-file BLAKE3 as the identity in manifest/custody/Curare and add per-blob 'chunk map' metadata = FastCDC/Gear chunk boundaries at Xet constants (target 64 KiB, min 8 KiB, max 128 KiB, mask 0xFFFF000000000000, h reset at boundary, published test vectors pinned in CI) plus a Bao outboard tree (16 KiB groups, ~0.4% overhead). (2) Dedup lives only inside the history node object store and inside custody: objects >= 8 MiB are stored as chunk runs in 64 MiB packs ('xorbs'), small objects stay whole. (3) Transfer gains one optional negotiation: before a FileWant/PUT the receiver sends the list of chunk hashes it already holds (HMAC-keyed per org so the hash list is not a cross-tenant oracle); the sender sends only missing chunks, each Bao-verifiable against the whole-file hash. Normal nodes without a chunk store simply answer 'have nothing' and get whole-file behaviour. (4) Curare: `objects` table keyed by (org_id, blake3) with chunk_map and refcount; admission returns `alreadyStored`/`missingChunks` so a save of an unchanged or slightly changed PSD does not PUT the whole file. (5) Gate the rollout on a measured benchmark on real studio data (PSD/MB/EXR/FBX/safetensors) — the research found no public dedup ratio for game formats. 4-axis evaluation (HARNESS §3.5): AI学習量=中 (fastcdc-rs, bao-tree, blake3 are existing libraries; constants fixed by test vectors) / 作業コスト=中 (history+custody internals and one optional wire message; GC by pack refcount; no change to manifest.json semantics) / 解決度=高 for PSD/checkpoints (-50..60% bytes, verified-stream resume for free), 中 for FBX/textures (needs TRN-DD-17 export policy) / 主目的との一致=高 (「揃う・巻き戻せる」 unchanged; adds the WAN/outsourcer/relay case the current premise excludes). Alternative A below scores 小/小/中/高 and should be the first step if the benchmark shows <30% savings.",
+      "alternatives": [
+        "A. Storage-only delta: history node stores version N+1 as `zstd --patch-from=N` (window up to 2 GB) and custody keeps whole objects; no wire change, no chunker; saves disk only, not bandwidth (AI学習量 小 / コスト 小 / 解決度 中 / 一致 高).",
+        "B. Full Xet-style CDC on every node including the working-tree transfer path (学習量 大 / コスト 大 / 解決度 高 / 一致 中: re-implements the transport the decision wanted to keep thin).",
+        "C. rsync/zsync-style whole-file delta with rolling checksums (学習量 中 / コスト 中 / 解決度 中: sender CPU proportional to file size per receiver, no storage dedup).",
+        "D. Keep the decision as-is but add transfer-volume telemetry (bytes/day per project, per route Direct/Relay) so the 'measure first' clause in §3.7 can actually trigger."
+      ],
+      "enforcement": "ci-gate",
+      "confidence": 0.85,
+      "sources": [
+        "/tmp/claude-0/-home-user/a3d7da4f-7a05-5e3e-8d37-b3591d10105f/scratchpad/research/transfer-efficiency.md §1.1-1.3 (FastCDC, Xet constants, Meyer-Bolosky 75%, ZipLLM 54%), §6 decision matrix row PSD/checkpoints",
+        "/tmp/claude-0/-home-user/a3d7da4f-7a05-5e3e-8d37-b3591d10105f/scratchpad/research/ai-dev-data.md §1.2 (Xet numbers: CORD-19 8.9->3.52 GB, GPT-2 -53%, fine-tunes 30-85%)",
+        "/tmp/claude-0/-home-user/a3d7da4f-7a05-5e3e-8d37-b3591d10105f/scratchpad/research/transfer-efficiency.md §4.4 (Tailscale: ~10% pairs relayed, DERP throughput)",
+        "https://github.com/huggingface/hub-docs/blob/main/docs/xet/chunking.md",
+        "https://www.usenix.org/conference/fast11/study-practical-deduplication"
+      ]
+    },
+    {
+      "id": "TRN-DD-02",
+      "title": "No transfer-level 'already have' check: FileOffer carries content_hash=0 and pull eligibility is keyed by (project, path, version), so identical bytes are re-transferred across paths, projects and restores",
+      "theme": "transfer",
+      "repo": "synergos",
+      "area": "Exchange offer/want flow, daemon auto-pull, checkout",
+      "severity": "medium",
+      "kind": "design-gap",
+      "evidence": [
+        {
+          "file_line": "/home/user/Synergos/synergos-core/src/exchange/mod.rs:572-575",
+          "quote": "// TODO(S5): Exchange の呼び出し元から Blake3 を渡せるよう\n// broadcast_offer のシグネチャを拡張する。現状は CRC だけ\n// 流して content_hash はゼロ (受信側は CRC フォールバック)。\ncontent_hash: Default::default(),"
+        },
+        {
+          "file_line": "/home/user/Synergos/synergos-core/src/daemon.rs:936",
+          "quote": "Ok((topic, GossipMessage::FileOffer { sender, file_id, version, size, crc, content_hash: _ })) =>"
+        },
+        {
+          "file_line": "/home/user/Synergos/synergos-core/src/daemon.rs:978-979",
+          "quote": "let auto_pull_eligible = sender != *ctx.exchange.local_peer_id()\n    && !ctx.exchange.has_shared_file(&project_id, &file_id, version)"
+        },
+        {
+          "file_line": "/home/user/Synergos/synergos-core/src/checkout.rs:106",
+          "quote": "Some((entry.size, entry.crc)),"
+        },
+        {
+          "file_line": "/home/user/Synergos/docs/versioning-design.md:41",
+          "quote": "| **重複排除 (dedup)** | 同じ内容を二度持たない/送らない | 履歴ノードの保管庫でファイル全体の blake3 で行う (同じ内容の版は 1 回しか置かない) |"
+        }
+      ],
+      "scenario": "A 2 GB texture atlas is published at `art/atlas.png`, later renamed to `art/ui/atlas.png` (FileId == path, so a rename is add+delete), and also copied into a sibling project. Each event is a new (project, file_id, version) key; every peer auto-pulls 2 GB three times although it already holds the bytes. A `project restore --version 3` that could be served from the local history store object is instead requested from the network when the manifest entry differs only in version number. The doc claims 'same content transferred once' only for the history node's disk, not for the wire.",
+      "impact_ai_game": "Unity/Unreal projects routinely duplicate or move large assets (branch copies, reference dupes, OFPA re-layouts); dataset curation copies shards between projects. Whole-file dedup on the wire is the cheap 75% of the win and is missing even though every sender already computes the BLAKE3 (hash_file at exchange/mod.rs:1139).",
+      "current_state": "Offer carries CRC32 only; receiver discards content_hash; has_shared_file is keyed by (project, file_id, version); checkout pins by (size, crc); no local content index (working tree + history objects) is consulted before FileWant.",
+      "proposed_redesign": "Carry blake3 (and bao_root) in FileOffer/manifest; receiver keeps a local content index {blake3 -> (path|history object)} and on an offer whose blake3 is present locally performs a reflink/hardlink/copy instead of FileWant (same as Curare's knownHashes but server-authoritative and verified). FileWant gains `have: [blake3]` so a publisher can answer 'already held' with no stream. This is the LFS batch 'server omits actions when object exists' semantics applied P2P.",
+      "alternatives": [
+        "Only index history-node objects (not working tree) — simpler, covers restore/rename on history nodes only.",
+        "Rely on TRN-DD-01 chunk negotiation (superset, but heavier)."
+      ],
+      "enforcement": "runtime",
+      "confidence": 0.9,
+      "sources": [
+        "/tmp/claude-0/-home-user/a3d7da4f-7a05-5e3e-8d37-b3591d10105f/scratchpad/research/vcs-game-ai.md §3.1 (LFS batch: server omits actions when it already has the object)",
+        "/tmp/claude-0/-home-user/a3d7da4f-7a05-5e3e-8d37-b3591d10105f/scratchpad/research/transfer-efficiency.md §1.3 (whole-file dedup = ~75% of block-level savings)"
+      ]
+    },
+    {
+      "id": "TRN-DD-03",
+      "title": "TXFR cannot resume: single sequential stream, no offset/range, pause/resume/cancel are state flags, sender completes without receiver ack, partial file deleted on any error",
+      "theme": "transfer",
+      "repo": "synergos",
+      "area": "synergos-net transfer (TXFR) + Exchange execute_send/handle_incoming_transfer",
+      "severity": "high",
+      "kind": "design-gap",
+      "evidence": [
+        {
+          "file_line": "/home/user/Synergos/synergos-net/src/transfer/mod.rs:71-112",
+          "quote": "pub async fn send_stream<R, W>(mut reader: R, mut writer: W, header: TransferHeader) ... while remaining > 0 { ... write_frame(&mut writer, &FrameKind::Chunk(frame)).await?; ... } ... writer.shutdown().await.ok();"
+        },
+        {
+          "file_line": "/home/user/Synergos/synergos-net/src/transfer/mod.rs:25",
+          "quote": "pub const CHUNK_SIZE: usize = 64 * 1024;"
+        },
+        {
+          "file_line": "/home/user/Synergos/synergos-core/src/exchange/mod.rs:733-740",
+          "quote": "let tmp_path = tmp_dir.join(format!(\"incoming-{}.part\", uuid::Uuid::new_v4()));\nlet header = match receive_over_quic_with_header(&mut recv, header, &tmp_path).await {\n    Ok(h) => h,\n    Err(e) => {\n        // 中断・検証失敗の残骸を残さない\n        let _ = tokio::fs::remove_file(&tmp_path).await;"
+        },
+        {
+          "file_line": "/home/user/Synergos/synergos-core/src/exchange/mod.rs:641",
+          "quote": "let (send, _recv) = quic\n    .open_stream("
+        },
+        {
+          "file_line": "/home/user/Synergos/synergos-core/src/exchange/mod.rs:1500-1516",
+          "quote": "async fn pause_transfer(...) ... async fn resume_transfer(..."
+        },
+        {
+          "file_line": "/home/user/Synergos/synergos-core/src/exchange/mod.rs:26",
+          "quote": "const PINNED_FETCH_TTL_MS: u64 = 5 * 60 * 1000;"
+        },
+        {
+          "file_line": "/home/user/Synergos/synergos-net/src/quic/mod.rs:477-484",
+          "quote": "transport.max_concurrent_bidi_streams(...); transport.max_idle_timeout(Some(... (no keep_alive_interval, no stream_receive_window set)"
+        }
+      ],
+      "scenario": "A 40 GB Unreal level pack is auto-pulled over a laptop Wi-Fi link. At 70% the connection migrates or idles >30 s (no keepalive is configured, so idle QUIC connections die at idle_timeout_ms=30000); the receiver's `.part` is deleted, the sender has already marked the transfer Completed and the ledger Fulfilled (send_stream ignores shutdown errors and execute_send calls complete_transfer on Ok), and the receiver's Queued ActiveTransfer never completes. A checkout of an older version pinned for 5 minutes (PINNED_FETCH_TTL_MS) expires before a 40 GB transfer at 100 MB/s (6.7 min) finishes and the file is then rejected as stale. Every retry restarts from byte 0.",
+      "impact_ai_game": "Multi-GB levels, texture sets and 10-100 GB checkpoints are the normal case; resumability and multi-source fetch are table stakes in Steam (1 MB chunks, resume), Kraken/Dragonfly (4 MiB pieces, parallel parents) and Xet (ranged reconstruction). Without it, WAN/outsourcer sync of large assets is unreliable in practice.",
+      "current_state": "One QUIC bidi stream per file, fixed 64 KiB frames in strict order, no `offset` in TransferHeader, no receiver-side progress event, no ack frame (recv half `_recv` unused), temp file removed on error, pause/resume flip a state enum that execute_send never reads.",
+      "proposed_redesign": "Protocol v2 (new magic `TXF2`, negotiated via ALPN/hello): `TransferRequest{blake3, bao_root, offset, len}` from the receiver; sender streams the byte range plus the Bao slice nodes needed for that range (bao-tree outboard, 16 KiB groups); receiver verifies every 16 KiB group against the whole-file BLAKE3 as it arrives and persists a `.part` with a `.part.verified` high-water mark; on reconnect it re-requests from the verified prefix. Add receiver `Ack{blake3, bytes_ok}` / `Nack{reason}` frames so the sender completes only on Ack. Stripe large files across k ranges to k sources (history node + peers that `have` the hash, TRN-DD-02) with BitTorrent-style endgame re-issue of slow ranges. Pins keyed to the in-flight transfer id instead of wall clock. Set quinn keep_alive_interval < idle_timeout/2 and stream_receive_window >= BDP.",
+      "alternatives": [
+        "Keep TXFR and add only `offset` + keep `.part` on error (resume without verification of the prefix, i.e. trust the local file).",
+        "Replace TXFR with the dormant bitswap/DAG path (needs TRN-DD-15 rework first)."
+      ],
+      "enforcement": "runtime",
+      "confidence": 0.9,
+      "sources": [
+        "/tmp/claude-0/-home-user/a3d7da4f-7a05-5e3e-8d37-b3591d10105f/scratchpad/research/transfer-efficiency.md §1.4 (Bao outboard, abao 16 KiB groups ~0.4%)",
+        "/tmp/claude-0/-home-user/a3d7da4f-7a05-5e3e-8d37-b3591d10105f/scratchpad/research/transfer-efficiency.md §4.1 (quinn defaults: stream_receive_window 1,250,000 B, keep_alive None, idle 30 s)",
+        "/tmp/claude-0/-home-user/a3d7da4f-7a05-5e3e-8d37-b3591d10105f/scratchpad/research/transfer-efficiency.md §4.4 (BEP 3 endgame, Kraken, Dragonfly 4 MiB pieces)"
+      ]
+    },
+    {
+      "id": "TRN-DD-04",
+      "title": "Integrity and stale/conflict decisions happen only after the whole file is on disk, and the only 'expected' hash is the sender's own header — no trusted hash, no Merkle structure, so nothing can be verified or rejected early",
+      "theme": "transfer",
+      "repo": "synergos",
+      "area": "TXFR receive_body + Exchange handle_incoming_transfer",
+      "severity": "medium",
+      "kind": "design-gap",
+      "evidence": [
+        {
+          "file_line": "/home/user/Synergos/synergos-net/src/transfer/mod.rs:208-219",
+          "quote": "FrameKind::Footer(f) => {\n    let total = Blake3Hash(*hasher.finalize().as_bytes());\n    if total != f.total_hash { ... }\n    if total != header.total_hash { ..."
+        },
+        {
+          "file_line": "/home/user/Synergos/synergos-core/src/exchange/mod.rs:743-784",
+          "quote": "let (crc, _) = match crate::manifest::crc32_of_file(&tmp_path).await ... let is_stale = local.version > version; let is_conflict = local.version == version && (local.file_size != header.total_size || local.crc != crc); ... if (is_stale || is_conflict) && !pinned { let _ = tokio::fs::remove_file(&tmp_path).await;"
+        },
+        {
+          "file_line": "/home/user/Synergos/synergos-net/src/transfer/mod.rs:289-313",
+          "quote": "pub async fn hash_file(path: &Path) -> Result<(Blake3Hash, u64, u64)> { ... hasher.update(&buf[..n]); (flat BLAKE3 over the file; no tree/outboard retained)"
+        }
+      ],
+      "scenario": "A peer pushes a 20 GB file with version 7 while the receiver already holds v9. The header already contains version, project_id, file_id and total_size, but the body is fully received, written, BLAKE3-hashed and then CRC32-rescanned (second full read) before `is_stale` is evaluated and the file deleted — 20 GB of network and 40 GB of disk I/O to reject. A bit-flip in the first chunk of a corrupt source is discovered only at the footer, because per-chunk hashes are sender-supplied and the receiver has no trusted expected value to compare against mid-stream.",
+      "impact_ai_game": "Large-asset rejection cost scales with asset size; with 10-100 GB checkpoints and multi-GB levels a single stale push or corrupt source costs minutes to hours of bandwidth before the system says no. Early verification is also the prerequisite for multi-source fetch (TRN-DD-03).",
+      "current_state": "Expected hash is not known in advance (offer content_hash = 0); receive_body writes every chunk before the footer check; stale/pin/conflict checks run after receive and after a full CRC pass; BLAKE3 is a flat hash with no outboard tree, so partial ranges cannot be verified.",
+      "proposed_redesign": "(1) Evaluate stale/pin/conflict/size-quota rules from the peeked header before accepting the body and reset the QUIC stream on rejection. (2) Require that every accepted transfer be bound to a signed offer/manifest entry {project, path, version, size, blake3, bao_root}; the receiver verifies chunks against that bao_root as they arrive (bao-tree decoder) and aborts at the first bad 16 KiB group. (3) Keep a single BLAKE3 pass: the receiver's streaming hasher output replaces the post-hoc CRC pass (CRC becomes optional hint, TRN-DD-05).",
+      "alternatives": [
+        "Only move the header-time checks earlier (cheap, no protocol change) and keep end-of-file verification."
+      ],
+      "enforcement": "runtime",
+      "confidence": 0.9,
+      "sources": [
+        "/tmp/claude-0/-home-user/a3d7da4f-7a05-5e3e-8d37-b3591d10105f/scratchpad/research/transfer-efficiency.md §1.4 (Bao verified streaming: decoder never discloses length until final chunk verifies)"
+      ]
+    },
+    {
+      "id": "TRN-DD-05",
+      "title": "CRC32+size is the content identity in manifest, checkout, restore and startup; the BLAKE3 that every transfer and archive already computes is thrown away, blocking content addressing and forcing extra full-file passes",
+      "theme": "transfer",
+      "repo": "synergos",
+      "area": "manifest.rs / project.rs / checkout.rs / restore.rs / ipc PublishUpdate",
+      "severity": "high",
+      "kind": "design-gap",
+      "evidence": [
+        {
+          "file_line": "/home/user/Synergos/synergos-core/src/manifest.rs:35-46",
+          "quote": "pub struct ManifestEntry {\n    pub version: u64,\n    pub size: u64,\n    /// 内容の CRC32 (publish 時 / 受信後に計算)。\n    pub crc: u32,\n    pub updated_at: u64,\n    #[serde(default)]\n    pub publisher: String,\n}"
+        },
+        {
+          "file_line": "/home/user/Synergos/synergos-core/src/manifest.rs:206",
+          "quote": "Some(e) if e.size == size && e.crc == crc => BumpOutcome::Unchanged(e.version),"
+        },
+        {
+          "file_line": "/home/user/Synergos/synergos-core/src/checkout.rs:214-222",
+          "quote": "async fn matches_entry(path: &Path, size: u64, crc: u32) -> bool { ... match crc32_of_file(path).await { Ok((actual_crc, actual_size)) => actual_size == size && actual_crc == crc,"
+        },
+        {
+          "file_line": "/home/user/Synergos/synergos-core/src/restore.rs:44",
+          "quote": "let Ok((actual_crc, actual_size)) = crc32_of_file(&path).await else {"
+        },
+        {
+          "file_line": "/home/user/Synergos/synergos-core/src/ipc_server.rs:1326",
+          "quote": "match crate::manifest::crc32_of_file(&resolved.canonical).await {"
+        },
+        {
+          "file_line": "/home/user/Synergos/synergos-core/src/exchange/mod.rs:1139",
+          "quote": "let (total_hash, total_size, chunk_count) = match synergos_net::transfer::hash_file(&path).await"
+        }
+      ],
+      "scenario": "Publish of a 4 GB MB file: ipc_server reads it once for CRC32, spawn_send_after_share reads it again for BLAKE3, execute_send reads it a third time to send; the BLAKE3 is placed only in the transient TransferHeader. On the receiver the manifest records CRC32 again. Later `project checkout` of 50k files CRC-scans every file (no hash cache), and daemon start CRC-scans every manifest entry before serving anything (restore.rs). Because the manifest has no BLAKE3, neither history-store dedup nor a future chunk store can be consulted from the pointer set, and a 32-bit CRC collision (trivial to craft with 4 free bytes) makes different content 'Unchanged'.",
+      "impact_ai_game": "Content addressing is the foundation of every dedup/resume/multi-source mechanism in this lens and of UE Virtual Assets (FIoHash = BLAKE3-160). Without BLAKE3 in the pointer set, git-committed manifests cannot be used as a CAS index, and large-project startup/checkout cost is O(total bytes) every time.",
+      "current_state": "ManifestEntry = {version, size, crc, updated_at, publisher}; BLAKE3 computed in hash_file (transfer) and create_snapshot (history) but never stored in manifest/state; all equality checks use (size, crc).",
+      "proposed_redesign": "Manifest format 2 (additive, old readers tolerate via serde default): ManifestEntry gains `blake3: [u8;32]` (hex) and optional `bao_root`/`chunk_map_id`; `crc` stays as a cheap hint. Compute BLAKE3+CRC in one streaming pass at publish (a combined hasher wrapper), carry blake3 in FileOffer/TransferHeader/FileWant and compare it (not CRC) in bump 'Unchanged', checkout matches_entry, restore, and conflict detection. Add a node-local verified-file cache keyed by (dev, inode, size, mtime_ns) -> blake3 so checkout/startup do not re-read unchanged files; periodic background scrub re-hashes a sample.",
+      "alternatives": [
+        "Keep CRC in the manifest and add blake3 only to state.json (node-local) — avoids the format bump but loses cross-node CAS semantics.",
+        "Use BLAKE3-160 (UE FIoHash compatible) as the manifest key to align with Unreal Virtual Assets."
+      ],
+      "enforcement": "ci-gate",
+      "confidence": 0.95,
+      "sources": [
+        "/tmp/claude-0/-home-user/a3d7da4f-7a05-5e3e-8d37-b3591d10105f/scratchpad/research/vcs-game-ai.md §4 (UE Virtual Assets FIoHash = BLAKE3-160)",
+        "/tmp/claude-0/-home-user/a3d7da4f-7a05-5e3e-8d37-b3591d10105f/scratchpad/research/ai-dev-data.md §0 (pointer-list + CAS pattern across DVC/LFS/lakeFS/Iceberg)"
+      ]
+    },
+    {
+      "id": "TRN-DD-06",
+      "title": "Hash and I/O amplification: a published file is read 3x by the sender and 3x more to archive it, received files are rescanned twice, every FileWant served from history re-hashes the object, custody hashes each upload 3x and the Curare client hashes 2x (web: in RAM)",
+      "theme": "transfer",
+      "repo": "both",
+      "area": "Sy publish/receive/history/custody; Cu client hashing",
+      "severity": "medium",
+      "kind": "inefficiency",
+      "evidence": [
+        {
+          "file_line": "/home/user/Synergos/synergos-core/src/exchange/mod.rs:652",
+          "quote": "let file = tokio::fs::File::open(&source_path).await?;  (third read of the source, after CRC at ipc_server.rs:1326 and hash_file at :1139)"
+        },
+        {
+          "file_line": "/home/user/Synergos/synergos-core/src/history/store.rs:657-675",
+          "quote": "tokio::fs::copy(src, &tmp) ... crc32_of_file(&tmp) ... hash_file(&tmp)  (copy + CRC pass + BLAKE3 pass before the dedup check at :164)"
+        },
+        {
+          "file_line": "/home/user/Synergos/synergos-core/src/history/store.rs:290",
+          "quote": "if !validate_object(&path, &entry.hash, entry.size, entry.crc)  (lookup: CRC pass + BLAKE3 pass of the full object on every FileWant served from history)"
+        },
+        {
+          "file_line": "/home/user/Synergos/synergos-core/src/history/store.rs:697-716",
+          "quote": "async fn validate_object(... crc32_of_file(path) ... hash_file(path)"
+        },
+        {
+          "file_line": "/home/user/Synergos/synergos-custody/src/store.rs:143-170",
+          "quote": "pub async fn verify_file(... let mut hash = Sha256::new(); let mut buffer = vec![0u8; 128 * 1024]; loop { ... } ... file.sync_all().await?;"
+        },
+        {
+          "file_line": "/home/user/Curare/curare-server/src/versioning/upload-admission.ts:29",
+          "quote": "const verification=upload.state==='consumed'?{...}:await port.verify(upload);  (called from /upload/confirm and again from POST /versions at routes/versions.ts:61)"
+        },
+        {
+          "file_line": "/home/user/Curare/curare-server/src/client/operation-file.ts:20-24",
+          "quote": "async function inspectFile(path:string) { const hash=createHash('sha256'); ... for await (const bytes of createReadStream(path)) { hash.update(...)"
+        },
+        {
+          "file_line": "/home/user/Curare/curare-server/src/client/curare-client.ts:27-29",
+          "quote": "const hash = createHash('sha256');\nfor await (const chunk of createReadStream(input.path)) hash.update(chunk as Buffer);"
+        },
+        {
+          "file_line": "/home/user/Curare/curare-server/public/persistent-operations.js:13",
+          "quote": "contentHash:'sha256:'+await hash(await file.arrayBuffer()),purpose};"
+        }
+      ],
+      "scenario": "Publishing one 8 GB EXR sequence file on a history-enabled node: CRC read (8 GB) + BLAKE3 read (8 GB) + send read (8 GB) + archive copy (8 GB read + 8 GB write) + archive CRC (8 GB) + archive BLAKE3 (8 GB) = 56 GB of disk traffic for 8 GB of payload before any peer receives a byte; each receiving history node adds write + CRC + copy + CRC + BLAKE3 (40 GB). Each later restore request from a peer re-reads the object twice (16 GB) before streaming it. On the Curare/custody path a 20 GB checkpoint is SHA-256'd by the Node client twice (prepare + save), by custody once on PUT and twice more on verify (confirm + version creation), and the browser client cannot even start because file.arrayBuffer() must hold 20 GB.",
+      "impact_ai_game": "Disk and CPU cost per asset is 5-7x payload on NAS-backed studio volumes, which is where artists' projects live; SHA-256 at ~0.5-1 GB/s/core and NAS reads at ~200-500 MB/s make a 20 GB checkpoint cost minutes per redundant pass. Browser uploads are capped by RAM (~2 GB ArrayBuffer).",
+      "current_state": "No shared hashing pass between CRC, BLAKE3 and SHA-256; no persisted digest in custody (verify re-hashes); history dedup check happens after the staging copy; no reflink/hardlink; web client buffers whole file.",
+      "proposed_redesign": "One streaming multi-digest pass (BLAKE3 + CRC32 + SHA-256 when the destination is S3/custody) producing {blake3, bao_outboard, sha256, size} once at publish/upload; carry the record through TransferHeader/admission/receipt. History archive: check `objects/<hash>` existence by the carried blake3 before copying; use reflink (copy_file_range/FICLONE, APFS clonefile) or hardlink into objects/ when same filesystem; validate_object on lookup becomes (size, mtime, inode) cache check with background scrub. Custody: persist the PUT-time digest + sync evidence in `<key>.json` and make verify a metadata read (TRN-DD-10). Curare client: hash once in prepare and pass contentHash/fileSize into save (the fields already exist in SaveRequest); browser: streaming WASM BLAKE3/SHA-256 over File.stream().",
+      "alternatives": [
+        "Keep the passes but run BLAKE3 with rayon multithreading (10x throughput) — reduces CPU, not I/O."
+      ],
+      "enforcement": "ci-gate",
+      "confidence": 0.9,
+      "sources": [
+        "/tmp/claude-0/-home-user/a3d7da4f-7a05-5e3e-8d37-b3591d10105f/scratchpad/research/transfer-efficiency.md §1.4 (BLAKE3 ~12x SHA-256 single-threaded, rayon)",
+        "/tmp/claude-0/-home-user/a3d7da4f-7a05-5e3e-8d37-b3591d10105f/scratchpad/research/transfer-efficiency.md §1.1 (ronomon: SHA-256 ~2.5x slower than chunking)"
+      ]
+    },
+    {
+      "id": "TRN-DD-07",
+      "title": "History-node dedup is whole-file and per-project only; the object store cannot share bytes across projects or sub-file, and the store is sized by every version of every file forever",
+      "theme": "transfer",
+      "repo": "synergos",
+      "area": "synergos-core history store (index, objects, GC)",
+      "severity": "high",
+      "kind": "design-gap",
+      "evidence": [
+        {
+          "file_line": "/home/user/Synergos/synergos-core/src/history/store.rs:146",
+          "quote": "let snapshot = create_snapshot(src, &store_dir, expected_size, crc).await?;  (store_dir is per project)"
+        },
+        {
+          "file_line": "/home/user/Synergos/synergos-core/src/history/store.rs:164-176",
+          "quote": "let object_is_valid = match validate_object(&obj, &snapshot.hash, expected_size, crc).await { ... ArchiveOutcome::Deduplicated"
+        },
+        {
+          "file_line": "/home/user/Synergos/docs/versioning-design.md:41",
+          "quote": "重複排除 (dedup) ... 履歴ノードの保管庫でファイル全体の blake3 で行う (同じ内容の版は 1 回しか置かない)"
+        },
+        {
+          "file_line": "/home/user/Synergos/docs/versioning-design.md:348",
+          "quote": "4. 差分管理・差分転送はしない。**履歴の実体は `history.enabled = true` のノードだけが版ごとに丸ごと保持**し、旧版 FileWant に応答する"
+        },
+        {
+          "file_line": "/home/user/Synergos/synergos-net/src/config.rs:302-304 (per map sy-core-versioning §6)",
+          "quote": "history.max_versions_per_file / max_age_days / max_bytes default 0 = unlimited; GC only via manual `history gc`"
+        }
+      ],
+      "scenario": "A studio runs one history node for 5 projects that share a 30 GB common asset library (same bytes, different project ids): the store holds 150 GB. One artist's 500 MB PSD saved 20x/day for a month = 300 versions x 500 MB = 150 GB for a file whose chunk-level unique content is likely <40 GB. A 60 GB checkpoint saved per epoch for 20 epochs = 1.2 TB whole-file vs ~0.5 TB with chunk dedup (Xet 30-85%). Nothing bounds growth by default and no retention runs automatically.",
+      "impact_ai_game": "History nodes are the system of record (the 'LFS server'); their disk is the first thing that fills in game/AI production. Perforce answers this with per-file revision caps (+Sn) and whole-revision compression; Xet with 64 KiB chunks in 64 MiB blocks. Synergos has neither sub-file dedup nor retention defaults.",
+      "current_state": "objects/<hh>/<hash> whole files, per-project store dir, dedup = whole-file BLAKE3 equality after a full staging copy, no compression, no chunking, unlimited retention, GC manual.",
+      "proposed_redesign": "Org-scoped (not project-scoped) object store with two tiers: whole objects < 8 MiB; objects >= 8 MiB stored as a chunk map (FastCDC 64 KiB, Xet constants) referencing chunks in 64 MiB packs, with per-chunk trial compression (lz4 probe, store 'none' if no gain; BG4-LZ4 for bf16 tensors). Refcount by pack chunk; GC = mark from manifests/tags + per-file revision cap (`max_versions_per_file`, P4 +Sn analogue) + tombstone + grace period; defaults bounded (e.g. keep 10 working versions, 90 days) with retention applied on a timer. This is exactly the 'inside history nodes only' extension the decision doc reserves (versioning-design.md:322-323); normal nodes still receive whole files unless they opt into chunk negotiation (TRN-DD-01).",
+      "alternatives": [
+        "zstd --patch-from=previous-version per file (storage-only delta, no chunk index, ~128 MiB-2 GB window) — small change, good for PSD/MB, useless across files.",
+        "Keep whole-file and add retention defaults only."
+      ],
+      "enforcement": "runtime",
+      "confidence": 0.85,
+      "sources": [
+        "/tmp/claude-0/-home-user/a3d7da4f-7a05-5e3e-8d37-b3591d10105f/scratchpad/research/transfer-efficiency.md §1.2 (Xet xorb 64 MiB, per-chunk LZ4/BG4), §3.2 (zstd --patch-from)",
+        "/tmp/claude-0/-home-user/a3d7da4f-7a05-5e3e-8d37-b3591d10105f/scratchpad/research/vcs-game-ai.md §1.2 (P4 +Sn revision cap, +C/+F storage)",
+        "/tmp/claude-0/-home-user/a3d7da4f-7a05-5e3e-8d37-b3591d10105f/scratchpad/research/ai-dev-data.md §1.2 (checkpoint dedup 30-85%)"
+      ]
+    },
+    {
+      "id": "TRN-DD-08",
+      "title": "History offload backends read whole objects into RAM and use single-shot uploads, so multi-GB assets cannot be rotated to S3/GDrive without OOM or backend limits",
+      "theme": "transfer",
+      "repo": "synergos",
+      "area": "synergos-core history rotation backends (s3.rs, gdrive.rs, local.rs)",
+      "severity": "high",
+      "kind": "design-gap",
+      "evidence": [
+        {
+          "file_line": "/home/user/Synergos/synergos-core/src/history/rotation/s3.rs:69",
+          "quote": "let bytes = tokio::fs::read(path).await?;"
+        },
+        {
+          "file_line": "/home/user/Synergos/synergos-core/src/history/rotation/s3.rs:83-87",
+          "quote": "let bytes = result.bytes().await ... tokio::fs::write(dest, &bytes).await?;"
+        },
+        {
+          "file_line": "/home/user/Synergos/synergos-core/src/history/rotation/gdrive.rs:202",
+          "quote": "let bytes = tokio::fs::read(path).await?;"
+        },
+        {
+          "file_line": "/home/user/Synergos/synergos-core/src/history/rotation/gdrive.rs:239-242",
+          "quote": ".query(&[(\"uploadType\", \"multipart\")]) ... format!(\"multipart/related; boundary={boundary}\")"
+        }
+      ],
+      "scenario": "Rotation of a 12 GB cooked-content archive: `tokio::fs::read` allocates 12 GB in the daemon (OOM on a 16 GB node), then a single S3 PUT (AWS limit 5 GB per single PUT) fails; GDrive `uploadType=multipart` is limited to small bodies (Google's metadata+media multipart cap is 5 MB per Drive API docs — unverified here). Rotation then runs `get` to verify, buffering the whole object again. Meanwhile the per-project lock is held for the whole run so new archives stall.",
+      "impact_ai_game": "Cold-storage tiering is the only cost control for 'every version whole-file' history; if it cannot move the large objects that dominate storage, the history node fills. 10-100 GB checkpoints and multi-GB level packs are exactly the objects to offload.",
+      "current_state": "Whole-object buffering for put and get; no multipart; no streaming; backend I/O under the project mutex; GDrive client has no timeouts.",
+      "proposed_redesign": "Stream to backends with multipart uploads (S3/MinIO: parts >= max(10 MiB, size/10000), per-part SHA-256/CRC checksums, 10,000 part limit implies >= 10 MiB parts for 100 GB; GDrive resumable upload sessions) and ranged streaming gets; verify by streaming hash during download instead of buffering; release the project lock during network I/O (claim/lease pattern). If TRN-DD-07 packs are adopted, offload at pack granularity (64 MiB) which sidesteps large-object limits entirely.",
+      "alternatives": [
+        "Disable rotation for objects above a size threshold (quick guard).",
+        "Delegate offload to the custody service, which already streams, and keep history nodes as cache."
+      ],
+      "enforcement": "ci-gate",
+      "confidence": 0.85,
+      "sources": [
+        "/tmp/claude-0/-home-user/a3d7da4f-7a05-5e3e-8d37-b3591d10105f/scratchpad/research/transfer-efficiency.md §4.3 (S3 10,000 parts, 5 MiB-5 GiB part, 50 TB object; MinIO thresholds)"
+      ]
+    },
+    {
+      "id": "TRN-DD-09",
+      "title": "Custody transfer is whole-object only: single PUT with a 1800 s wall clock, GET ignores Range, and the spec itself says an interrupted upload resends the entire object",
+      "theme": "transfer",
+      "repo": "synergos",
+      "area": "synergos-custody handlers/store (transfer endpoints)",
+      "severity": "high",
+      "kind": "design-gap",
+      "evidence": [
+        {
+          "file_line": "/home/user/Synergos/synergos-custody/src/handlers.rs:237-242",
+          "quote": "tokio::time::timeout(\n    std::time::Duration::from_secs(1800),\n    state.store.put(&key, &admission, body),\n)"
+        },
+        {
+          "file_line": "/home/user/Synergos/synergos-custody/src/handlers.rs:245-257",
+          "quote": "pub async fn get_bytes(... let file = tokio::fs::File::open(...).await?;\nlet mut response = Body::from_stream(ReaderStream::new(file)).into_response();  (no Range/If-Range/ETag handling)"
+        },
+        {
+          "file_line": "/home/user/Synergos/synergos-custody/src/store.rs:171-209",
+          "quote": "pub async fn put(... let partial = PartialFile(self.root.join(format!(\"{}.part\", uuid::Uuid::new_v4()))); ... while let Some(chunk) = stream.next().await { ... }  (one body, one .part, discarded on any error)"
+        },
+        {
+          "file_line": "/home/user/Synergos/spec/feature/opaque-custody.md:40",
+          "quote": "中断後は同じ受付から再PUTできる。バイト位置からの途中再開ではなく、未完成オブジェクト全体の再送。"
+        },
+        {
+          "file_line": "/home/user/Synergos/synergos-custody/src/handlers.rs:100 (per map sy-control-custody §2.2)",
+          "quote": "upload capability expiry = min(admission.expiresAt, now + 15 min)"
+        }
+      ],
+      "scenario": "A 100 GB model checkpoint PUT must sustain 100 GB / 1800 s = 55.6 MB/s end-to-end or it is killed and the .part dropped; a 10 GB PSD archive over a 20 Mbit/s outsourcer uplink (2.5 MB/s) needs 4000 s and can never succeed. A 30 GB download that drops at 90% restarts from byte 0 because GET has no Range and the client has no verified-prefix resume. Through an orange-clouded Cloudflare hostname the HTTP proxy body cap (100-500 MB) rejects the PUT outright.",
+      "impact_ai_game": "Custody is the durable anchor for Curare's Synergos backend; game archives and checkpoints are the largest objects in the system and are precisely the ones that cannot be moved reliably.",
+      "current_state": "PUT: one streamed body, 1800 s timeout, capability <= 15 min; GET: full object via ReaderStream (default 4 KiB reads), no Range/ETag; resume = full resend by spec.",
+      "proposed_redesign": "Adopt the IETF resumable-upload header set (draft-ietf-httpbis-resumable-upload, tus-compatible): POST creates an upload resource, PATCH application/partial-upload with Upload-Offset appends, HEAD returns Upload-Offset, Upload-Limit advertises min/max append sizes; custody keeps the .part plus a running BLAKE3/SHA-256 state (or per-part digests) so resume costs no re-hash; completion verifies the composite digest. GET: Accept-Ranges, 206 with Range, If-Range keyed on ETag = content hash, 64 KiB-1 MiB read buffer; optional Bao slice responses so clients verify ranges against the whole-file hash. Never route bodies > 100 MB through the Cloudflare HTTP proxy (grey-cloud origin or QUIC data plane).",
+      "alternatives": [
+        "S3-style multipart (initiate/part/complete) with per-part SHA-256 and HMAC capability per part — closer to MinIO adapter parity.",
+        "Delegate large transfers to the Synergos P2P layer with custody only receiving the final object (requires TRN-DD-03 first)."
+      ],
+      "enforcement": "runtime",
+      "confidence": 0.95,
+      "sources": [
+        "/tmp/claude-0/-home-user/a3d7da4f-7a05-5e3e-8d37-b3591d10105f/scratchpad/research/transfer-efficiency.md §4.3 (tus 1.0, IETF resumable upload draft, RFC 9110 §14 Range/If-Range)",
+        "/tmp/claude-0/-home-user/a3d7da4f-7a05-5e3e-8d37-b3591d10105f/scratchpad/research/transfer-efficiency.md §4.2 (Cloudflare proxied body limits 100/200/500 MB)"
+      ]
+    },
+    {
+      "id": "TRN-DD-10",
+      "title": "Custody verify re-reads and re-hashes the whole object under the per-key lock on every call, Curare calls it twice per upload with a 60 s timeout — objects larger than ~60 s of disk read can never become versions",
+      "theme": "transfer",
+      "repo": "both",
+      "area": "synergos-custody verify + Curare upload-admission / versions route",
+      "severity": "high",
+      "kind": "inefficiency",
+      "evidence": [
+        {
+          "file_line": "/home/user/Synergos/synergos-custody/src/store.rs:143-170",
+          "quote": "/// Full re-read for receipt issuance ... pub async fn verify_file(... loop { let n = file.read(&mut buffer).await?; ... hash.update(&buffer[..n]); } ... file.sync_all().await?;"
+        },
+        {
+          "file_line": "/home/user/Synergos/synergos-custody/src/handlers.rs:112-117 (per map sy-control-custody §2.2/W25)",
+          "quote": "verify handler acquires state.store.lock(&key) then verify_file (lock held for the hash duration)"
+        },
+        {
+          "file_line": "/home/user/Curare/curare-server/src/storage/synergos-storage.ts:17",
+          "quote": "signal:AbortSignal.timeout(60000)"
+        },
+        {
+          "file_line": "/home/user/Curare/curare-server/src/versioning/upload-admission.ts:29",
+          "quote": "const verification=upload.state==='consumed'?{metadata:await port.head(blobRef),receipt:upload.receipt}:await port.verify(upload);"
+        },
+        {
+          "file_line": "/home/user/Curare/curare-server/src/routes/versions.ts:61",
+          "quote": "await requireUploadedContent(body.blobRef, userId);  (second verify after /upload/confirm)"
+        },
+        {
+          "file_line": "/home/user/Synergos/synergos-custody/src/store.rs:133-141",
+          "quote": "pub async fn present(... metadata.len() == input.byte_length  (presence by size only; the PUT-time digest is not persisted)"
+        }
+      ],
+      "scenario": "A 40 GB checkpoint on an HDD-backed volume (~150 MB/s) takes ~270 s to re-hash; Curare's 60 s abort fires, returns 503, the client retries confirm, custody starts another full re-hash while the previous one still holds the per-key lock (10 s acquisition timeout -> 503 for GET/HEAD/PUT on that key). The object is durable on disk but can never be confirmed; a successful confirm would still trigger an identical second re-hash at POST /versions because the row is `verified`, not `consumed`.",
+      "impact_ai_game": "Hard functional ceiling on asset size for the Synergos-backed Curare path, well below the sizes AI/game teams produce; also doubles disk read cost of every upload.",
+      "current_state": "verify = full SHA-256 re-read + sync_all under lock; PUT already computed and compared the digest (store.rs:198-201) but only a size is retained; Curare verifies at confirm and at version creation; 60 s client timeout.",
+      "proposed_redesign": "Persist the PUT-time verified digest(s), byte length and a durability marker (fsync + publish done) in `<key>.json`; `verify` returns a receipt from that record after an O(1) metadata check (size, inode unchanged) and schedules a background scrub if the record is older than N days; expose an async `verify` (202 + job id + poll) for explicit full re-hash. Curare: trust the locked `verified` row at version creation (state machine admitted->verified->consumed already guarantees immutability) and raise the Sy call timeout for explicit scrubs only.",
+      "alternatives": [
+        "Keep full re-hash but make it async and cached (digest valid until mtime changes).",
+        "Increase the Curare timeout to 30 min (hides the cost, keeps the lock contention)."
+      ],
+      "enforcement": "runtime",
+      "confidence": 0.95,
+      "sources": []
+    },
+    {
+      "id": "TRN-DD-11",
+      "title": "Neither custody nor Curare is content-addressed: custody key = sha256(opaqueObjectId), blobRef is a fresh UUID per admission, content_hash is unindexed — identical bytes are uploaded and stored once per save",
+      "theme": "transfer",
+      "repo": "both",
+      "area": "Curare upload admission / asset_versions; custody object keying",
+      "severity": "medium",
+      "kind": "design-gap",
+      "evidence": [
+        {
+          "file_line": "/home/user/Synergos/synergos-custody/src/signature.rs:5-7",
+          "quote": "pub fn object_key(id: &str) -> String {\n    format!(\"{:x}\", Sha256::digest(id.as_bytes()))\n}"
+        },
+        {
+          "file_line": "/home/user/Curare/curare-server/src/routes/upload.ts:29",
+          "quote": "const proposedBlobRef = `uploads/${body.assetId}/${uuidv4()}`;"
+        },
+        {
+          "file_line": "/home/user/Curare/spec/plan/versioning-types.md:56",
+          "quote": "working 保存は同じ blobRef の再送を冪等に扱う。別 blobRef への再アップロードは別操作。"
+        },
+        {
+          "file_line": "/home/user/Curare/curare-server/src/db/schema.ts:84-86",
+          "quote": "blobRef: text('blob_ref').notNull(), ... contentHash: text('content_hash').notNull().default(''),  (grep over migrations/*.sql finds no index on content_hash or blob_ref)"
+        },
+        {
+          "file_line": "/home/user/Curare/curare-server/src/client/curare-client.ts:31-34",
+          "quote": "if (input.purpose === 'working' && input.skipUnchanged !== false) { const { versions } = await this.history(input.resourceId); if (versions[0]?.contentHash === contentHash ...) return {...versions[0], unchanged: true};  (client-side, latest version of the same resource only)"
+        },
+        {
+          "file_line": "/home/user/Curare/curare-server/src/db/acquisition-repository.ts:35-38",
+          "quote": "const known = new Set(knownHashes); ... needsDownload: !known.has(version.contentHash)  (client-asserted, not server-verified)"
+        }
+      ],
+      "scenario": "The same 1.5 GB texture set is saved to three resources (source, export, reference role) and re-submitted after a metadata-only change: Curare admits four uploads, MinIO/custody stores four copies, the client PUTs 6 GB. A dataset re-import where 95% of files are unchanged re-uploads 100% because 'unchanged' is only detected against the latest version of the same resource. Reclaim assumes 1 object = 1 row so no refcounted sharing is possible.",
+      "impact_ai_game": "Storage and WAN cost scale with saves rather than with unique content; cross-resource reuse (textures shared by many models, dataset shards shared by many experiments) is the common case.",
+      "current_state": "Opaque per-operation keys in custody; random blobRef per admission; no server-side 'already have' response; no CAS table; content_hash unindexed; reclaim is per-row.",
+      "proposed_redesign": "Curare: `objects` table (org_id, blake3, sha256, size, chunk_map_id?, locations[], refcount) with a unique index on (org_id, blake3); admission consults it and returns `{alreadyStored:true}` (LFS batch semantics: no `actions`) so the client skips PUT and version creation links the existing object; refcount drives reclaim. Custody: object key = tenant_ns + content hash (admission still per operation for capability/audit); PUT of an existing key returns 412 as today. Scope dedup per org/tenant (no cross-tenant chunk/hash oracle). Index content_hash and blob_ref.",
+      "alternatives": [
+        "Server-side dedup only inside custody (keep Curare rows per upload, custody hardlinks identical content) — smaller API change, still pays the client PUT.",
+        "Trust client knownHashes with a server-verified HMAC proof of possession (Xet-style) to avoid re-PUT."
+      ],
+      "enforcement": "runtime",
+      "confidence": 0.9,
+      "sources": [
+        "/tmp/claude-0/-home-user/a3d7da4f-7a05-5e3e-8d37-b3591d10105f/scratchpad/research/vcs-game-ai.md §3.1 (LFS batch omits actions when object exists)",
+        "/tmp/claude-0/-home-user/a3d7da4f-7a05-5e3e-8d37-b3591d10105f/scratchpad/research/vcs-game-ai.md §5.3 and /tmp/claude-0/-home-user/a3d7da4f-7a05-5e3e-8d37-b3591d10105f/scratchpad/research/ai-dev-data.md §1.2 (Xet HMAC-protected global dedup; cross-tenant chunk oracle risk)"
+      ]
+    },
+    {
+      "id": "TRN-DD-12",
+      "title": "Curare uploads are one presigned PUT: no multipart/tus despite three doc generations promising it, 30-minute client abort, 900 s URL, browser loads the whole file into RAM, and fileSize accepts 2^53-1",
+      "theme": "transfer",
+      "repo": "curare",
+      "area": "Curare upload route, MinIO adapter, Node/Web clients",
+      "severity": "high",
+      "kind": "design-gap",
+      "evidence": [
+        {
+          "file_line": "/home/user/Curare/curare-server/src/storage/minio-client.ts:57-74",
+          "quote": "export async function getPresignedUploadUrl(... const command = new PutObjectCommand({ Bucket: bucket, Key: objectKey, ContentType: contentType, ChecksumSHA256: toChecksumSha256(contentHash), IfNoneMatch: '*', });"
+        },
+        {
+          "file_line": "/home/user/Curare/curare-server/src/storage/minio-storage.ts:9",
+          "quote": "uploadUrl:await minio.getPresignedUploadUrl(admission.blobRef,contentType,admission.contentHash,Math.min(900,...))"
+        },
+        {
+          "file_line": "/home/user/Curare/curare-server/src/client/curare-client.ts:43-44",
+          "quote": "const response = await fetch(admission.uploadUrl, { method: 'PUT', headers: { ...admission.requiredHeaders, 'Content-Length': String(file.size) },\n  body: stream as unknown as RequestInit['body'], duplex: 'half', redirect: 'error', signal: AbortSignal.timeout(30 * 60_000) } as RequestInit);"
+        },
+        {
+          "file_line": "/home/user/Curare/curare-server/public/persistent-operations.js:56",
+          "quote": "const response = await fetch(admission.uploadUrl,{method:'PUT',headers:admission.requiredHeaders,body:record.file,redirect:'error',signal:AbortSignal.timeout(1800000)});"
+        },
+        {
+          "file_line": "/home/user/Curare/curare-server/src/db/types.ts:120",
+          "quote": "fileSize: z.number().int().nonnegative().safe(),"
+        },
+        {
+          "file_line": "/home/user/Curare/docs/implementation-design.md:301",
+          "quote": "POST   /api/v1/upload                         # チャンクアップロード (tus)"
+        },
+        {
+          "file_line": "/home/user/Curare/docs/roadmap.md:106",
+          "quote": "| M1-4 | tus チャンクアップロード | ... tus 1.0 プロトコルで 5GB 級ファイルの中断・再開アップロードが可能 ..."
+        },
+        {
+          "file_line": "/home/user/Curare/spec/plan/versioning-types.md:31",
+          "quote": "今回の既存 S3 単発 PUT 経路は中間エクスポートを受け付けないが、途中放棄アップロードの自動回収は未実装。"
+        }
+      ],
+      "scenario": "An outsourcer saves a 7 GB Maya scene over a 30 Mbit/s uplink: the single PUT needs ~31 min and is aborted by the client at 30 min; every retry re-PUTs from byte 0 and re-hashes the file. On AWS S3 (as opposed to MinIO) any single PUT above 5 GB is rejected outright. In the browser, a 3 GB file fails at `file.arrayBuffer()` (ArrayBuffer limits) before any request is made, and the retry journal stores a second copy of the File in IndexedDB.",
+      "impact_ai_game": "Game sources (PSD/MB/MA), cooked archives and checkpoints are routinely 5-100 GB; Curare's declared target ('5GB 級ファイルの中断・再開') is not met on any client.",
+      "current_state": "PutObjectCommand presign only; no CreateMultipartUpload/UploadPart/Complete; no tus/resumable headers; client timeouts 30 min; browser full-file hashing and buffering.",
+      "proposed_redesign": "Storage port gains `beginMultipart/signPart/complete` (S3/MinIO multipart with per-part x-amz-checksum-sha256 and a server-recorded part map; part size = max(10 MiB, ceil(size/10000))) and for custody the IETF resumable-upload flow (TRN-DD-09); admission records the upload resource and parts so a resumed client only uploads missing parts; version creation verifies the composite digest (S3 composite checksum or server-side digest concatenation via Bao/BLAKE3 chunk tree). Clients: Node streams parts concurrently (4-8), browser uses File.slice + streaming WASM hashing with no in-memory copy and stores only a File handle. Server-side caps: `maxFileSize` per versioning type/org and per-upload byte budget.",
+      "alternatives": [
+        "tus 1.0 server in Curare proxying bytes to MinIO (simpler client, but Curare becomes a byte proxy, contrary to the direct-to-storage design).",
+        "Keep single PUT but lift timeouts (does not fix S3 5 GB or resume)."
+      ],
+      "enforcement": "ci-gate",
+      "confidence": 0.95,
+      "sources": [
+        "/tmp/claude-0/-home-user/a3d7da4f-7a05-5e3e-8d37-b3591d10105f/scratchpad/research/transfer-efficiency.md §4.3 (S3 multipart limits, MinIO 20 MiB x 8 parallel, IETF resumable upload)"
+      ]
+    },
+    {
+      "id": "TRN-DD-13",
+      "title": "Curare downloads are sequential whole-file fetches with no Range resume; existing files are fully re-hashed on every retry and a 300 s capability expiry triggers a full plan re-issue per remaining item (O(N^2))",
+      "theme": "transfer",
+      "repo": "curare",
+      "area": "Curare Node client acquisition/clone + acquisition plan",
+      "severity": "high",
+      "kind": "inefficiency",
+      "evidence": [
+        {
+          "file_line": "/home/user/Curare/curare-server/src/client/acquire-files.ts:20-25",
+          "quote": "for (const [index, item] of plan.items.entries()) existing.push(await verifyLocalAcquisition(destinations[index]!, item));\nfor (const [index, item] of plan.items.entries()) {\n  const destination = destinations[index]!;\n  if (!existing[index]) await downloadAcquisition(item, destination, refresh);"
+        },
+        {
+          "file_line": "/home/user/Curare/curare-server/src/client/download-acquisition.ts:19",
+          "quote": "const response = await fetch(url, { redirect: 'error', signal: AbortSignal.timeout(30 * 60_000) });  (one fetch per file, no Range)"
+        },
+        {
+          "file_line": "/home/user/Curare/curare-server/src/client/local-acquisition.ts:21-27",
+          "quote": "const digest = createHash('sha256'); ... for await (const chunk of createReadStream(path)) { ... digest.update(chunk as Buffer); }"
+        },
+        {
+          "file_line": "/home/user/Curare/curare-server/src/client/clone-assets.ts:29-32",
+          "quote": "const files = await acquireFiles(plan, outputDirectory, async item => {\n  const refreshed = await getPlan();\n  return refreshed.items.find(entry => entry.versionId === item.versionId)!;\n});"
+        },
+        {
+          "file_line": "/home/user/Curare/curare-server/src/db/acquisition-repository.ts:40-41",
+          "quote": "const downloads = await Promise.all(entries.map(async ({ version, resource }, i) => ({ ...items[i]!,\n  downloadUrl: items[i]!.needsDownload ? await (await storagePort(version.storageBackend)).download(version.blobRef, 300, ...) : null })));"
+        },
+        {
+          "file_line": "/home/user/Curare/spec/feature/macos-asset-clone.md:43",
+          "quote": "再試行はファイル単位であり、部分バイトの再開ではない。"
+        }
+      ],
+      "scenario": "A 1000-item release clone (200 GB) over a 50 MB/s link: downloads run one at a time, so after 300 s only ~15 GB has moved and every remaining item's URL has expired; each of the ~900 remaining items first gets a 403, then calls refresh() which resolves the full 1000-version closure (>=5 queries per version) and mints 1000 new capabilities (1000 custody HTTP calls on the Synergos backend) — up to ~10^6 custody calls and ~5x10^6 DB queries for one clone. A re-run after a crash re-hashes all 200 GB of already-correct local files before downloading the rest, and a 30 GB item that dropped at 95% restarts from zero.",
+      "impact_ai_game": "Clone/sync of release sets and datasets is the engineer/consumer workflow ('必要なものだけ取得'); thousands of small textures are latency-bound at one request per file, and multi-GB items are not resumable.",
+      "current_state": "Sequential loop; single fetch per item; no Range/If-Range; full local re-hash each run; whole-plan refresh on 401/403; bulk capability issuance up front with 300 s TTL.",
+      "proposed_redesign": "Bounded-concurrency downloader (8-16 streams, size-aware ordering); Range + If-Range (ETag = content hash) resume on `.part` with a persisted verified offset (streaming digest state); verified-manifest cache `{dev, ino, size, mtime_ns} -> sha256/blake3` next to the clone so unchanged files are skipped without re-reading (full scrub on demand); capabilities issued lazily per item or per batch of 50 with TTL >= expected transfer time, and refresh re-issues only the failing item. Server: `POST /acquisition/plan` returns items without URLs and a separate `POST /acquisition/capabilities {versionIds[]}` endpoint.",
+      "alternatives": [
+        "Keep sequential downloads but raise TTL to 1 h and keep the refreshed plan for all remaining items (fixes O(N^2) only).",
+        "Use the Synergos P2P layer for acquisition with history nodes as seeds (longer term)."
+      ],
+      "enforcement": "ci-gate",
+      "confidence": 0.95,
+      "sources": [
+        "/tmp/claude-0/-home-user/a3d7da4f-7a05-5e3e-8d37-b3591d10105f/scratchpad/research/transfer-efficiency.md §4.3 (RFC 9110 Range/If-Range; content-addressed ETag makes If-Range safe)",
+        "/tmp/claude-0/-home-user/a3d7da4f-7a05-5e3e-8d37-b3591d10105f/scratchpad/research/ai-dev-data.md §1.7 (S3 first-byte 100-200 ms; 8-16 MB range reads; retry slowest 5%)"
+      ]
+    },
+    {
+      "id": "TRN-DD-14",
+      "title": "Two incompatible digest schemes (SHA-256 for Curare/custody, flat BLAKE3 for Synergos P2P/history) with no shared digests[] and no Merkle root, so a blob crossing the boundary is re-hashed with a second algorithm and can never be range-verified",
+      "theme": "transfer",
+      "repo": "both",
+      "area": "Cu contentHash schema + receipts; Sy hash_file/history; custody admission",
+      "severity": "medium",
+      "kind": "design-gap",
+      "evidence": [
+        {
+          "file_line": "/home/user/Curare/curare-server/src/db/types.ts:9",
+          "quote": "export const contentHashSchema = z.string().regex(/^sha256:[0-9a-f]{64}$/);"
+        },
+        {
+          "file_line": "/home/user/Curare/curare-server/src/storage/durable-receipt.ts:9",
+          "quote": "verifiedDigests: z.array(z.object({ algorithm: z.literal('sha256'), value: z.string().regex(/^[0-9a-f]{64}$/) }).strict()).min(1).max(8),"
+        },
+        {
+          "file_line": "/home/user/Curare/spec/plan/versioning-types.md:59-60",
+          "quote": "現行 SHA-256 は Curare の検証方式として維持。Synergos の BLAKE3 と混同しない。\n将来の実体記述は digests: [{algorithm, value}] とし、両者が共通で検証した digest と byteLength を受領証に含める。"
+        },
+        {
+          "file_line": "/home/user/Synergos/synergos-net/src/transfer/mod.rs:289-313",
+          "quote": "pub async fn hash_file(path: &Path) -> Result<(Blake3Hash, u64, u64)>  (flat BLAKE3; no outboard/tree retained)"
+        },
+        {
+          "file_line": "/home/user/Synergos/synergos-custody/src/store.rs:184-201",
+          "quote": "let mut hash = Sha256::new(); ... format!(\"sha256:{:x}\", hash.finalize()) != input.content_hash"
+        }
+      ],
+      "scenario": "A 60 GB checkpoint is uploaded to custody (SHA-256 by client, SHA-256 by custody) and later served by a history node to a render farm over Synergos P2P (BLAKE3 by the node, BLAKE3 by the receiver): four full hashing passes with two algorithms, and neither side can verify a 100 MB byte range because both digests are flat. Any future chunk store (TRN-DD-01/07) would need a third identity.",
+      "impact_ai_game": "Range-verified streaming (lazy hydration, multi-source fetch, dataset range reads) requires a tree hash; HF Xet, UE Virtual Assets (BLAKE3) and Bao all converge on BLAKE3 Merkle roots. SHA-256 remains needed only for S3 ChecksumSHA256.",
+      "current_state": "Cu/custody: `sha256:` only, receipts literal 'sha256'; Sy: BLAKE3-256 flat; no digests[] array; no bao_root anywhere.",
+      "proposed_redesign": "Canonical identity = BLAKE3-256 with a Bao outboard (16 KiB groups) computed in the same streaming pass as SHA-256 (TRN-DD-06); Curare schema `digests: [{algorithm:'blake3'|'sha256', value}]` + `baoRoot` (migration additive: new nullable columns, no DROP); custody admission/receipt carry both and verify either; S3 path keeps x-amz-checksum-sha256; Synergos manifest/offers carry blake3 + bao_root (TRN-DD-05). Clients compute all three in one pass.",
+      "alternatives": [
+        "Keep SHA-256 as canonical and add a SHA-256-based Merkle tree (no existing verified-streaming library; Bao is BLAKE3-only).",
+        "BLAKE3-160 (UE FIoHash) as a derived key for engine interop."
+      ],
+      "enforcement": "ci-gate",
+      "confidence": 0.85,
+      "sources": [
+        "/tmp/claude-0/-home-user/a3d7da4f-7a05-5e3e-8d37-b3591d10105f/scratchpad/research/transfer-efficiency.md §1.4 (Bao/abao/bao-tree)",
+        "/tmp/claude-0/-home-user/a3d7da4f-7a05-5e3e-8d37-b3591d10105f/scratchpad/research/ai-dev-data.md §1.2 (Xet BLAKE3-keyed Merkle file hash + optional SHA-256 for LFS pointers)",
+        "/tmp/claude-0/-home-user/a3d7da4f-7a05-5e3e-8d37-b3591d10105f/scratchpad/research/vcs-game-ai.md §4 (UE FIoHash BLAKE3-160)"
+      ]
+    },
+    {
+      "id": "TRN-DD-15",
+      "title": "The dormant chunker/bitswap scaffolding has the wrong shape for a future chunk path: fixed 256 KiB chunks, flat single-level DAG capped by a 16 MiB root block (~56 GiB max), unbounded DAG decode, no CDC despite DESIGN §15.1 promising Rabin",
+      "theme": "transfer",
+      "repo": "synergos",
+      "area": "synergos-net content::chunker / session::fetch_dag / bitswap",
+      "severity": "medium",
+      "kind": "design-gap",
+      "evidence": [
+        {
+          "file_line": "/home/user/Synergos/synergos-net/src/content/chunker.rs:36-41",
+          "quote": "impl Default for ChunkerOptions {\n    fn default() -> Self {\n        Self {\n            chunk_size: 256 * 1024,"
+        },
+        {
+          "file_line": "/home/user/Synergos/synergos-net/src/content/chunker.rs:55-71",
+          "quote": "loop { let mut filled = 0usize; while filled < opts.chunk_size { let n = file.read(&mut buf[filled..]).await?; ... } ... let chunk_bytes = buf[..filled].to_vec();  (fixed-size cut points)"
+        },
+        {
+          "file_line": "/home/user/Synergos/synergos-net/src/content/chunker.rs:22-27",
+          "quote": "pub struct ChunkDag {\n    pub total_size: u64,\n    pub chunks: Vec<Cid>,\n}  (flat list; serialized as one block)"
+        },
+        {
+          "file_line": "/home/user/Synergos/synergos-net/src/content/bitswap.rs:37",
+          "quote": "pub const MAX_BITSWAP_FRAME: usize = 16 * 1024 * 1024; // 16 MiB / block"
+        },
+        {
+          "file_line": "/home/user/Synergos/synergos-net/src/content/session.rs:218-222",
+          "quote": "let dag: ChunkDag = rmp_serde::from_slice(&root_block.bytes) ... let outcomes = self.fetch_blocks(&dag.chunks).await?;  (no bound on chunks.len() or total_size consistency)"
+        },
+        {
+          "file_line": "/home/user/Synergos/DESIGN.md:1451",
+          "quote": "/// ブロックサイズ（可変長チャンク: Rabin fingerprint）"
+        },
+        {
+          "file_line": "/home/user/Synergos/DESIGN.md:1434",
+          "quote": "| **重複排除** | 既に保持しているブロック (CID) はスキップ。差分転送が自然に実現 |"
+        }
+      ],
+      "scenario": "If the 'measure then chunk inside history nodes' clause is ever exercised by wiring the existing chunker: inserting 1 byte near the start of a 2 GB PSD shifts every subsequent 256 KiB boundary, so 100% of chunks are new (zero dedup); a 60 GiB checkpoint cannot be represented because its root block would exceed 16 MiB; a hostile root advertising 10^7 chunk CIDs makes a client open streams for all of them. Every block is hashed twice (session verify + store.put verify) and hex CIDs cost 71 bytes each.",
+      "impact_ai_game": "A chunk path is the main lever for checkpoint/PSD dedup; shipping the current scaffolding would deliver no dedup and a size ceiling below current checkpoints, while the design doc tells readers it is content-defined.",
+      "current_state": "Dead code in production (only tests call add_file/get_file/fetch_dag), but it is the only chunk implementation in the tree and DESIGN §15.1 describes it as Rabin/Merkle.",
+      "proposed_redesign": "Replace (or delete until needed) with: FastCDC/Gear chunker at pinned Xet constants (64 KiB target, 8/128 KiB bounds, 64-bit gear table, mask, reset rule) with published test vectors in CI (the fastcdc crate's three variants cut differently, so the variant and parameters are protocol constants); chunk hash = BLAKE3; file identity = BLAKE3 whole-file with Bao outboard for verification (CDC for storage/dedup units, Bao for verification units — orthogonal); pack chunks into 64 MiB packs; multi-level manifest (chunk runs referencing packs) with hard caps on decode (max chunks, total_size == sum) and binary 32-byte CIDs. Mark DESIGN §15.1 as superseded by the decided tiering.",
+      "alternatives": [
+        "Fixed-size chunking only for in-place-updated formats (VM images/DBs) per Duplicacy's guidance — not the studio asset mix.",
+        "Keep the scaffolding but delete it from DESIGN to avoid misleading reviewers."
+      ],
+      "enforcement": "ci-gate",
+      "confidence": 0.9,
+      "sources": [
+        "/tmp/claude-0/-home-user/a3d7da4f-7a05-5e3e-8d37-b3591d10105f/scratchpad/research/transfer-efficiency.md §1.1 (chunker table; fastcdc-rs variants produce different cut points; Xet test vectors)",
+        "/tmp/claude-0/-home-user/a3d7da4f-7a05-5e3e-8d37-b3591d10105f/scratchpad/research/transfer-efficiency.md §1.2 (xorb <= 64 MiB, 8,192 chunks cap)",
+        "https://github.com/nlfiedler/fastcdc-rs/blob/master/README.md"
+      ]
+    },
+    {
+      "id": "TRN-DD-16",
+      "title": "Per-file overheads make 10^4-10^6-file trees impractical: one QUIC stream per (message, peer) and per file, manifest+state rewritten per file (O(n^2)), lossy 256-slot event channels, and 4 HTTP + 4 identity handshakes + 2 HEADs per file in Curare with 500/1000 hard caps",
+      "theme": "transfer",
+      "repo": "both",
+      "area": "Sy gossip fan-out / Exchange / ProjectManager; Cu save/plan/release APIs",
+      "severity": "high",
+      "kind": "inefficiency",
+      "evidence": [
+        {
+          "file_line": "/home/user/Synergos/synergos-core/src/daemon.rs:872-879",
+          "quote": "for peer in peers { let wire = GossipWireMessage { ... }; let quic = quic.clone(); tokio::spawn(async move { match quic.open_stream(&peer, StreamType::Control).await {  (one new QUIC stream per message per peer)"
+        },
+        {
+          "file_line": "/home/user/Synergos/synergos-core/src/exchange/mod.rs:1104-1120",
+          "quote": "pub async fn share_and_send( ... pub async fn spawn_send_after_share(  (one TXFR stream per file, spawned immediately, no queue)"
+        },
+        {
+          "file_line": "/home/user/Synergos/synergos-core/src/project.rs:455-459",
+          "quote": "self.note_confirmed_version_unlocked(project_id, rel, outcome.version()).await?;\nsnapshot.save(&root).await?;  (whole manifest + state JSON rewritten per file)"
+        },
+        {
+          "file_line": "/home/user/Synergos/synergos-core/src/daemon.rs:897-899",
+          "quote": "Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => { tracing::warn!(\"gossip fanout lagged; dropped {n} messages\");"
+        },
+        {
+          "file_line": "/home/user/Curare/curare-server/src/client/curare-client.ts:31-51",
+          "quote": "history GET ... 'upload' POST ... fetch PUT ... 'upload/confirm' POST ... `assets/${input.resourceId}/versions` POST  (per file; each Cu call = fresh Cernere WebSocket per auth/middleware)"
+        },
+        {
+          "file_line": "/home/user/Curare/curare-server/src/db/acquisition-repository.ts:17",
+          "quote": "if (visited.size >= 1000) throw new VersioningError('acquisition_too_large', 409);"
+        },
+        {
+          "file_line": "/home/user/Curare/curare-server/src/submissions/contract.ts:16",
+          "quote": "versionIds: z.array(z.string().uuid()).min(1).max(500),"
+        }
+      ],
+      "scenario": "Publishing a 100k-file Unreal OFPA level to 10 peers opens 2*100k*10 + 10 = ~2M QUIC control streams for FileOffer/FileWant before any payload, drops offers once the 256-slot broadcast channel lags (silently un-synced files), and the receiving nodes rewrite a ~15 MB manifest.json plus state.json 100k times (~1.5 TB of JSON writes). Importing ImageNet (1.28M files) into Curare costs ~5M API calls and ~5M Cernere WebSocket handshakes (~70 h at 50 ms each, serial) and the resulting release cannot be finalized or acquired because closures are capped at 1000 versions and submissions at 500.",
+      "impact_ai_game": "Unity/Unreal trees and image datasets are many-small-file workloads where request count, not bytes, dominates (S3 first-byte 100-200 ms; HF caps 10k entries/folder and 100k files/repo for the same reason). Both products are currently sized for hundreds of files.",
+      "current_state": "Per-file everything; no batching, packing, journaling or pagination; hard caps 500/1000 in Curare.",
+      "proposed_redesign": "Synergos: batch FileOffer/FileWant into one signed gossip frame per publish batch (<= 256 KiB) and reconcile from a durable per-project 'wanted set' instead of fire-and-forget events; pack small files (< 1 MiB) into 64 MiB content-addressed packs transferred as one TXFR/range stream and unpacked on receipt; manifest as an append-only journal with periodic compaction (or a prolly/Merkle tree, Dolt/lakeFS style) so per-file cost is O(log n); a transfer scheduler with per-peer concurrency. Curare: batch admission API (`POST /upload/batch {objects:[{hash,size,...}]}` returning per-object actions, LFS-batch shape) and batch version creation under one changeset; raise/remove the 500/1000 caps by paginating closure resolution with a recursive CTE; short-TTL actor cache so a batch costs one identity lookup. Datasets: a derived 'export' job that shards into ~1 GB WebDataset/MDS/parquet objects so training reads are a few hundred range streams, not millions of GETs.",
+      "alternatives": [
+        "Only fix the Synergos manifest rewrite (journal) and the Curare caps — removes the hard failures, not the per-file latency.",
+        "Treat a directory as one asset (tar) — loses per-file versioning."
+      ],
+      "enforcement": "ci-gate",
+      "confidence": 0.9,
+      "sources": [
+        "/tmp/claude-0/-home-user/a3d7da4f-7a05-5e3e-8d37-b3591d10105f/scratchpad/research/ai-dev-data.md §1.3, §1.7 (HF 10k/folder 100k/repo; S3 first-byte 100-200 ms; ImageNet 53 h serial derivation)",
+        "/tmp/claude-0/-home-user/a3d7da4f-7a05-5e3e-8d37-b3591d10105f/scratchpad/research/vcs-game-ai.md §4 (OFPA thousands of small files), §5.5 (prolly trees), §5.2 (lakeFS metarange)",
+        "/tmp/claude-0/-home-user/a3d7da4f-7a05-5e3e-8d37-b3591d10105f/scratchpad/research/transfer-efficiency.md §6 (datasets: ~1 GB shards, Kraken p99 18 s)"
+      ]
+    },
+    {
+      "id": "TRN-DD-17",
+      "title": "No format-aware storage/export policy: deflate-compressed FBX, derived GPU textures and zip-wrapped packages defeat any dedup, while PSD/EXR/TGA/safetensors would chunk well — and no hook exists to tell them apart",
+      "theme": "transfer",
+      "repo": "both",
+      "area": "Sy history/custody object storage; Cu versioning types / derived data",
+      "severity": "medium",
+      "kind": "missing-feature",
+      "evidence": [
+        {
+          "file_line": "/home/user/Synergos/docs/versioning-design.md:40",
+          "quote": "| **差分転送 (delta transfer)** | 変わった部分だけ送ること | **しない** (全体転送のまま。差分検知は version + size + CRC) |"
+        },
+        {
+          "file_line": "/home/user/Synergos/docs/versioning-design.md:349",
+          "quote": "5. テキストの diff は git の仕事。Synergos は種別を区別せず全部ファイル単位で運ぶ"
+        },
+        {
+          "file_line": "/home/user/Curare/spec/plan/versioning-types.md:20-22 (per map cu-docs §2.1)",
+          "quote": "reproducible = regenerable intermediate (temp FBX, previews, conversion cache): working save rejected, submission save rejected (never stored)"
+        },
+        {
+          "file_line": "/home/user/Synergos/synergos-net/src/content/chunker.rs:45-84",
+          "quote": "pub async fn add_file(... opaque bytes, no format hooks)"
+        }
+      ],
+      "scenario": "An animator re-exports a 900 MB binary FBX after moving one joint; because the exporter deflates array blocks, the whole bitstream changes and even a perfect CDC store finds <5% reuse. A texture artist commits DDS/BC7 outputs next to the PNG sources: the GPU formats are fixed-rate and incompressible, so they double storage and never dedup. Meanwhile uncompressed EXR/TGA/PSD and bf16 safetensors (BG4-LZ4 helps) would dedup 30-60% if chunked.",
+      "impact_ai_game": "Which formats dedup is a pipeline policy question (export settings, what is 'source' vs 'derived'), not a transport one; Steam, Xet and Borg all use per-chunk trial compression, and Unreal treats cooked/derived data as a cache (DDC), never as versioned content.",
+      "current_state": "All bytes opaque; no per-chunk compression trial; Curare's `reproducible` type exists only as a storage refusal, with no derived-data cache to put outputs in.",
+      "proposed_redesign": "(1) Per-chunk trial compression in history/custody packs (lz4 probe -> none/lz4/zstd/BG4), so PNG/JPEG/DDS fall through automatically. (2) Pipeline policy documented and enforced by a pre-publish/pre-submission hook: FBX exported with compression off (or Puffin-style deflate canonicalisation if compressed exports are unavoidable), derived textures/cooked data not versioned but produced by a build service into a DDC-style cache keyed by (source blake3, encoder settings) and served via CDN/custody with TTL. (3) Storage-only fallback for unchunked formats: `zstd --patch-from=prev` between consecutive versions on history nodes. Curare: a `derived` object class (recomputable, TTL, pinned only by releases) distinct from `reproducible`-never-stored.",
+      "alternatives": [
+        "Format whitelist for compression (brittle; trial compression is the proven pattern).",
+        "Version everything whole-file and accept 2x storage for textures."
+      ],
+      "enforcement": "hook",
+      "confidence": 0.8,
+      "sources": [
+        "/tmp/claude-0/-home-user/a3d7da4f-7a05-5e3e-8d37-b3591d10105f/scratchpad/research/transfer-efficiency.md §2 (Puffin; Unreal pak patching granularity), §3.3-3.4 (trial compression; BCn/ASTC fixed-rate; Unreal Cloud DDC), §6 rows FBX/texture sets",
+        "/tmp/claude-0/-home-user/a3d7da4f-7a05-5e3e-8d37-b3591d10105f/scratchpad/research/ai-dev-data.md §1.2 (BG4-LZ4 for bf16)"
+      ]
+    },
+    {
+      "id": "TRN-DD-18",
+      "title": "No partial or lazy fetch anywhere: Synergos auto-pulls every offered file regardless of sync_mode, custody has no range-scoped capabilities, Curare clones must fetch whole files — datasets and sparse Unity/Unreal workspaces must be fully materialised",
+      "theme": "transfer",
+      "repo": "both",
+      "area": "Sy daemon auto-pull / custody GET; Cu acquisition capabilities",
+      "severity": "medium",
+      "kind": "missing-feature",
+      "evidence": [
+        {
+          "file_line": "/home/user/Synergos/synergos-core/src/daemon.rs:978-979",
+          "quote": "let auto_pull_eligible = sender != *ctx.exchange.local_peer_id()\n    && !ctx.exchange.has_shared_file(&project_id, &file_id, version)  (grep: sync_mode/SyncMode never read in daemon.rs or exchange/mod.rs)"
+        },
+        {
+          "file_line": "/home/user/Synergos/synergos-custody/src/handlers.rs:245-272",
+          "quote": "pub async fn get_bytes(... Body::from_stream(ReaderStream::new(file))  (whole object; capability binds method/key/expiry/name only)"
+        },
+        {
+          "file_line": "/home/user/Curare/curare-server/src/db/acquisition-repository.ts:40-41",
+          "quote": "downloadUrl: items[i]!.needsDownload ? await (await storagePort(version.storageBackend)).download(version.blobRef, 300, ...) : null  (whole-object capability per item)"
+        },
+        {
+          "file_line": "/home/user/Curare/spec/feature/server-client-architecture.md:23",
+          "quote": "DCC -->|期限・対象を限定した送受信| Sy"
+        }
+      ],
+      "scenario": "A training job needs 2 GB of a 400 GB dataset release (one shard family); Curare's plan issues 400 GB of whole-object URLs and the client must clone everything. An Unreal artist opening one map pulls every asset published by every teammate because auto-pull is unconditional. A PyTorch loader wanting 8-16 MB range reads of a 60 GB safetensors cannot: custody has no Range and no range-scoped signature.",
+      "impact_ai_game": "'必要なものだけ取得' is Curare's central promise (use-cases.md:16, vision.md:37) and sparse/lazy hydration is where P4VFS, UE Virtual Assets, lakeFS Mount and Xet mount deliver; GPU loaders want 8-16 MB range streams, not whole-object GETs.",
+      "current_state": "Whole-object capabilities; auto-pull of all offers; sync_mode stored but ignored; no server-known sparse set; no range verification possible (flat hashes).",
+      "proposed_redesign": "Range-scoped capabilities (Xet `X-Xet-Signed-Range` model: capability binds {object, byte_ranges[], expires}) on custody GET with Accept-Ranges/206; Bao slices so ranges verify against the whole-file hash; Curare `POST /acquisition/plan` accepts `ranges` and `sparse paths`, returns per-range capabilities; Synergos: honour sync_mode (Manual/Selective with path patterns) and a server-known sparse set per node (Gluon/sparse-checkout style) so offers outside the set are indexed but not pulled; expose a per-payload fetch API (hash + range) for UE Virtual Assets / ProjFS byte-range hydration.",
+      "alternatives": [
+        "Full clone plus local lazy filesystem (FUSE/NFS loopback) over whole objects — needs the range primitive anyway.",
+        "Dataset-level sharding only (TRN-DD-16) without range reads."
+      ],
+      "enforcement": "runtime",
+      "confidence": 0.85,
+      "sources": [
+        "/tmp/claude-0/-home-user/a3d7da4f-7a05-5e3e-8d37-b3591d10105f/scratchpad/research/ai-dev-data.md §1.2 (Xet download protocol, X-Xet-Signed-Range), §1.7 (8-16 MB range reads)",
+        "/tmp/claude-0/-home-user/a3d7da4f-7a05-5e3e-8d37-b3591d10105f/scratchpad/research/transfer-efficiency.md §5 (P4VFS, ProjFS byte-range hydration, lakeFS Mount, UE Virtual Assets)",
+        "/tmp/claude-0/-home-user/a3d7da4f-7a05-5e3e-8d37-b3591d10105f/scratchpad/research/vcs-game-ai.md §6 lesson 3 (partial checkout must be server-known)"
+      ]
+    },
+    {
+      "id": "TRN-DD-19",
+      "title": "Cross-repo size and throughput ceilings: no path can move a 100 GB checkpoint today (custody 1800 s, client 30 min, Cu->Sy 60 s verify, S3 5 GB single PUT, QUIC default windows ~100 Mbps/stream at 100 ms RTT, 30 s idle without keepalive)",
+      "theme": "transfer",
+      "repo": "both",
+      "area": "Sy custody/QUIC config; Cu client/storage adapters",
+      "severity": "high",
+      "kind": "design-gap",
+      "evidence": [
+        {
+          "file_line": "/home/user/Synergos/synergos-custody/src/handlers.rs:238",
+          "quote": "std::time::Duration::from_secs(1800),"
+        },
+        {
+          "file_line": "/home/user/Curare/curare-server/src/client/curare-client.ts:44",
+          "quote": "signal: AbortSignal.timeout(30 * 60_000)"
+        },
+        {
+          "file_line": "/home/user/Curare/curare-server/src/storage/synergos-storage.ts:17",
+          "quote": "signal:AbortSignal.timeout(60000)"
+        },
+        {
+          "file_line": "/home/user/Curare/curare-server/src/storage/minio-client.ts:63",
+          "quote": "const command = new PutObjectCommand({  (single PUT; AWS S3 single-PUT max 5 GB)"
+        },
+        {
+          "file_line": "/home/user/Synergos/synergos-net/src/quic/mod.rs:477-484",
+          "quote": "transport.max_concurrent_bidi_streams(...); transport.max_idle_timeout(Some(...  (stream_receive_window/send_window/keep_alive_interval left at quinn defaults: 1,250,000 B / 10,000,000 B / None)"
+        },
+        {
+          "file_line": "/home/user/Curare/curare-server/src/db/types.ts:120",
+          "quote": "fileSize: z.number().int().nonnegative().safe(),  (accepts up to 2^53-1 with no per-type cap)"
+        }
+      ],
+      "scenario": "100 GB checkpoint: Curare->custody needs >= 55.6 MB/s sustained for 30 min on both the client and server timers, then a verify that must finish in 60 s; Curare->AWS S3 fails at 5 GB; Synergos TXFR over a 100 ms WAN path is limited by the 1.25 MB per-stream receive window to ~12.5 MB/s (~100 Mbps) and dies after any 30 s stall, restarting from zero (TRN-DD-03). The API happily admits a 9 PB `fileSize`.",
+      "impact_ai_game": "10-100 GB checkpoints and multi-GB cooked archives are routine; every path has a different silent ceiling and none is documented or enforced at admission time, so users discover limits mid-transfer.",
+      "current_state": "Timeouts are wall-clock constants unrelated to size or bandwidth; no admission-time max size; QUIC flow-control and keepalive untuned.",
+      "proposed_redesign": "Replace wall-clock caps with progress-based idle timeouts (abort only if no bytes for N s) once resumable transfer exists (TRN-DD-03/09/12); enforce `maxObjectBytes` per org/versioning type at admission (reject 2^53-1); quinn: stream_receive_window >= 2x BDP (e.g. 32 MiB), send_window >= streams x BDP, keep_alive_interval 10 s, Cubic default with BBR behind a flag, GSO/GRO on; stripe large objects across several streams/connections for >500 Mbps paths; document the per-path limits in one table and test them with a 100 GB synthetic object in CI (nightly).",
+      "alternatives": [
+        "Only raise the timeouts (keeps restart-from-zero and S3 5 GB).",
+        "Kernel TCP/TLS for datacenter-internal bulk moves where QUIC user-space overhead dominates."
+      ],
+      "enforcement": "ci-gate",
+      "confidence": 0.9,
+      "sources": [
+        "/tmp/claude-0/-home-user/a3d7da4f-7a05-5e3e-8d37-b3591d10105f/scratchpad/research/transfer-efficiency.md §4.1 (quinn defaults, BDP 12.5 MB at 1 Gbps/100 ms, QUIC >500 Mbps CPU limits), §4.3 (S3 part limits)"
+      ]
+    },
+    {
+      "id": "TRN-DD-20",
+      "title": "Catalog snapshot traffic is pure waste: every publish makes every peer bitswap-fetch a RootCatalog it immediately discards, and the publisher keeps every snapshot block in RAM forever",
+      "theme": "transfer",
+      "repo": "synergos",
+      "area": "Exchange publish_updates step 4/5, daemon CatalogUpdate drift check, catalog_sync",
+      "severity": "low",
+      "kind": "inefficiency",
+      "evidence": [
+        {
+          "file_line": "/home/user/Synergos/synergos-core/src/exchange/mod.rs:1397-1411",
+          "quote": "// Step 4: RootCatalog snapshot を ContentStore に put して catalog_cid を得る ... let block = Block::new(bytes); ... match store.put(block).await {"
+        },
+        {
+          "file_line": "/home/user/Synergos/synergos-core/src/catalog_sync.rs:175-178 (per map sy-content §0/W36)",
+          "quote": "fetched RootCatalog is decoded for type-check and discarded; CatalogSyncCompletedEvent has no consumer"
+        },
+        {
+          "file_line": "/home/user/Synergos/synergos-core/src/daemon.rs:1008-1018 (per map sy-content W35)",
+          "quote": "local CatalogManager root is always {update_count:0, catalog_crc:0} so every CatalogUpdate is 'drift'"
+        }
+      ],
+      "scenario": "A publish of 1000 files produces a RootCatalog block that every connected peer fetches over a new bitswap stream and throws away; the publisher's MemoryContentStore grows by one block per publish until restart, after which all advertised CIDs are NotFound.",
+      "impact_ai_game": "Adds a round trip and a block fetch per publish per peer with zero benefit; the catalog cannot drive diffs, so it does not help many-file sync either (TRN-DD-16).",
+      "current_state": "Live but terminal: fetch-and-discard; unbounded in-memory store; CRC-only comparisons.",
+      "proposed_redesign": "Either remove steps 4/5 until a consumer exists, or make the catalog the batched manifest-diff channel from TRN-DD-16: a monotonic per-project root (Merkle over manifest entries with blake3) gossiped as one frame; receivers diff against their local root and request only changed entries; store roots on disk with size cap.",
+      "alternatives": [
+        "Keep as-is but gate by `update_count` monotonicity to suppress redundant fetches."
+      ],
+      "enforcement": "runtime",
+      "confidence": 0.85,
+      "sources": []
+    }
+  ],
+  "coverage_notes": "Lens: dedup/delta/chunking/resumability across Synergos (TXFR transfer, content/chunker/bitswap, history store + rotation, custody) and Curare (upload admission, MinIO/custody adapters, Node/Web clients, acquisition/clone). Read all 11 available subsystem maps and all 4 research notes; the map sy-clients-docs.md was absent at start, after the other 11 maps, and again after a further retry before/after code work, so Tauri GUI / Dioxus admin / ars plugin client behaviour is covered only through the IPC/Curare-client code read directly. Every file:line in the evidence was re-read in the source on 2026-10-15; a few entries cite a map section for lines outside the ranges I reopened (marked 'per map ...'). External numbers (Xet ratios, Meyer-Bolosky 75%, quinn defaults, S3/MinIO limits, tus/IETF headers, Cloudflare body caps) come from the research notes, which themselves flag some as search-extract-only; no public dedup ratio exists for PSD/FBX/uasset, so TRN-DD-01 recommends a studio-data benchmark gate before committing to CDC. GDrive multipart 5 MB cap in TRN-DD-08 is an inference, not verified from Google docs. Out of scope here (other lenses): authorization of transfers, QUIC identity/replay, hook sandboxing, provenance/lineage; they are referenced only where they constrain the transfer redesign (signed offers for early verification). The proposed designs keep the 2026-08-16 invariants (whole-file BLAKE3 identity, git-committed pointer manifest, normal nodes unchanged) and place dedup inside history nodes and custody, which the decision document itself reserves as the extension path (docs/versioning-design.md:322-323)."
+}
