@@ -289,13 +289,7 @@ impl Node {
         let file_id = FileId::new(rel_key.clone());
         let outcome = self
             .project_manager
-            .bump_file_version(
-                PROJECT,
-                &rel_key,
-                size,
-                crc,
-                &self.identity.peer_id().0,
-            )
+            .bump_file_version(PROJECT, &rel_key, size, crc, &self.identity.peer_id().0)
             .await
             .unwrap();
         self.project_manager

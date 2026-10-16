@@ -92,7 +92,10 @@ impl HookRunner {
 
     /// `hooks ls` 用: daemon フック全部 + (opt-in なら) プロジェクトフック全部を列挙する。
     /// opt-in が無効でもプロジェクトフックの存在は見せる (`disabled_by_opt_in = true`)。
-    pub async fn effective_hooks(&self, project_root: &Path) -> std::io::Result<Vec<EffectiveHook>> {
+    pub async fn effective_hooks(
+        &self,
+        project_root: &Path,
+    ) -> std::io::Result<Vec<EffectiveHook>> {
         let mut out: Vec<EffectiveHook> = self
             .config
             .hooks
@@ -179,7 +182,8 @@ impl HookRunner {
                 HookStatus::TimedOut => {
                     return Err(std::io::Error::other(format!(
                         "pre-publish {} hook timed out after {}s",
-                        source.as_str(), def.timeout_sec
+                        source.as_str(),
+                        def.timeout_sec
                     )));
                 }
                 HookStatus::SpawnError(e) => {
@@ -212,16 +216,10 @@ impl HookRunner {
                 tracing::warn!("{} hook scheduler closed", event.as_str());
                 return;
             };
-            let hooks = match runner
-                .matching_hooks(&project_root, event, &rel_path)
-                .await
-            {
+            let hooks = match runner.matching_hooks(&project_root, event, &rel_path).await {
                 Ok(hooks) => hooks,
                 Err(e) => {
-                    tracing::warn!(
-                        "{} hook lookup failed for {rel_path}: {e}",
-                        event.as_str()
-                    );
+                    tracing::warn!("{} hook lookup failed for {rel_path}: {e}", event.as_str());
                     return;
                 }
             };
@@ -277,11 +275,7 @@ impl HookRunner {
 fn log_outcome(event: HookEvent, source: HookSource, outcome: &HookOutcome) {
     match &outcome.status {
         HookStatus::Success => {
-            tracing::debug!(
-                "{} hook ok ({})",
-                event.as_str(),
-                source.as_str()
-            );
+            tracing::debug!("{} hook ok ({})", event.as_str(), source.as_str());
         }
         HookStatus::Failed { exit_code } => {
             tracing::warn!(
@@ -292,11 +286,7 @@ fn log_outcome(event: HookEvent, source: HookSource, outcome: &HookOutcome) {
             );
         }
         HookStatus::TimedOut => {
-            tracing::warn!(
-                "{} hook timed out ({})",
-                event.as_str(),
-                source.as_str()
-            );
+            tracing::warn!("{} hook timed out ({})", event.as_str(), source.as_str());
         }
         HookStatus::SpawnError(e) => {
             tracing::warn!(
@@ -496,10 +486,7 @@ mod tests {
             }],
             false,
         );
-        assert!(r
-            .run_pre_publish(dir.path(), "proj", "a.txt")
-            .await
-            .is_ok());
+        assert!(r.run_pre_publish(dir.path(), "proj", "a.txt").await.is_ok());
     }
 
     #[tokio::test]
@@ -587,10 +574,7 @@ mod tests {
             false,
         );
         // a.txt doesn't match assets/**/*.png, so the failing hook never runs.
-        assert!(r
-            .run_pre_publish(dir.path(), "proj", "a.txt")
-            .await
-            .is_ok());
+        assert!(r.run_pre_publish(dir.path(), "proj", "a.txt").await.is_ok());
     }
 
     #[tokio::test]
@@ -610,10 +594,7 @@ mod tests {
         .unwrap();
         let r = runner(vec![], false);
         // allow_project_hooks = false → project hook must not run (and thus not fail).
-        assert!(r
-            .run_pre_publish(dir.path(), "proj", "a.txt")
-            .await
-            .is_ok());
+        assert!(r.run_pre_publish(dir.path(), "proj", "a.txt").await.is_ok());
     }
 
     #[tokio::test]

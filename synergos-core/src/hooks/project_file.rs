@@ -99,7 +99,9 @@ command = "true"
         let dir = tempfile::tempdir().unwrap();
         let meta = dir.path().join(META_DIR);
         tokio::fs::create_dir_all(&meta).await.unwrap();
-        tokio::fs::write(meta.join(HOOKS_FILE), "not valid toml [[[").await.unwrap();
+        tokio::fs::write(meta.join(HOOKS_FILE), "not valid toml [[[")
+            .await
+            .unwrap();
         assert!(load(dir.path()).await.is_err());
     }
 

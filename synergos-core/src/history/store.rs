@@ -161,7 +161,8 @@ impl HistoryStore {
             }
         }
         let obj = object_path(&store_dir, &snapshot.hash);
-        let object_is_valid = match validate_object(&obj, &snapshot.hash, expected_size, crc).await {
+        let object_is_valid = match validate_object(&obj, &snapshot.hash, expected_size, crc).await
+        {
             Ok(valid) => valid,
             Err(error) => {
                 let _ = tokio::fs::remove_file(&snapshot.path).await;
@@ -275,8 +276,13 @@ impl HistoryStore {
                 );
                 return Ok(None);
             }
-            if let Err(error) = self.fetch_offloaded(project_root, project_id, rel, version).await {
-                tracing::warn!("history {rel} v{version} fetch from rotation backend failed: {error}");
+            if let Err(error) = self
+                .fetch_offloaded(project_root, project_id, rel, version)
+                .await
+            {
+                tracing::warn!(
+                    "history {rel} v{version} fetch from rotation backend failed: {error}"
+                );
                 return Ok(None);
             }
             let refreshed = HistoryIndex::load_or_rebuild(&store_dir, project_id).await?;
@@ -471,7 +477,9 @@ impl HistoryStore {
             return Ok(report);
         }
         let now = synergos_net::types::now_ms();
-        let protected = self.protected_versions(project_root, project_id, keep).await?;
+        let protected = self
+            .protected_versions(project_root, project_id, keep)
+            .await?;
         let victims = apply_retention(&index, &self.config, &protected, now);
         let mut removed = Vec::new();
         for (rel, version) in &victims {
@@ -534,11 +542,17 @@ impl HistoryStore {
         let _guard = lock.lock().await;
         let mut index = HistoryIndex::load_or_rebuild(&store_dir, project_id).await?;
         let now = synergos_net::types::now_ms();
-        let protected = self.protected_versions(project_root, project_id, keep).await?;
+        let protected = self
+            .protected_versions(project_root, project_id, keep)
+            .await?;
 
         if dry_run {
-            let candidates =
-                rotation::select_candidates(&index, rotation_cfg.offload_after_days, now, &protected);
+            let candidates = rotation::select_candidates(
+                &index,
+                rotation_cfg.offload_after_days,
+                now,
+                &protected,
+            );
             return Ok(RotationReport {
                 candidates,
                 ..RotationReport::default()
@@ -552,10 +566,12 @@ impl HistoryStore {
             backend.as_ref(),
             &rotation_cfg.backend,
             &mut index,
-            rotation_cfg.offload_after_days,
-            now,
-            &protected,
-            false,
+            rotation::RotationParams {
+                offload_after_days: rotation_cfg.offload_after_days,
+                now_ms: now,
+                protected: &protected,
+                dry_run: false,
+            },
         )
         .await
     }
@@ -614,7 +630,15 @@ impl HistoryStore {
         }
         let backend = rotation::build_backend(&backend_config)?;
         let mut index = index;
-        rotation::fetch(&store_dir, project_id, backend.as_ref(), &mut index, rel, version).await
+        rotation::fetch(
+            &store_dir,
+            project_id,
+            backend.as_ref(),
+            &mut index,
+            rel,
+            version,
+        )
+        .await
     }
 }
 
@@ -676,9 +700,7 @@ async fn create_snapshot(
         Ok(value) => value,
         Err(error) => {
             let _ = tokio::fs::remove_file(&tmp).await;
-            return Err(io::Error::other(format!(
-                "hash history snapshot: {error}"
-            )));
+            return Err(io::Error::other(format!("hash history snapshot: {error}")));
         }
     };
     if hashed_size != expected_size {
@@ -840,8 +862,8 @@ mod tests {
                 "published",
                 &f,
             )
-                .await
-                .unwrap(),
+            .await
+            .unwrap(),
             ArchiveOutcome::Stored
         );
         // 同じ内容を別 version として archive → dedup
@@ -857,8 +879,8 @@ mod tests {
                 "published",
                 &f,
             )
-                .await
-                .unwrap(),
+            .await
+            .unwrap(),
             ArchiveOutcome::Deduplicated
         );
         // 同じ (rel, version, hash) → 何もしない
@@ -874,8 +896,8 @@ mod tests {
                 "published",
                 &f,
             )
-                .await
-                .unwrap(),
+            .await
+            .unwrap(),
             ArchiveOutcome::AlreadyIndexed
         );
         // 作業ツリーを in-place で書き換えても保管した旧版は変わらない (コピー)
@@ -892,8 +914,8 @@ mod tests {
             "published",
             &f,
         )
-            .await
-            .unwrap();
+        .await
+        .unwrap();
         let v1 = s.lookup(&root, "p", "a.bin", 1).await.unwrap().unwrap();
         assert_eq!(tokio::fs::read(&v1.path).await.unwrap(), b"version-one");
         let v3 = s.lookup(&root, "p", "a.bin", 3).await.unwrap().unwrap();
@@ -1028,8 +1050,8 @@ mod tests {
                 "published",
                 &f,
             )
-                .await
-                .unwrap();
+            .await
+            .unwrap();
         }
         // keep で v1 を保護。ポリシー max_versions=1 → v3 (最新) と v1 (保護) が残り v2 が消える
         let report = s
@@ -1200,7 +1222,10 @@ mod tests {
             .with_file_name(format!("{}.meta.tmp-abc", stored.hash));
         tokio::fs::write(&meta_tmp, b"partial").await.unwrap();
 
-        let report = s.gc(&root, "p", &[("a.bin".to_string(), 1)], false).await.unwrap();
+        let report = s
+            .gc(&root, "p", &[("a.bin".to_string(), 1)], false)
+            .await
+            .unwrap();
         assert!(report.removed_versions.is_empty());
         assert!(!staging.exists(), "staging copy must be reclaimed");
         assert!(!index_tmp.exists(), "index tmp must be reclaimed");
@@ -1266,7 +1291,9 @@ mod tests {
 
         // ローカル objects 実体は削除されている。
         let store_dir = s.store_dir(&root, "p").unwrap();
-        let index = HistoryIndex::load_or_rebuild(&store_dir, "p").await.unwrap();
+        let index = HistoryIndex::load_or_rebuild(&store_dir, "p")
+            .await
+            .unwrap();
         let entry = index.get("a.bin", 1).unwrap();
         assert!(entry.offloaded.is_some());
         assert!(!object_path(&store_dir, &entry.hash).exists());
@@ -1281,7 +1308,9 @@ mod tests {
         s.fetch_offloaded(&root, "p", "a.bin", 1).await.unwrap();
         let stored = s.lookup(&root, "p", "a.bin", 1).await.unwrap().unwrap();
         assert_eq!(tokio::fs::read(&stored.path).await.unwrap(), body);
-        let index_after = HistoryIndex::load_or_rebuild(&store_dir, "p").await.unwrap();
+        let index_after = HistoryIndex::load_or_rebuild(&store_dir, "p")
+            .await
+            .unwrap();
         assert!(index_after.get("a.bin", 1).unwrap().offloaded.is_none());
         assert!(!backend_root.join(&offloaded[0].key).exists());
 
@@ -1358,7 +1387,9 @@ mod tests {
         assert!(report.offloaded.is_empty());
 
         let store_dir = s.store_dir(&root, "p").unwrap();
-        let index = HistoryIndex::load_or_rebuild(&store_dir, "p").await.unwrap();
+        let index = HistoryIndex::load_or_rebuild(&store_dir, "p")
+            .await
+            .unwrap();
         assert!(index.get("a.bin", 1).unwrap().offloaded.is_none());
         assert!(index.get("a.bin", 2).unwrap().offloaded.is_none());
 
@@ -1398,7 +1429,9 @@ mod tests {
         assert_eq!(report.skipped[0].rel, "a.bin");
 
         let store_dir = s.store_dir(&root, "p").unwrap();
-        let index = HistoryIndex::load_or_rebuild(&store_dir, "p").await.unwrap();
+        let index = HistoryIndex::load_or_rebuild(&store_dir, "p")
+            .await
+            .unwrap();
         let entry = index.get("a.bin", 1).unwrap();
         assert!(entry.offloaded.is_none());
         assert!(object_path(&store_dir, &entry.hash).exists());
@@ -1437,7 +1470,9 @@ mod tests {
         assert!(report.offloaded.is_empty());
 
         let store_dir = s.store_dir(&root, "p").unwrap();
-        let index = HistoryIndex::load_or_rebuild(&store_dir, "p").await.unwrap();
+        let index = HistoryIndex::load_or_rebuild(&store_dir, "p")
+            .await
+            .unwrap();
         assert!(index.get("a.bin", 1).unwrap().offloaded.is_none());
 
         let _ = tokio::fs::remove_dir_all(&root).await;
@@ -1553,7 +1588,11 @@ mod tests {
             .fetch_offloaded(&root, "p", "a.bin", 1)
             .await
             .unwrap();
-        let restored = reconfigured.lookup(&root, "p", "a.bin", 1).await.unwrap().unwrap();
+        let restored = reconfigured
+            .lookup(&root, "p", "a.bin", 1)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(tokio::fs::read(restored.path).await.unwrap(), body);
 
         let _ = tokio::fs::remove_dir_all(&root).await;
@@ -1591,8 +1630,8 @@ mod tests {
             store_dir.join(crate::history::index::INDEX_FILE),
             b"not-json",
         )
-            .await
-            .unwrap();
+        .await
+        .unwrap();
         let rebuilt = s.offloaded(&root, "p", None).await.unwrap();
         assert_eq!(rebuilt.len(), 1);
         assert_eq!(rebuilt[0].rel, "a.bin");

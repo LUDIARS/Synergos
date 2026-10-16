@@ -1347,8 +1347,7 @@ pub async fn dispatch_command(command: IpcCommand, ctx: &ServiceContext) -> IpcR
                 ));
             }
 
-            let mut notifications: Vec<PublishNotification> =
-                Vec::with_capacity(candidates.len());
+            let mut notifications: Vec<PublishNotification> = Vec::with_capacity(candidates.len());
             let mut published: Vec<(String, u64)> = Vec::with_capacity(candidates.len());
             for (canonical, rel, rel_key, file_size, crc) in candidates {
                 // マニフェストでバージョン発番 (内容が同じなら据え置き = 再送しない)。
@@ -1600,7 +1599,8 @@ pub async fn dispatch_command(command: IpcCommand, ctx: &ServiceContext) -> IpcR
                         .map(|(rel, entry)| (rel, entry.version)),
                 );
                 for path in &keep_manifests {
-                    match crate::manifest::ProjectManifest::load_from_file(path, &project_id).await {
+                    match crate::manifest::ProjectManifest::load_from_file(path, &project_id).await
+                    {
                         Ok(manifest) => keep.extend(
                             manifest
                                 .files
@@ -1668,7 +1668,10 @@ pub async fn dispatch_command(command: IpcCommand, ctx: &ServiceContext) -> IpcR
                     Err(error) => {
                         return IpcResponse::Error {
                             code: 3,
-                            message: format!("keep manifest {} unreadable: {error}", path.display()),
+                            message: format!(
+                                "keep manifest {} unreadable: {error}",
+                                path.display()
+                            ),
                         }
                     }
                 }
@@ -1708,7 +1711,11 @@ pub async fn dispatch_command(command: IpcCommand, ctx: &ServiceContext) -> IpcR
                     message: "this node is not a history node for the project".into(),
                 };
             }
-            match ctx.history.offloaded(&root, &project_id, rel_path.as_deref()).await {
+            match ctx
+                .history
+                .offloaded(&root, &project_id, rel_path.as_deref())
+                .await
+            {
                 Ok(items) => IpcResponse::HistoryOffloaded(
                     items
                         .into_iter()
@@ -1804,7 +1811,11 @@ pub async fn dispatch_command(command: IpcCommand, ctx: &ServiceContext) -> IpcR
                     message: "nothing to pin: manifest has no entries".into(),
                 };
             }
-            match ctx.history.tag_add(&root, &project_id, &name, resolved).await {
+            match ctx
+                .history
+                .tag_add(&root, &project_id, &name, resolved)
+                .await
+            {
                 Ok(tag) => IpcResponse::Tag(synergos_ipc::response::TagDto {
                     name: tag.name,
                     created_at: tag.created_at,
@@ -1933,7 +1944,11 @@ pub async fn dispatch_command(command: IpcCommand, ctx: &ServiceContext) -> IpcR
                     };
                 }
             };
-            match ctx.hooks.run_manual(&root, event, &project_id, &rel_path).await {
+            match ctx
+                .hooks
+                .run_manual(&root, event, &project_id, &rel_path)
+                .await
+            {
                 Ok(outcomes) => IpcResponse::HooksRunReport(
                     outcomes
                         .into_iter()

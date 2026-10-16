@@ -174,13 +174,7 @@ pub async fn handle_history(cmd: HistoryCommand) -> anyhow::Result<()> {
                         let publisher = escape_terminal(&v.publisher);
                         println!(
                             "  {} v{} {} bytes crc={:08x} {} {} at {}",
-                            v.rel_path,
-                            v.version,
-                            v.size,
-                            v.crc,
-                            source,
-                            publisher,
-                            v.stored_at
+                            v.rel_path, v.version, v.size, v.crc, source, publisher, v.stored_at
                         );
                     }
                 }
@@ -228,7 +222,10 @@ pub async fn handle_history(cmd: HistoryCommand) -> anyhow::Result<()> {
             match resp {
                 IpcResponse::HistoryRotationReport(r) => {
                     if dry_run {
-                        println!("History rotate (dry-run): {} candidate(s)", r.candidates.len());
+                        println!(
+                            "History rotate (dry-run): {} candidate(s)",
+                            r.candidates.len()
+                        );
                         for (rel, version) in &r.candidates {
                             println!("  {rel} v{version}");
                         }
@@ -327,7 +324,9 @@ pub async fn handle_tag(cmd: TagCommand) -> anyhow::Result<()> {
         }
         TagCommand::Ls { project } => {
             let resp = client
-                .send(IpcCommand::TagLs { project_id: project })
+                .send(IpcCommand::TagLs {
+                    project_id: project,
+                })
                 .await?;
             match resp {
                 IpcResponse::TagList(items) => {
@@ -351,7 +350,12 @@ pub async fn handle_tag(cmd: TagCommand) -> anyhow::Result<()> {
                 .await?;
             match resp {
                 IpcResponse::Tag(tag) => {
-                    println!("Tag {} ({} at {})", tag.name, tag.pins.len(), tag.created_at);
+                    println!(
+                        "Tag {} ({} at {})",
+                        tag.name,
+                        tag.pins.len(),
+                        tag.created_at
+                    );
                     for (rel, v) in &tag.pins {
                         println!("  {rel} v{v}");
                     }

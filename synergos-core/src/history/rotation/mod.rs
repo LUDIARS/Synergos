@@ -100,9 +100,8 @@ pub fn object_key(project_id: &str, hash: &str) -> String {
 
 fn is_valid_object_key(key: &str) -> bool {
     let mut segments = key.split('/');
-    let valid_segment = |segment: &str| {
-        segment.len() == 64 && segment.bytes().all(|byte| byte.is_ascii_hexdigit())
-    };
+    let valid_segment =
+        |segment: &str| segment.len() == 64 && segment.bytes().all(|byte| byte.is_ascii_hexdigit());
     matches!(
         (segments.next(), segments.next(), segments.next()),
         (Some(project), Some(object), None) if valid_segment(project) && valid_segment(object)
@@ -138,24 +137,39 @@ pub fn select_candidates(
     out
 }
 
-/// ローテーションを実行する。`dry_run = true` なら候補一覧を返すだけで何も変更しない。
+/// [`rotate`] の実行条件 (退避候補の選定ポリシーと dry-run 指定)。
+#[derive(Debug, Clone, Copy)]
+pub struct RotationParams<'a> {
+    /// `stored_at` がこの日数より古い版を退避候補にする。
+    pub offload_after_days: u64,
+    /// 判定の基準時刻 (epoch ms)。
+    pub now_ms: u64,
+    /// 退避対象から除外する `(rel, version)` (最新版・タグ保護など)。
+    pub protected: &'a [(String, u64)],
+    /// `true` なら候補一覧を返すだけで何も変更しない。
+    pub dry_run: bool,
+}
+
+/// ローテーションを実行する。`params.dry_run = true` なら候補一覧を返すだけで何も変更しない。
 pub async fn rotate(
     store_dir: &Path,
     project_id: &str,
     backend: &dyn RotationBackend,
     backend_config: &RotationBackendConfig,
     index: &mut HistoryIndex,
-    offload_after_days: u64,
-    now_ms: u64,
-    protected: &[(String, u64)],
-    dry_run: bool,
+    params: RotationParams<'_>,
 ) -> io::Result<RotationReport> {
-    let candidates = select_candidates(index, offload_after_days, now_ms, protected);
+    let candidates = select_candidates(
+        index,
+        params.offload_after_days,
+        params.now_ms,
+        params.protected,
+    );
     let mut report = RotationReport {
         candidates: candidates.clone(),
         ..RotationReport::default()
     };
-    if dry_run {
+    if params.dry_run {
         return Ok(report);
     }
 
@@ -242,10 +256,8 @@ pub async fn rotate(
             });
             continue;
         }
-        let verification_tmp = obj.with_extension(format!(
-            "rotation-verify-{}.tmp",
-            uuid::Uuid::new_v4()
-        ));
+        let verification_tmp =
+            obj.with_extension(format!("rotation-verify-{}.tmp", uuid::Uuid::new_v4()));
         let downloaded = backend.get(&key, &verification_tmp).await;
         let integrity = match downloaded {
             Ok(()) => validate_fetched(&verification_tmp, &entry).await,
@@ -438,14 +450,15 @@ pub async fn fetch(
 
     // 取り戻しは move semantics。削除に失敗した場合は offloaded 参照を残し、
     // 次回 fetch でローカル実体を再利用して delete から再試行する。
-    let has_other_offloaded_reference = index.iter_all().any(|(other_rel, other_version, other)| {
-        (other_rel != rel || other_version != version)
-            && other.offloaded.as_ref().is_some_and(|other_offloaded| {
-                other_offloaded.key == offloaded.key
-                    && other_offloaded.config == offloaded.config
-                    && other_offloaded.backend == offloaded.backend
-            })
-    });
+    let has_other_offloaded_reference =
+        index.iter_all().any(|(other_rel, other_version, other)| {
+            (other_rel != rel || other_version != version)
+                && other.offloaded.as_ref().is_some_and(|other_offloaded| {
+                    other_offloaded.key == offloaded.key
+                        && other_offloaded.config == offloaded.config
+                        && other_offloaded.backend == offloaded.backend
+                })
+        });
     if !has_other_offloaded_reference {
         backend.delete(&offloaded.key).await.map_err(|error| {
             io::Error::other(format!(
@@ -523,13 +536,13 @@ mod tests {
 
     #[tokio::test]
     async fn rotate_does_not_delete_local_object_when_uploaded_size_is_wrong() {
-        let store_dir = std::env::temp_dir().join(format!(
-            "synergos-rotation-size-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let store_dir =
+            std::env::temp_dir().join(format!("synergos-rotation-size-{}", uuid::Uuid::new_v4()));
         let hash = "a".repeat(64);
         let obj = object_path(&store_dir, &hash);
-        tokio::fs::create_dir_all(obj.parent().unwrap()).await.unwrap();
+        tokio::fs::create_dir_all(obj.parent().unwrap())
+            .await
+            .unwrap();
         tokio::fs::write(&obj, b"local data").await.unwrap();
         let mut index = HistoryIndex::new("p");
         index.insert(
@@ -555,10 +568,12 @@ mod tests {
             &WrongSizeBackend,
             &config,
             &mut index,
-            1,
-            2 * 24 * 60 * 60 * 1000,
-            &[],
-            false,
+            RotationParams {
+                offload_after_days: 1,
+                now_ms: 2 * 24 * 60 * 60 * 1000,
+                protected: &[],
+                dry_run: false,
+            },
         )
         .await
         .unwrap();
@@ -570,4 +585,3 @@ mod tests {
         let _ = tokio::fs::remove_dir_all(&store_dir).await;
     }
 }
-

@@ -59,9 +59,7 @@ fn read_contained_file(
 ) -> Result<(PathBuf, Vec<u8>), AssetReadError> {
     let target = safe_join(dist, request_path).ok_or(AssetReadError::Unsafe)?;
     let canonical_dist = dist.canonicalize().map_err(|_| AssetReadError::Missing)?;
-    let canonical_target = target
-        .canonicalize()
-        .map_err(|_| AssetReadError::Missing)?;
+    let canonical_target = target.canonicalize().map_err(|_| AssetReadError::Missing)?;
     if !canonical_target.starts_with(&canonical_dist) {
         return Err(AssetReadError::Unsafe);
     }

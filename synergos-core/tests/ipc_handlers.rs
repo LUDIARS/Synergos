@@ -322,10 +322,19 @@ async fn tag_add_ls_show_rm_round_trip_and_protects_from_gc() {
         other => panic!("expected Tag, got {other:?}"),
     }
 
-    match dispatch_command(IpcCommand::TagLs { project_id: "hist".into() }, &ctx).await {
+    match dispatch_command(
+        IpcCommand::TagLs {
+            project_id: "hist".into(),
+        },
+        &ctx,
+    )
+    .await
+    {
         IpcResponse::TagList(items) => {
             assert_eq!(items.len(), 2);
-            assert!(items.iter().any(|t| t.name == "release-1.0" && t.pin_count == 1));
+            assert!(items
+                .iter()
+                .any(|t| t.name == "release-1.0" && t.pin_count == 1));
             assert!(items.iter().any(|t| t.name == "older" && t.pin_count == 1));
         }
         other => panic!("expected TagList, got {other:?}"),
@@ -539,7 +548,10 @@ async fn pre_publish_nonzero_exit_aborts_publish_and_manifest_is_unchanged() {
     .await;
     match resp {
         IpcResponse::Error { message, .. } => {
-            assert!(message.contains("pre-publish"), "unexpected message: {message}");
+            assert!(
+                message.contains("pre-publish"),
+                "unexpected message: {message}"
+            );
         }
         other => panic!("expected Error from aborted publish, got {other:?}"),
     }
@@ -565,10 +577,8 @@ async fn later_pre_publish_failure_leaves_entire_batch_unpublished() {
             timeout_sec: 5,
         }],
     });
-    let root = std::env::temp_dir().join(format!(
-        "synergos-ipc-hook-batch-{}",
-        uuid::Uuid::new_v4()
-    ));
+    let root =
+        std::env::temp_dir().join(format!("synergos-ipc-hook-batch-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(root.join("assets")).unwrap();
     let open_resp = dispatch_command(
         IpcCommand::ProjectOpen {
@@ -611,7 +621,8 @@ async fn project_hooks_are_not_executed_when_opt_in_is_disabled() {
         allow_project_hooks: false,
         hooks: vec![],
     });
-    let root = std::env::temp_dir().join(format!("synergos-ipc-hook-optin-{}", uuid::Uuid::new_v4()));
+    let root =
+        std::env::temp_dir().join(format!("synergos-ipc-hook-optin-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(root.join(".synergos")).unwrap();
     std::fs::write(
         root.join(".synergos").join("hooks.toml"),
@@ -626,7 +637,10 @@ async fn project_hooks_are_not_executed_when_opt_in_is_disabled() {
 
     let entries = ctx.project_manager.manifest_entries("hist");
     assert_eq!(
-        entries.iter().find(|(p, _)| p == "assets/a.bin").map(|(_, e)| e.version),
+        entries
+            .iter()
+            .find(|(p, _)| p == "assets/a.bin")
+            .map(|(_, e)| e.version),
         Some(1),
         "publish must succeed because project hooks are opt-in disabled"
     );
@@ -638,7 +652,8 @@ async fn project_hooks_are_not_executed_when_opt_in_is_disabled() {
 /// `SYNERGOS_PEER` は設定しない: `runner.rs::run_manual` 参照)。
 #[tokio::test]
 async fn hooks_run_post_receive_passes_expected_env() {
-    let marker = std::env::temp_dir().join(format!("synergos-hook-env-{}.txt", uuid::Uuid::new_v4()));
+    let marker =
+        std::env::temp_dir().join(format!("synergos-hook-env-{}.txt", uuid::Uuid::new_v4()));
     let command = if cfg!(windows) {
         format!(
             "echo %SYNERGOS_EVENT%,%SYNERGOS_PROJECT%,%SYNERGOS_FILE%> \"{}\"",
@@ -701,7 +716,8 @@ async fn hooks_run_post_receive_passes_expected_env() {
 /// spawn は待たないので、マーカーファイルが書かれるまでポーリングする。
 #[tokio::test]
 async fn post_receive_spawn_hook_includes_version_and_peer() {
-    let marker = std::env::temp_dir().join(format!("synergos-hook-spawn-{}.txt", uuid::Uuid::new_v4()));
+    let marker =
+        std::env::temp_dir().join(format!("synergos-hook-spawn-{}.txt", uuid::Uuid::new_v4()));
     let command = if cfg!(windows) {
         format!(
             "echo %SYNERGOS_EVENT%,%SYNERGOS_PROJECT%,%SYNERGOS_FILE%,%SYNERGOS_VERSION%,%SYNERGOS_PEER%> \"{}\"",
@@ -722,7 +738,8 @@ async fn post_receive_spawn_hook_includes_version_and_peer() {
             timeout_sec: 5,
         }],
     }));
-    let root = std::env::temp_dir().join(format!("synergos-hook-spawn-root-{}", uuid::Uuid::new_v4()));
+    let root =
+        std::env::temp_dir().join(format!("synergos-hook-spawn-root-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&root).unwrap();
 
     runner.spawn_post_hooks(
@@ -794,7 +811,10 @@ async fn pre_publish_hook_timeout_kills_process_and_aborts_publish() {
     let elapsed = start.elapsed();
     match resp {
         IpcResponse::Error { message, .. } => {
-            assert!(message.contains("timed out"), "unexpected message: {message}");
+            assert!(
+                message.contains("timed out"),
+                "unexpected message: {message}"
+            );
         }
         other => panic!("expected Error from timed-out publish, got {other:?}"),
     }
