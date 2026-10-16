@@ -100,9 +100,7 @@ impl RotationBackend for S3Backend {
     async fn size(&self, key: &str) -> io::Result<Option<u64>> {
         let store = self.store()?;
         match store.head(&self.object_path(key)).await {
-            Ok(metadata) => u64::try_from(metadata.size)
-                .map(Some)
-                .map_err(|_| io::Error::other("s3 object size does not fit in u64")),
+            Ok(metadata) => Ok(Some(metadata.size)),
             Err(object_store::Error::NotFound { .. }) => Ok(None),
             Err(error) => Err(io::Error::other(format!("s3 head failed: {error}"))),
         }
