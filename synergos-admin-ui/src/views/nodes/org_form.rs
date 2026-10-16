@@ -129,7 +129,7 @@ fn valid_org_id(id: &str) -> bool {
 
 fn parse_members(value: &str) -> Vec<String> {
     let mut members = Vec::new();
-    for member in value.split(|ch| ch == ',' || ch == '\n') {
+    for member in value.split([',', '\n']) {
         let member = member.trim().to_ascii_lowercase();
         if !member.is_empty() && !members.contains(&member) {
             members.push(member);
