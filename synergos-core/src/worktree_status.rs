@@ -91,10 +91,7 @@ async fn load_ignore_patterns(root: &Path) -> io::Result<Vec<String>> {
     Ok(patterns)
 }
 
-async fn scan_worktree_with_patterns(
-    root: &Path,
-    patterns: &[String],
-) -> io::Result<Vec<String>> {
+async fn scan_worktree_with_patterns(root: &Path, patterns: &[String]) -> io::Result<Vec<String>> {
     let mut files = Vec::new();
     let mut pending = vec![root.to_path_buf()];
     while let Some(dir) = pending.pop() {
@@ -251,10 +248,7 @@ mod tests {
         manifest.files.insert("gone.txt".into(), entry(1, 1));
 
         let files = scan_worktree(root).await.unwrap();
-        assert_eq!(
-            files,
-            vec!["fresh.txt", "same.txt", "sub/changed.txt"]
-        );
+        assert_eq!(files, vec!["fresh.txt", "same.txt", "sub/changed.txt"]);
         let status = compare_with_manifest(root, &manifest, &files)
             .await
             .unwrap();
