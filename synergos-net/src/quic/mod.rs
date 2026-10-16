@@ -26,7 +26,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use dashmap::DashMap;
-use tokio::sync::RwLock;
+use tokio::sync::{broadcast, RwLock};
 
 use crate::config::QuicConfig;
 use crate::error::{Result, SynergosNetError};
@@ -145,6 +145,35 @@ pub struct QuicManager {
     local_addr: RwLock<Option<SocketAddr>>,
     /// コネクションごとの帯域推定値
     bandwidth_estimates: DashMap<PeerId, u64>,
+    /// 発信側 (`connect`) で確立した接続の通知。着信側は `accept()` の戻り値で
+    /// 受け取れるが、発信側には相手発ストリームを拾う口が無かった (B3: 片方向通信)。
+    /// daemon はこれを購読して発信接続にも `accept_bi` ループを張る。
+    outbound_tx: broadcast::Sender<AcceptedConnection>,
+}
+
+/// 発信接続通知チャネルの容量。購読側が遅れて取りこぼすと、その接続の
+/// 相手発ストリームが拾われなくなるため、同時 dial 数より十分大きく取る。
+const OUTBOUND_NOTIFY_CAPACITY: usize = 256;
+
+/// `idle_timeout` に対する keep-alive 送信間隔の比率 (1/3)。
+/// 経路上の NAT / firewall の UDP マッピングと QUIC の idle timeout の両方を
+/// 維持するため、idle timeout より十分短い間隔で PING を流す (B5)。
+const KEEP_ALIVE_DIVISOR: u64 = 3;
+/// keep-alive 間隔の下限。
+const KEEP_ALIVE_MIN_MS: u64 = 1_000;
+
+/// idle timeout から keep-alive 間隔を決める。idle timeout が 0 (無効) なら
+/// keep-alive も送らない。
+pub fn keep_alive_interval_for(idle_timeout_ms: u64) -> Option<Duration> {
+    if idle_timeout_ms == 0 {
+        return None;
+    }
+    let ms = (idle_timeout_ms / KEEP_ALIVE_DIVISOR).max(KEEP_ALIVE_MIN_MS);
+    if ms >= idle_timeout_ms {
+        // idle timeout が極端に短い設定では keep-alive が間に合わないので送らない
+        return None;
+    }
+    Some(Duration::from_millis(ms))
 }
 
 impl QuicManager {
@@ -157,7 +186,14 @@ impl QuicManager {
             endpoint: RwLock::new(None),
             local_addr: RwLock::new(None),
             bandwidth_estimates: DashMap::new(),
+            outbound_tx: broadcast::channel(OUTBOUND_NOTIFY_CAPACITY).0,
         }
+    }
+
+    /// 発信接続の確立通知を購読する。購読前に確立した接続は届かないので、
+    /// daemon は `connect` を呼ぶタスクより先に購読しておくこと。
+    pub fn subscribe_outbound(&self) -> broadcast::Receiver<AcceptedConnection> {
+        self.outbound_tx.subscribe()
     }
 
     /// QUIC エンドポイントを初期化し、リスンを開始する。
@@ -252,11 +288,50 @@ impl QuicManager {
             active_streams: 0,
             state: QuicConnectionState::Connected,
             rtt_ms: rtt,
-            connection: Some(connection),
+            connection: Some(connection.clone()),
         };
 
-        self.connections.insert(expected_peer_id, quic_conn);
+        self.store_connection(&expected_peer_id, quic_conn);
+        // 購読者がいなければ Err になるだけ (テスト等)。無視してよい。
+        let _ = self.outbound_tx.send(AcceptedConnection {
+            peer_id: expected_peer_id,
+            remote_addr: addr,
+            connection,
+        });
         Ok(())
+    }
+
+    /// 閉じた接続のエントリを外す。`stable_id` が現在のエントリと一致する
+    /// ときだけ外すので、同じピアへ張り直した新しい接続は消さない。
+    /// 外した場合は true。
+    pub fn remove_closed(&self, peer_id: &PeerId, stable_id: usize) -> bool {
+        let removed = self
+            .connections
+            .remove_if(peer_id, |_, entry| {
+                entry
+                    .connection
+                    .as_ref()
+                    .is_some_and(|c| c.stable_id() == stable_id)
+            })
+            .is_some();
+        if removed {
+            self.bandwidth_estimates.remove(peer_id);
+            tracing::info!(
+                "QUIC connection to {} closed; entry removed",
+                peer_id.short()
+            );
+        }
+        removed
+    }
+
+    /// 同じピアの接続は 1 本だけ所有する。再接続や同時 dial で置き換える場合は、
+    /// map から外れた旧接続も明示的に閉じて QUIC 資源を残さない。
+    fn store_connection(&self, peer_id: &PeerId, connection: QuicConnection) {
+        if let Some(previous) = self.connections.insert(peer_id.clone(), connection) {
+            if let Some(previous_connection) = previous.connection {
+                previous_connection.close(0u32.into(), b"superseded connection");
+            }
+        }
     }
 
     /// ピアとの接続を切断する
@@ -397,7 +472,7 @@ impl QuicManager {
             rtt_ms: rtt,
             connection: Some(connection.clone()),
         };
-        self.connections.insert(peer_id.clone(), quic_conn);
+        self.store_connection(&peer_id, quic_conn);
 
         Ok(Some(AcceptedConnection {
             peer_id,
@@ -474,15 +549,29 @@ impl QuicManager {
             .map_err(|e| SynergosNetError::Quic(format!("QUIC client crypto: {e}")))?;
         let mut cc = quinn::ClientConfig::new(Arc::new(qcc));
 
-        let mut transport = quinn::TransportConfig::default();
-        transport.max_concurrent_bidi_streams(self.config.max_concurrent_streams.into());
-        transport.max_idle_timeout(Some(
-            Duration::from_millis(self.config.idle_timeout_ms)
-                .try_into()
-                .unwrap_or_else(|_| quinn::IdleTimeout::from(quinn::VarInt::from_u32(30_000))),
-        ));
+        let transport = self.build_transport();
         cc.transport_config(Arc::new(transport));
         Ok(cc)
+    }
+
+    /// クライアント / サーバ共通のトランスポート設定。
+    fn build_transport(&self) -> quinn::TransportConfig {
+        let mut transport = quinn::TransportConfig::default();
+        transport.max_concurrent_bidi_streams(self.config.max_concurrent_streams.into());
+        let idle_timeout = if self.config.idle_timeout_ms == 0 {
+            None
+        } else {
+            Some(
+                Duration::from_millis(self.config.idle_timeout_ms)
+                    .try_into()
+                    .unwrap_or_else(|_| {
+                        quinn::IdleTimeout::from(quinn::VarInt::from_u32(30_000))
+                    }),
+            )
+        };
+        transport.max_idle_timeout(idle_timeout);
+        transport.keep_alive_interval(keep_alive_interval_for(self.config.idle_timeout_ms));
+        transport
     }
 
     fn build_server_config(&self) -> Result<quinn::ServerConfig> {
@@ -493,13 +582,7 @@ impl QuicManager {
             .with_single_cert(vec![cert_der], key_der)
             .map_err(|e| SynergosNetError::Quic(format!("TLS config error: {}", e)))?;
 
-        let mut transport = quinn::TransportConfig::default();
-        transport.max_concurrent_bidi_streams(self.config.max_concurrent_streams.into());
-        transport.max_idle_timeout(Some(
-            Duration::from_millis(self.config.idle_timeout_ms)
-                .try_into()
-                .unwrap_or_else(|_| quinn::IdleTimeout::from(quinn::VarInt::from_u32(30_000))),
-        ));
+        let transport = self.build_transport();
 
         let mut server_config = quinn::ServerConfig::with_crypto(Arc::new(
             quinn::crypto::rustls::QuicServerConfig::try_from(server_crypto)
@@ -525,6 +608,8 @@ fn install_default_crypto_provider() {
 }
 
 /// accept 後に呼び出し側へ返す情報。相手 PeerId を証明書から再計算しておく。
+/// 発信側の確立通知 (`subscribe_outbound`) も同じ型で流す。
+#[derive(Clone)]
 pub struct AcceptedConnection {
     pub peer_id: PeerId,
     pub remote_addr: SocketAddr,
@@ -591,4 +676,27 @@ fn bind_udp_dual_stack(addr: SocketAddr) -> std::io::Result<std::net::UdpSocket>
     }
     socket.bind(&addr.into())?;
     Ok(socket.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keep_alive_is_disabled_when_no_safe_interval_exists() {
+        assert_eq!(keep_alive_interval_for(0), None);
+        assert_eq!(keep_alive_interval_for(1_000), None);
+    }
+
+    #[test]
+    fn keep_alive_is_well_inside_idle_timeout() {
+        assert_eq!(
+            keep_alive_interval_for(30_000),
+            Some(Duration::from_secs(10))
+        );
+        assert_eq!(
+            keep_alive_interval_for(5_000),
+            Some(Duration::from_millis(1_666))
+        );
+    }
 }

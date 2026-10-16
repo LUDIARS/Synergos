@@ -19,12 +19,15 @@
 | **Windows で `[::]:port` に IPv4 が届かない** | ✅ **現行実装** | Windows 既定 v6-only。IPV6_V6ONLY を落としてデュアルスタック bind |
 | publish 時に大ファイルを RAM に全読み | ✅ **現行実装** | CRC のために `fs::read` していた → ストリーミング CRC |
 | ネットワーク由来 FileId のパス脱出 (`..`) | ✅ **現行実装** | 受信側 resolver で `..` / 絶対パス / `.synergos/` を拒否 |
+| **発信側の接続で相手発の通信を受ける** | ✅ **現行実装** | `accept_bi` ループが着信接続にしか無く、`peer add-url` / join した側へ相手からの gossip・転送が届かなかった (片方向)。発信接続にも張る (`peer_link.rs`) |
+| **接続を受けた側の `peer list` に相手が出る** | ✅ **現行実装** | 着信ピアを Presence に登録していなかった。着信・発信どちらも Connected で載せ、起動時に自ノードを告知 (`register_self`) |
+| **接続の維持と張り直し** | ✅ **現行実装** | keep-alive 無しで 30 秒アイドルで全接続が無言で切れ、エントリも残り続けた。idle timeout の 1/3 で keep-alive、閉じた接続は外して Disconnected、URL の分かる相手へ 15 秒ごとに再接続 |
 | 転送の整合性検証 | ✅ できている | 64 KiB フレームごと blake3 + 全体 blake3 |
 | CatalogUpdate → CatalogSyncService | ⚠️ 骨格のみ | RootCatalog を Bitswap で取ってくるが**実ファイル同期には使われていない** (実データは FileOffer 経路)。Phase 2 (履歴ノード) では使わない。将来の最適化用に残置 |
 | Bitswap / ContentStore | ⚠️ メモリのみ | `MemoryContentStore`。再起動で消える。Phase 2 の履歴ノード保管庫は別実装 (`.synergos/history/`)、ContentStore は据え置き |
 | 差分転送 (変わった部分だけ) | ➖ やらない (neco 決定 2026-08-16) | 全体転送のまま。代わりに **履歴ノード** ([versioning-design.md](versioning-design.md) §3) が旧版の実体を保持 — ✅ 実装済 (`[history] enabled = true`) |
 | 削除 / リネームの伝搬 | ❌ 未実装 | manifest に tombstone を持たせれば可 (P1) |
-| ディレクトリ単位 publish / 自動監視 | ❌ 未実装 | `publish <id> <files...>` のみ。`--all` (作業ツリー走査) は小さい追加 (P1) |
+| ディレクトリ単位 publish / 自動監視 | ⚠️ 一部 | `publish <id> --all` で作業ツリーを走査し変更・新規だけ publish (`.synergosignore` で除外)。自動監視は未実装 |
 | 競合検出・退避 | ⚠️ 一部 | 同じ version で size / CRC が違う Offer は `ConflictManager` へ登録し、ローカル版を保持。親版に基づく分岐検出・別名退避・解決 UI は未実装。設計 §4 |
 | Cloudflare Tunnel 経由 | ❌ 方針転換 | UDP 不通。インターネット越しの接続は Cloudflare Mesh または直接到達できる UDP 経路を使う |
 | Cloudflare Mesh 実運用 | ⚠️ 未着手 | dashboard 設定・エンロール・到達性確認は人手。実環境向け手順の整備が必要 |
@@ -48,10 +51,10 @@
 
 | # | 作業 | 規模 | メモ |
 |---|---|---|---|
-| 1 | `project publish <id> --all` (作業ツリー走査、`.synergos/` と `.gitignore` 相当の除外) | 小 | 今は毎回ファイル列挙が要る |
+| 1 | ✅ **実装済** `project publish <id> --all` (作業ツリー走査、`.synergos/` `.git/` `.synergosignore` と設定パターンを除外、変更・新規だけ送る) | 小 | |
 | 2 | 削除 / リネームの伝搬 (manifest tombstone + `FileOffer{deleted:true}`) | 中 | 消したファイルが他ノードに残り続ける |
-| 3 | `project status <id>` (manifest vs 作業ツリー: 変更・未 publish・未取得) | 小 | 「今 publish すべきものは何か」を人が把握できるように |
-| 4 | 受信側の欠落復旧: manifest にあるのに実ファイルが無い/壊れている場合の再取得 (`project verify <id>`) | 小 | 手で消したファイルを再取得できない |
+| 3 | ✅ **実装済** `project status <id>` (manifest vs 作業ツリー: Modified / Untracked / Missing) | 小 | |
+| 4 | ✅ **既存で充足** 受信側の欠落復旧は `project checkout <id>` (manifest どおりに作業ツリーを揃え、違う版を FileWant で取り直す)。`status` の Missing から案内する | 小 | 別コマンド `verify` は作らない |
 | 5 | Cloudflare Mesh のセットアップ手順と接続診断の整備 | 中 | LAN 外運用の前提。製品外設定を含むため実環境で確認する |
 | 6 | 転送の再開 (resume) / 並列度制御 | 中 | 数 GB を切断で最初からやり直す。CHUNK/offset を Offer に載せれば可 |
 | 7 | invite の GUI / Tauri 対応 (`peer_info_url` を渡す) | 小 | CLI は済み |

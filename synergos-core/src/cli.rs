@@ -125,8 +125,17 @@ pub enum ProjectCommand {
         /// プロジェクトID
         id: String,
         /// publish するファイル (プロジェクトルート相対 or 絶対)
-        #[arg(required = true)]
+        #[arg(required_unless_present = "all", conflicts_with = "all")]
         files: Vec<PathBuf>,
+        /// 作業ツリーを走査し、manifest と内容が違う / manifest に無いファイルを
+        /// すべて publish する (`.synergos/` `.git/` と `.synergosignore` は除外)
+        #[arg(long)]
+        all: bool,
+    },
+    /// 作業ツリーと manifest の差分 (変更・未 publish・欠落) を表示する
+    Status {
+        /// プロジェクトID
+        id: String,
     },
     /// 作業ツリーを manifest に合わせる (git checkout 後に実行。旧版は履歴ノードから届く)
     Checkout {
@@ -384,7 +393,13 @@ async fn handle_project(cmd: ProjectCommand) -> anyhow::Result<()> {
                 _ => println!("Unexpected response"),
             }
         }
-        ProjectCommand::Publish { id, files } => {
+        ProjectCommand::Publish { id, all: true, .. } => {
+            crate::cli_worktree::publish_all(&mut client, id).await?;
+        }
+        ProjectCommand::Status { id } => {
+            crate::cli_worktree::status(&mut client, id).await?;
+        }
+        ProjectCommand::Publish { id, files, .. } => {
             let count = files.len();
             let resp = client
                 .send(synergos_ipc::IpcCommand::PublishUpdate {

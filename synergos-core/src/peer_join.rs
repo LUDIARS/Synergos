@@ -11,7 +11,6 @@ use synergos_net::types::PeerId;
 use crate::ipc_server::ServiceContext;
 use crate::peer_bootstrap::{bootstrap_from_url_expected, BootstrapResult};
 use crate::presence::NodeRegistration;
-use crate::presence::{NodeRegistry, PeerState};
 
 /// `url` の `/peer-info` を引いて QUIC 接続し、Presence に Connected として登録する。
 /// `expected_peer` が与えられた場合、相手の peer_id が一致しなければエラー
@@ -34,13 +33,11 @@ pub async fn bootstrap_and_register(
         synergos_version: result.synergos_version.clone(),
     };
     ctx.presence
-        .register_node(registration)
+        .register_or_merge(registration)
         .await
         .map_err(|e| format!("register_node failed: {e}"))?;
-    let _ = ctx
-        .presence
-        .update_node_state(&result.peer_id, PeerState::Connected)
-        .await;
+    // 切断時は同じ URL へ張り直す (daemon の再接続ループ)
+    ctx.presence.remember_reconnect_url(&result.peer_id, url);
     Ok(result)
 }
 
