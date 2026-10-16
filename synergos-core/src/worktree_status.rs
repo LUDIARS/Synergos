@@ -102,7 +102,7 @@ async fn scan_worktree_with_patterns(root: &Path, patterns: &[String]) -> io::Re
                 continue;
             };
             let rel = normalize_rel_path(rel);
-            if is_ignored(&rel, &patterns) {
+            if is_ignored(&rel, patterns) {
                 continue;
             }
             // file_type はリンクを辿らない
