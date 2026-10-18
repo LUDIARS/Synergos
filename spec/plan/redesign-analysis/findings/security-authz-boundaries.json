@@ -1,0 +1,607 @@
+{
+  "findings": [
+    {
+      "id": "SEC-AZ-01",
+      "title": "No project membership or authorization gate anywhere on the Synergos data plane: any key holder with network reach is a member of every open project",
+      "theme": "security",
+      "repo": "synergos",
+      "area": "synergos-net quic accept; synergos-core stream dispatch, exchange (TXFR receive / FileWant serve), history serve",
+      "severity": "critical",
+      "kind": "vulnerability",
+      "evidence": [
+        {"file_line": "Synergos/synergos-net/src/quic/mod.rs:384-400", "quote": "let peer_id = match hello::recv_hello(&connection).await { Ok(pid) => pid, ... }; ... self.connections.insert(peer_id.clone(), quic_conn);"},
+        {"file_line": "Synergos/synergos-core/src/daemon.rs:805-808", "quote": "} else if &magic == TRANSFER_STREAM_MAGIC { if let Err(e) = exchange.handle_incoming_transfer(recv, sender_cloned).await {"},
+        {"file_line": "Synergos/synergos-core/src/exchange/mod.rs:706-708", "quote": "let file_id = FileId(header.file_id.clone()); let final_path = resolver(&header.project_id, &file_id) .ok_or_else(|| FileSharingError::FileNotFound(header.file_id.clone()))?;"},
+        {"file_line": "Synergos/synergos-core/src/exchange/mod.rs:905-934", "quote": "if requester == self.local_peer_id { return; } ... let record = match self.shared_files.get(&key) { ... None => { self.serve_from_history(project_id, requester, file_id, version); return; } };"},
+        {"file_line": "Synergos/synergos-core/src/invite_token.rs:19-21", "quote": "注意: 現状 Synergos にはプロジェクト単位の参加 ACL が無い (project_id と到達性さえあれば誰でも参加できる) ... 認可は Cloudflare Mesh 等のネットワーク層で行う。"},
+        {"file_line": "Synergos/spec/plan/problem_logs/2026-08-16-versioned-transfer-safety.md:44", "quote": "Project membership remains enforced by network reachability rather than a project ACL."},
+        {"file_line": "Synergos/docs/mesh-two-node-checklist.md:40", "quote": "sudo ufw allow from 192.0.2.10/12 to any port 4433 proto udp"},
+        {"file_line": "Synergos/synergos-core/src/manifest.rs:315", "quote": "if seg.contains(':') || (first && seg == META_DIR) { return None; }"}
+      ],
+      "scenario": "Attacker generates a fresh ed25519 key (free), reaches UDP 4433 (the documented firewall opens it to the whole 192.0.2.10/12 mesh, or to the Internet if listen_addr is public), completes QUIC + HLO1 and is registered as a peer. (a) Write: open a stream with magic TXFR and header {project_id: '<id seen in any gossip topic project/<id>>', file_id: 'scripts/convert.py' or '.cargo/config.toml', version: 999}; handle_incoming_transfer resolves the path (only the first segment '.synergos' is blocked), accepts because no local record is stale/conflicting, and atomically replaces the file in the member's working tree; every other member auto-pulls it. (b) Read: send signed FileWant{version:0} for guessed/observed paths; handle_file_want pushes the current version, and history nodes serve every retained version via serve_from_history. No step consults a membership list, invite, Cernere identity, or control-plane registry.",
+      "impact_ai_game": "Unreleased game assets, model checkpoints and datasets are exfiltrable by anyone with mesh reach, and working trees on every node (artist laptops, build/CI nodes, history nodes) can be poisoned, including tool-config files that lead to RCE. For AI training data it means silent dataset corruption replicated to every node with no provenance.",
+      "current_state": "Authentication = possession of any ed25519 key; authorization = none. The invite token is explicitly documented as 'not an authorization boundary'; the mesh firewall/Cloudflare WARP membership is the only control, and the control plane registry is never consumed by the daemon.",
+      "proposed_redesign": "Introduce a membership credential as the data-plane authorization primitive: (1) Cernere/control plane records org -> project -> node membership; (2) the control plane issues per-node short-lived membership certificates (SPIFFE-style X.509 or Biscuit tokens: {org, project_ids[], node pubkey, device posture claim, exp <= 1h, kid}); (3) QUIC uses mTLS with the node's ed25519 cert and the membership cert is presented in the handshake extension or first stream; (4) accept() verifies the chain against the control-plane root key and installs a per-connection capability set; (5) dispatch_peer_streams checks (peer, project) in caps BEFORE reading a TXFR/BSW1/GSP1 body (header peek + stream reset on deny), handle_file_want/serve_from_history check the requester's caps, gossip subscriptions are built per peer from caps; (6) nodes fetch a signed revocation/allowlist bundle every <= 60 s and fail closed when stale. Data model: ProjectMembership{org_id, project_id, peer_id, role(reader|writer|history), issued_at, exp, revoked_at}; wire: HLO2/mTLS + MembershipCert; config: `require_membership = true` default.",
+      "alternatives": [
+        "Per-project pre-shared symmetric key carried in HLO1: trivial to implement but no per-node revocation, any member compromise leaks the key, no Cernere linkage.",
+        "Rely on Cloudflare Mesh / Tailscale grants only: cannot express project-level granularity, direct P2P/relay paths bypass it, and it contradicts the org rule that auth centralizes in Cernere.",
+        "Host-signed membership list gossiped by the project owner: works offline but duplicates identity outside Cernere and has no device posture."
+      ],
+      "enforcement": "runtime",
+      "confidence": 0.95,
+      "sources": [
+        "research/breach-containment.md §1.1 (NIST SP 800-207 per-connection, dynamic policy), §1.3 (Biscuit offline attenuation, revocation ids), §1.4 (SPIRE 1h SVID TTL), §5.3 (kill switch), catalogue P0-1/P0-2",
+        "research/vcs-game-ai.md §1.2 (Perforce protections: path x principal x host with explicit deny), §1.5 (CVE-2026-6043: insecure default = everyone is super until first p4 protect)"
+      ]
+    },
+    {
+      "id": "SEC-AZ-02",
+      "title": "HLO1 client identity is replayable and unbound to the TLS session; a replayed hello overwrites the victim's live connection entry",
+      "theme": "security",
+      "repo": "synergos",
+      "area": "synergos-net/src/quic/hello.rs, quic/mod.rs accept",
+      "severity": "high",
+      "kind": "vulnerability",
+      "evidence": [
+        {"file_line": "Synergos/synergos-net/src/quic/hello.rs:42-48", "quote": "fn signing_bytes(&self) -> Vec<u8> { ... out.extend_from_slice(self.peer_id.0.as_bytes()); out.push(0); out.extend_from_slice(&self.public_key); out.extend_from_slice(&self.ts_ms.to_le_bytes()); out }"},
+        {"file_line": "Synergos/synergos-net/src/quic/hello.rs:77-103", "quote": "pub fn verify(&self) -> Result<PeerId> { ... let derived = identity::peer_id_from_public_bytes(&pk); if derived != self.hello.peer_id {...} identity::verify(&pk, &self.hello.signing_bytes(), &sig)...; Ok(derived) }"},
+        {"file_line": "Synergos/synergos-net/src/quic/mod.rs:400", "quote": "self.connections.insert(peer_id.clone(), quic_conn);"}
+      ],
+      "scenario": "Victim V bootstraps to any node M (an invite's peer_info_url, a bootstrap_url, or a legitimately joined peer that is later compromised). As the server side, M receives V's SignedHello blob. M then connects to server S and sends the identical blob: verify() checks only the static signature (ts_ms is never compared to the clock, there is no server nonce or TLS exporter binding), so S registers M's QUIC connection under V's PeerId and `insert` silently replaces V's genuine entry. S's outbound FileOffer pushes and FileWant answers for V now go to M, and M's inbound TXFR/gossip streams are attributed to V. Any future allowlist keyed by PeerId (SEC-AZ-01) is bypassed unless this is fixed first.",
+      "impact_ai_game": "Identity spoofing defeats membership enforcement, audit attribution ('who pushed this asset/version') and conflict detection; a compromised contractor node can impersonate a lead's node to every peer it has ever talked to.",
+      "current_state": "Server-side TLS pinning is one-way (no client cert); client identity rests solely on the HLO1 signature over (peer_id, pubkey, ts_ms); docs/operations-readiness claims mutual authentication.",
+      "proposed_redesign": "Bind identity to the session: use TLS client certificates (self-signed ed25519, SPKI pinned exactly like the server side) so the handshake itself proves key possession; if HLO1 is kept as metadata, sign (domain tag 'synergos/hello/v1' || server nonce || TLS exporter value (RFC 8446 exporter / RFC 9266 style channel binding) || ts_ms) and reject |now - ts_ms| > 120 s. Duplicate PeerId policy: a second connection for an existing PeerId must pass the fresh challenge and then explicitly closes the old one with a logged security event; never a blind overwrite. Add ALPN 'synergos/1' to version the handshake.",
+      "alternatives": [
+        "Server nonce only, no channel binding: stops offline replay but a relay/MITM can still forward a live hello.",
+        "Noise-IK style handshake inside QUIC streams: duplicates what TLS already provides."
+      ],
+      "enforcement": "ci-gate",
+      "confidence": 0.9,
+      "sources": [
+        "research/breach-containment.md §1.1 (per-connection auth), §1.4 (short-lived SVIDs)"
+      ]
+    },
+    {
+      "id": "SEC-AZ-03",
+      "title": "Invite tokens are bearer, multi-use, non-expiring by default and never validated by the issuing host; joiner-controlled project_id aliases local projects",
+      "theme": "security",
+      "repo": "synergos",
+      "area": "synergos-core/src/invite_token.rs, ipc_server.rs ProjectJoin / ProjectCreateInvite",
+      "severity": "high",
+      "kind": "design-gap",
+      "evidence": [
+        {"file_line": "Synergos/synergos-core/src/invite_token.rs:17", "quote": "発行側での使用回数管理はできない (相手が検証するため)。有効期限で縛る。"},
+        {"file_line": "Synergos/synergos-core/src/invite_token.rs:19-21", "quote": "このトークンは「参加手順の同梱」であって認可境界ではない。"},
+        {"file_line": "Synergos/synergos-core/src/ipc_server.rs:1071-1093", "quote": "// 1. 同じ project_id でローカルに open (既に open 済みならそのまま) if ctx.project_manager.project_root(&payload.project_id).is_none() { ... open_project(payload.project_id.clone(), root_path, payload.display_name.clone())"}
+      ],
+      "scenario": "(a) A token pasted into Slack/Discord is forwarded or scraped; it has no use counter, the host never learns it was used, and the CLI default is no expiry, so anyone holding it weeks later joins (and with SEC-AZ-01 becomes a full member). (b) An attacker crafts a token whose project_id equals the victim's real project id and whose peer_info_url points at the attacker; the victim's daemon silently reuses the already-open local project and registers the attacker's node as a peer of it, after which the attacker receives that project's offers and can push into it.",
+      "impact_ai_game": "Onboarding external vendors and AI-pipeline nodes by chat-pasted tokens is the normal workflow in studios; unbounded bearer invites are exactly the Rockstar/Okta-class credential path and make NDA scoping impossible.",
+      "current_state": "syn1 tokens are host-signed JSON with optional expiry and an unused nonce; verification is entirely on the joiner; legacy UUID tokens are one-shot but daemon-local only.",
+      "proposed_redesign": "Invite = single-use, invitee-bound, host-consumed: payload {project_ref, host_peer_id, invitee (Cernere user id or invitee pubkey), nonce, exp <= 24h default, scope(role)}; join becomes a JOIN1 stream to the host: joiner sends {token, joiner pubkey, signature}; host checks nonce unused (persistent ledger), expiry, invitee binding, then issues the membership credential (SEC-AZ-01) and records the join in the control plane. Project identity must be namespaced (project_ref = blake3(org_id || host_pubkey || local_id)) so a token cannot alias an existing local project; the UI must show org/host before joining.",
+      "alternatives": [
+        "Keep bearer tokens but add a mandatory TTL and a control-plane use counter: cheaper, still leakable within the window.",
+        "Cernere-mediated invites only (no offline tokens): cleanest identity story but blocks air-gapped LAN onboarding."
+      ],
+      "enforcement": "runtime",
+      "confidence": 0.85,
+      "sources": [
+        "research/breach-containment.md §1.4 (GitHub fine-grained PAT max lifetime, 5-min OIDC exchange), §6 (Okta HAR-token theft)"
+      ]
+    },
+    {
+      "id": "SEC-AZ-04",
+      "title": "Gossip is signature-authenticated but never authorized: no topic/membership check on delivery, signer-unbound fields, and fan-out to every connected peer",
+      "theme": "security",
+      "repo": "synergos",
+      "area": "synergos-net gossip node/message/transport; synergos-core daemon gossip subscriber & fan-out; presence",
+      "severity": "high",
+      "kind": "vulnerability",
+      "evidence": [
+        {"file_line": "Synergos/synergos-net/src/gossip/node.rs:216-226", "quote": "pub fn on_signed_message_received(&self, topic: &TopicId, signed: SignedGossipMessage, _from: &PeerId) -> bool { match self.verify_envelope(signed) { Some(msg) => self.deliver(topic, msg), None => false } }"},
+        {"file_line": "Synergos/synergos-net/src/gossip/node.rs:244-250", "quote": "fn deliver(&self, topic: &TopicId, message: GossipMessage) -> bool { let msg_id = message_id(topic, &message); if self.message_cache.check_and_insert(&msg_id) { return false; } let _ = self.tx.send((topic.clone(), message)); true }"},
+        {"file_line": "Synergos/synergos-net/src/gossip/message.rs:77-86", "quote": "GossipMessage::CatalogUpdate { publisher, .. } => { if !publisher.0.is_empty() && publisher != &derived {...} } // ConflictAlert は project 全体向けなので送信者の明示フィールドは無い。 GossipMessage::ConflictAlert { .. } => {}"},
+        {"file_line": "Synergos/synergos-core/src/presence/mod.rs:267-282", "quote": "pub fn handle_peer_status(&self, activity: &PeerActivityStatus, _origin: &PeerId) { ... if let Some(mut entry) = self.nodes.get_mut(&activity.peer_id) { entry.value_mut().state = new_state;"},
+        {"file_line": "Synergos/synergos-core/src/daemon.rs:864-868", "quote": "let peers: Vec<PeerId> = if outbound.peers.is_empty() { quic.list_connections().into_iter().map(|c| c.peer_id).collect() }"},
+        {"file_line": "Synergos/synergos-core/src/daemon.rs:978-980", "quote": "let auto_pull_eligible = sender != *ctx.exchange.local_peer_id() && !ctx.exchange.has_shared_file(&project_id, &file_id, version) && ctx.project_manager.project_root(&project_id).is_some();"}
+      ],
+      "scenario": "A peer that is legitimately connected for project B (or any peer, given SEC-AZ-01) publishes on topic project/A: a FileOffer makes every A member auto-pull the attacker's bytes (eligibility is only 'project open and version not held'); ConflictAlert{file_id} creates phantom conflicts with no signer check; PeerStatus{peer_id: <lead>, Offline} marks other peers disconnected because origin is ignored. In the reverse direction, because the mesh is always empty, project A's FileOffer/FileWant/CatalogUpdate (paths, sizes, CRCs, catalog CIDs) are fanned out to every QUIC connection including peers that only belong to project B.",
+      "impact_ai_game": "Multi-client studios and NDA'd vendor projects leak file names and catalog metadata across projects; attackers can trigger pulls of poisoned assets and disrupt presence/conflict UI used by leads.",
+      "current_state": "Envelope signature + signer == self-declared sender for 3 of 5 variants; no subscription or membership check on receive; one-hop delivery; fan-out fallback to all connections.",
+      "proposed_redesign": "Authorization at the gossip edge: (1) each connection carries an authorized topic set derived from the membership credential (SEC-AZ-01); handle_gossip_stream drops frames whose topic is not authorized for the sender and logs a security event; (2) every variant carries `origin` and verify() binds it to the signer (ConflictAlert gains origin + project_id; CatalogUpdate publisher becomes mandatory, legacy empty-publisher path removed); (3) PeerStatus may only describe origin's own state; (4) fan-out uses only peers authorized for the topic, never the all-connections fallback; (5) per-(origin, topic) sequence numbers plus a bounded replay window replace the 1000-entry message cache as replay protection; (6) canonical length-prefixed signing bytes.",
+      "alternatives": [
+        "Per-project gossip encryption keys (members-only readability) without authorization checks: hides content but still allows injection by any member and key rotation on leave is hard.",
+        "Full libp2p gossipsub with peer scoring: heavier, still needs the membership oracle."
+      ],
+      "enforcement": "runtime",
+      "confidence": 0.9,
+      "sources": []
+    },
+    {
+      "id": "SEC-AZ-05",
+      "title": "DHT Announce and FindProjectPeers are unauthenticated and sender-unbound; records can impersonate any peer and membership is disclosed to anyone",
+      "theme": "security",
+      "repo": "synergos",
+      "area": "synergos-net/src/dht/transport.rs, dht/node.rs",
+      "severity": "medium",
+      "kind": "vulnerability",
+      "evidence": [
+        {"file_line": "Synergos/synergos-net/src/dht/transport.rs:81-85", "quote": "pub async fn handle_dht_stream(dht: Arc<DhtNode>, mut send: quinn::SendStream, mut recv: quinn::RecvStream) -> Result<()> {"},
+        {"file_line": "Synergos/synergos-net/src/dht/node.rs:270-276", "quote": "DhtRequest::Announce { record } => { let peer_id = record.peer_id.clone(); ... self.announce(PeerRecord::from_dto(record)).await; self.add_peer(peer_id, endpoints, None).await; DhtResponse::AnnounceAck }"},
+        {"file_line": "Synergos/synergos-net/src/dht/node.rs:261-268", "quote": "DhtRequest::FindProjectPeers { project_id } => { let peers = self.find_project_peers(&project_id).await ... DhtResponse::ProjectPeers { peers } }"}
+      ],
+      "scenario": "Any connected peer sends Announce{record: {peer_id: <victim>, endpoints: [attacker addr], active_projects: [every id], ttl_secs: u64::MAX}}; the receiver stores it and overwrites the victim's routing entry, then serves it to third parties via FindNode/FindProjectPeers. FindProjectPeers{project_id} returns membership and display_name to anyone. The production DHT client is dormant today, so this is a latent trap for the intended discovery design rather than a live exploit.",
+      "impact_ai_game": "Eclipse/poisoning of discovery lets an attacker insert itself as the 'publisher' of assets or a 'history node'; membership disclosure violates NDA boundaries and the no-personal-data rule (display_name).",
+      "current_state": "Records are unsigned DTOs; the stream handler does not receive the authenticated sender; no admission or Sybil cost.",
+      "proposed_redesign": "Signed peer records (libp2p-style): {peer_id, pubkey, endpoints, projects, seq, exp} signed by the record's key; Announce accepted only if signer == record.peer_id == authenticated stream sender and seq is monotonic; TTL capped; FindProjectPeers requires the caller's membership credential for that project and returns no display_name; routing table admission limited to credentialed peers. If a public DHT is not a product goal, delete the DHT and use the control-plane registry as the discovery oracle.",
+      "alternatives": [
+        "Keep DHT private to the mesh and rely on SEC-AZ-01 admission only: simpler, but records remain spoofable within the mesh."
+      ],
+      "enforcement": "runtime",
+      "confidence": 0.85,
+      "sources": []
+    },
+    {
+      "id": "SEC-AZ-06",
+      "title": "Bitswap content server answers any CID to any connected peer: no peer identity, no project scoping, no access log",
+      "theme": "security",
+      "repo": "synergos",
+      "area": "synergos-core daemon dispatch; synergos-net content/bitswap.rs; MemoryContentStore",
+      "severity": "high",
+      "kind": "vulnerability",
+      "evidence": [
+        {"file_line": "Synergos/synergos-core/src/daemon.rs:814-817", "quote": "} else if &magic == BITSWAP_STREAM_MAGIC { if let Err(e) = handle_bitswap_stream(content_store, send, recv).await {"},
+        {"file_line": "Synergos/synergos-net/src/content/bitswap.rs:228-232", "quote": "pub async fn handle_bitswap_stream<S: ContentStore + ?Sized>(store: Arc<S>, mut send: quinn::SendStream, mut recv: quinn::RecvStream) -> Result<()> {"}
+      ],
+      "scenario": "Catalog snapshot CIDs are broadcast in CatalogUpdate to every connection (SEC-AZ-04); any peer, member or not, opens a BSW1 stream with WantList{cids} and receives the blocks. Today the store only holds RootCatalog snapshots (which, per the content map, embed the publisher's absolute file paths), but the same path is the designated future file-byte channel (DESIGN 15.1), at which point it becomes unauthenticated bulk download of every project's chunks.",
+      "impact_ai_game": "Project layout, usernames in absolute paths and catalog metadata leak to non-members now; if the chunk DAG path is adopted for large assets without fixing this, it becomes the primary exfiltration channel.",
+      "current_state": "Global, project-agnostic in-memory store; handler never learns who asked; errors logged at debug only.",
+      "proposed_redesign": "Pass the authenticated sender into handle_bitswap_stream; key the store by (project_id, cid) and check `may_read(peer, project)` against the connection's capability set before `get`; emit a structured access event {peer, project, cid, bytes, outcome}; catalog snapshots carry project-relative paths only; per-peer token bucket on served bytes.",
+      "alternatives": [
+        "Encrypt blocks with a per-project key so non-members get ciphertext: hides content but not existence/size, and complicates key rotation on leave."
+      ],
+      "enforcement": "runtime",
+      "confidence": 0.85,
+      "sources": []
+    },
+    {
+      "id": "SEC-AZ-07",
+      "title": "Bootstrap trust anchor is weak: /peer-info is unauthenticated (docs instruct 0.0.0.0), http:// bootstrap is allowed, the advertised peer_id is trusted on first use, and `peer connect` fabricates presence",
+      "theme": "security",
+      "repo": "synergos",
+      "area": "synergos-core peer_info_server.rs, peer_bootstrap.rs, ipc_server.rs PeerAddByUrl/PeerConnect, docs/mesh-two-node-checklist.md",
+      "severity": "high",
+      "kind": "vulnerability",
+      "evidence": [
+        {"file_line": "Synergos/synergos-core/src/peer_info_server.rs:192-197", "quote": "Router::new().route(\"/peer-info\", get(handle_peer_info)).route(\"/health\", get(handle_health)).with_state(state)"},
+        {"file_line": "Synergos/synergos-core/src/peer_info_server.rs:201-203", "quote": "直接 0.0.0.0 に bind しないこと (servlet 自体には auth が無いため、生で外に出すと info disclosure になる)。"},
+        {"file_line": "Synergos/docs/mesh-two-node-checklist.md:47", "quote": "peer_info_listen_addr = \"0.0.0.0:7780\""},
+        {"file_line": "Synergos/synergos-core/src/peer_bootstrap.rs:196", "quote": "if !matches!(parsed.scheme(), \"http\" | \"https\") {"},
+        {"file_line": "Synergos/synergos-core/src/peer_bootstrap.rs:161", "quote": "let expected_peer_id = expected_peer.cloned().unwrap_or(advertised_peer_id);"},
+        {"file_line": "Synergos/synergos-core/src/ipc_server.rs:1190", "quote": "match crate::peer_join::bootstrap_and_register(ctx, &project_id, &url, None).await {"},
+        {"file_line": "Synergos/synergos-core/src/ipc_server.rs:1148-1161", "quote": "let registration = crate::presence::NodeRegistration { peer_id: PeerId::new(&peer_id), ... }; ... update_node_state(&PeerId::new(&peer_id), PeerState::Connected)"}
+      ],
+      "scenario": "An operator runs `peer add-url http://host.example:7780` (or a bootstrap_urls entry). An on-path attacker or a hijacked DNS name answers with its own peer_id and QUIC endpoint; because no expected peer was supplied, pinning is performed against the attacker's own key and 'succeeds'; the attacker is registered into the project (and, for bootstrap_urls, into every open project). Separately, the publicly reachable /peer-info discloses peer_id, public IP:port and exact build version to the Internet, and `peer connect <project> <anything>` shows a fake Connected peer in `peer list` without any connection.",
+      "impact_ai_game": "A single misconfigured studio onboarding step hands a stranger membership; version disclosure enables targeted exploitation of unpatched nodes.",
+      "current_state": "URL validated for form only; redirects disabled; http accepted; TOFU when no expected peer; servlet has no auth layer; docs and code disagree on binding.",
+      "proposed_redesign": "Replace /peer-info with a signed, cacheable node card {peer_id, pubkey, endpoints, version, issued_at, exp} signed by the node key and optionally countersigned by the control plane; the client verifies the signature before dialing, so transport confidentiality is irrelevant to integrity. Every bootstrap path must carry the expected peer_id (URL fragment `#peer=<id>` or the invite's host_peer_id); refuse TOFU. Require https for non-loopback non-mesh hosts. Delete `peer connect` presence fabrication or make it open a real connection. Fix the checklist to bind loopback behind the tunnel.",
+      "alternatives": [
+        "https-only with public CA: still TOFU on peer_id unless the card is signed; depends on DNS."
+      ],
+      "enforcement": "runtime",
+      "confidence": 0.9,
+      "sources": [
+        "research/breach-containment.md §4.2 (SSRF/egress: validate resolved IPs, no redirects)"
+      ]
+    },
+    {
+      "id": "SEC-AZ-08",
+      "title": "Relay: room join is unauthenticated, room_id is the only secret, from_peer_id is client-asserted and frames are forwarded verbatim over plaintext ws",
+      "theme": "security",
+      "repo": "synergos",
+      "area": "synergos-relay/src/server.rs; synergos-net/src/relay/mod.rs",
+      "severity": "high",
+      "kind": "vulnerability",
+      "evidence": [
+        {"file_line": "Synergos/synergos-relay/src/server.rs:19-25", "quote": "pub enum ClientControl { Join { room_id: String, /// クライアント自己申告の peer_id (ログ / デバッグ用のみ、信用しない) peer_id: Option<serde_json::Value>, },"},
+        {"file_line": "Synergos/synergos-relay/src/server.rs:187-200", "quote": "ClientControl::Join { room_id, .. } => { ... if let Err(reason) = rooms.join(room_id.clone(), sender) { ... } current_room = Some(room_id); }"},
+        {"file_line": "Synergos/synergos-relay/src/server.rs:209-214", "quote": "Message::Binary(bytes) => { if let Some(room) = &current_room { rooms.broadcast(room, client_id, &bytes); }"},
+        {"file_line": "Synergos/synergos-net/src/relay/mod.rs:111-113", "quote": "Message::Binary(bytes) => match rmp_serde::from_slice::<RelayData>(&bytes) { Ok(data) => { if recv_tx.send(data).await.is_err() {"}
+      ],
+      "scenario": "The relay data path is not wired in production yet, but the server is deployable today on 0.0.0.0:8080 without TLS. Anyone who learns a room_id (it is carried in DHT RouteDto::Relay records and can be brute-forced if short) joins the room, receives every frame, and injects frames with any from_peer_id; the receiving client trusts from_peer_id from the frame.",
+      "impact_ai_game": "If relays are used for NAT-blocked artists/vendors (the research estimates ~10% of pairs), the relay becomes a plaintext tap and injection point for asset traffic.",
+      "current_state": "Join = room_id string; no identity, no membership, no TLS, no idle/rate limits.",
+      "proposed_redesign": "Relay join = signed challenge: server sends nonce, client answers with {peer pubkey, membership credential (SEC-AZ-01), signature(nonce || room)}; rooms are bound to (org, project) and the relay checks the credential's project; from_peer_id is taken from the authenticated join, never from frames; relay only forwards an end-to-end AEAD/QUIC-wrapped payload (server sees ciphertext); wss required; per-client bandwidth metering and audit of joins.",
+      "alternatives": [
+        "Cloudflare Access/WARP posture in front of the relay plus room_id: adds device posture but still no per-project authorization."
+      ],
+      "enforcement": "runtime",
+      "confidence": 0.85,
+      "sources": [
+        "research/breach-containment.md §1.2 (identity-aware proxy with posture)",
+        "research/transfer-efficiency.md §4.4 (relay share of connections)"
+      ]
+    },
+    {
+      "id": "SEC-AZ-09",
+      "title": "IPC authorization is 'same OS uid = full administrator', fails open on credential lookup errors, falls back to /tmp, has no Windows DACL, and exposes raw protocol-frame injection",
+      "theme": "security",
+      "repo": "synergos",
+      "area": "synergos-core/src/ipc_server.rs; synergos-ipc transport/client",
+      "severity": "high",
+      "kind": "vulnerability",
+      "evidence": [
+        {"file_line": "Synergos/synergos-core/src/ipc_server.rs:235-241", "quote": "let peer_uid = match peer_uid_of_fd(fd) { Ok(u) => u, Err(e) => { tracing::debug!(\"peer_cred unavailable, skipping uid check: {e}\"); return Ok(()); } };"},
+        {"file_line": "Synergos/synergos-core/src/ipc_server.rs:303-306", "quote": "fn peer_uid_of_fd(_fd: RawFd) -> io::Result<libc::uid_t> { // illumos / solaris / hermit など未対応 Unix はベストエフォートで自プロセス UID を返す。 unsafe { Ok(libc::geteuid()) } }"},
+        {"file_line": "Synergos/synergos-ipc/src/transport.rs:58", "quote": "let runtime_dir = std::env::var(\"XDG_RUNTIME_DIR\").unwrap_or_else(|_| \"/tmp\".to_string());"},
+        {"file_line": "Synergos/synergos-ipc/src/client.rs:73-75", "quote": "let path = crate::transport::socket_path(); let stream = tokio::net::UnixStream::connect(&path).await.map_err(|e| {"},
+        {"file_line": "Synergos/synergos-core/src/ipc_server.rs:313-315", "quote": "Named Pipe は `first_pipe_instance` で名前占有はしているが、ACL を細かく設定していないため Windows 上の任意ユーザが接続できてしまう穴があった (CWE-269)。"},
+        {"file_line": "Synergos/synergos-core/src/ipc_server.rs:2033-2057", "quote": "IpcCommand::PeerSendStream { peer_id, magic, payload } => { ... conn.open_bi().await...; send.write_all(&magic)...; send.write_all(&payload)"},
+        {"file_line": "Synergos/synergos-core/src/ipc_server.rs:832-836", "quote": "IpcCommand::Shutdown => { tracing::info!(\"Shutdown requested via IPC\"); let _ = ctx.shutdown_tx.send(()); IpcResponse::Ok }"}
+      ],
+      "scenario": "(a) Any process running as the user (an editor plugin, a compromised npm/pip package, the co-hosted Curare server which must share the uid to use the socket) sends HistoryGc{purge:true} to wipe the archive, Shutdown, ProjectJoin with an attacker invite, or PeerSendStream{magic:b'TXFR', payload} to forge a versioned transfer that remote peers attribute to this daemon's identity. (b) On a multi-user Linux host without XDG_RUNTIME_DIR, another user pre-creates /tmp/synergos and binds a fake daemon; the CLI never authenticates the server, so invite tokens and commands are harvested. (c) On the non-Linux/BSD Unix branch the check always passes.",
+      "impact_ai_game": "The ars game-engine plugin and the Curare server both get daemon-superuser powers; one supply-chain compromise in the DCC toolchain erases history nodes (the asset of record) in one message.",
+      "current_state": "Socket 0600 + uid compare (Linux/macOS), best-effort elsewhere; no client identity, scopes, confirmation, or audit; Windows pipe without ACL; CLI trusts whatever listens on the path.",
+      "proposed_redesign": "Capability-scoped IPC: daemon mints a random session secret at start into `<runtime_dir>/synergos/ipc.token` (0600, directory 0700, refuse /tmp fallback and refuse to start if the dir is not owned by the uid); clients present it in an IPC hello together with a client name; scopes: `read` (Status/List), `project:<id>:write` (publish/checkout), `admin` (Shutdown, HistoryGc, TagRm, ProjectJoin, PeerSendStream, ConfigUpdate). Admin commands require a per-command confirmation nonce returned by the daemon and are logged with client name. Remove PeerSendStream for reserved magics (HLO1/DHT1/TXFR/GSP1/BSW1) and require an explicit extension-magic allowlist. Fail closed on peer-cred failure; set a Windows DACL restricting the pipe to the owner SID; client verifies the server's uid/SID via peer credentials before sending.",
+      "alternatives": [
+        "Keep uid-only but move destructive commands behind a separate admin socket: smaller change, still no per-client attribution."
+      ],
+      "enforcement": "runtime",
+      "confidence": 0.9,
+      "sources": [
+        "AIFormat/local-app/REVIEW_VULNERABILITY_LOCAL.md §3 (IPC access control, sender verification, local token)"
+      ]
+    },
+    {
+      "id": "SEC-AZ-10",
+      "title": "Hook execution boundary: daemon-level hooks run repository-relative scripts that any peer can overwrite, hooks inherit the daemon's full environment, and project-hook trust is daemon-global and unpinned",
+      "theme": "security",
+      "repo": "synergos",
+      "area": "synergos-core/src/hooks/runner.rs, project_file.rs; synergos-net config HooksConfig; docs/hooks.md; receive path",
+      "severity": "high",
+      "kind": "vulnerability",
+      "evidence": [
+        {"file_line": "Synergos/synergos-core/src/hooks/runner.rs:325-335", "quote": "let mut cmd = shell_command(&def.command); cmd.current_dir(project_root); cmd.env(\"SYNERGOS_EVENT\", ...); cmd.env(\"SYNERGOS_PROJECT\", ...); cmd.env(\"SYNERGOS_FILE\", ...);"},
+        {"file_line": "Synergos/docs/hooks.md:44", "quote": "command = \"python scripts/convert.py\"   # project root を cwd に、シェル経由で実行"},
+        {"file_line": "Synergos/docs/hooks.md:57", "quote": "command = \"scripts/lint-assets.sh\""},
+        {"file_line": "Synergos/synergos-core/src/hooks/runner.rs:133-134", "quote": "if self.config.allow_project_hooks { let project_hooks = project_file::load(project_root).await?;"},
+        {"file_line": "Synergos/synergos-core/src/manifest.rs:315", "quote": "if seg.contains(':') || (first && seg == META_DIR) { return None; }"}
+      ],
+      "scenario": "A project member (or any peer, per SEC-AZ-01) pushes `scripts/convert.py` through the normal receive path (only the `.synergos/` prefix is refused). On every node whose daemon config has the documented post-receive hook, the next received PNG triggers `python scripts/convert.py` as the daemon user with the daemon's environment (identity passphrase, node key, AWS/GDrive rotation credentials). With allow_project_hooks=true, a committed `.synergos/hooks.toml` runs on every project the daemon opens, re-read per event with no hash pin or approval.",
+      "impact_ai_game": "Asset pipelines rely on converters/linters; this turns the asset store into the Maya scriptNode worm pattern (an outsourcer's push executes on every studio node and history/CI node).",
+      "current_state": "Timeouts, process-group kill, null stdio exist; no env scrubbing, no sandbox, no script integrity pinning, no per-project opt-in.",
+      "proposed_redesign": "(1) Hook commands may only reference executables outside the synced tree or a script whose blake3 is pinned in the hook definition (`command_hash`), verified before spawn; (2) `env_clear()` then an explicit allow-list (SYNERGOS_*, PATH, HOME, LANG); secrets come from a keyring/Infisical agent, never process env; (3) run hooks in a sandbox (bubblewrap/seccomp minimum, gVisor preferred: no network, read-only project mount, write-only output dir, CPU/mem/time budget); (4) allow_project_hooks becomes per-project with an operator approval record of the hooks.toml hash; (5) receiver-side deny-list for VCS/tool directories (.git/, .cargo/, .vscode/, .idea/, hooks.toml) unless declared in a signed manifest.",
+      "alternatives": [
+        "WASM hook runtime with capability imports: strongest isolation but forces rewriting existing shell/python hooks."
+      ],
+      "enforcement": "runtime",
+      "confidence": 0.9,
+      "sources": [
+        "research/breach-containment.md §4.3 (gVisor/bubblewrap), §4.6 (Maya MEL/Vacphage, Blender auto-run), §6 (Codecov env exfiltration)"
+      ]
+    },
+    {
+      "id": "SEC-AZ-11",
+      "title": "synergos-control uses one static admin bearer for every org and every action; Curare holds that same token as a global admin; no identity, scope, expiry, rotation or audit",
+      "theme": "security",
+      "repo": "both",
+      "area": "synergos-control auth.rs / api/mod.rs; curare-server src/synergos/control-client.ts",
+      "severity": "high",
+      "kind": "design-gap",
+      "evidence": [
+        {"file_line": "Synergos/synergos-control/src/auth.rs:12-26", "quote": "pub async fn require_admin_token(State(expected): State<AdminToken>, request: Request, next: Next) ... if !constant_time_eq(provided.as_bytes(), expected.0.as_bytes()) { return Err(ControlError::Unauthorized); }"},
+        {"file_line": "Synergos/synergos-control/src/api/mod.rs:42-76", "quote": "let admin_routes = Router::new().route(\"/v1/orgs\", ...).route(\"/v1/orgs/:org_id/nodes/:node_id/node-key\", post(nodes::reissue_node_key)).route(\"/v1/reconcile\", ...).route(\"/v1/mesh/connector-tokens\", ...).layer(middleware::from_fn_with_state(admin_token, require_admin_token))"},
+        {"file_line": "Synergos/docs/mesh-operations.md:126-128", "quote": "管理 API も同じリスナー上から Mesh 全体から到達可能になる。この構成では管理トークンが唯一の防壁になるため"},
+        {"file_line": "Curare/curare-server/src/synergos/control-client.ts:6-10", "quote": "const token = process.env.SYNERGOS_CONTROL_TOKEN; ... headers: { Authorization: `Bearer ${token}`, ..."}
+      ],
+      "scenario": "The Curare process is Internet-facing (web UI + API). Any Curare env leak or SSRF/RCE yields SYNERGOS_CONTROL_TOKEN, which can reissue node keys for every org, register rogue mesh nodes and obtain Cloudflare connector tokens, route an arbitrary Cloudflare API token through /v1/mesh/*, and run revoke_dark across the account. Nothing records which principal did it. Rotation requires a restart of control and Curare simultaneously.",
+      "impact_ai_game": "The control plane is the intended 'brake' on dark nodes; a single shared secret makes it the highest-value target and ties the blast radius of a Curare bug to every studio org.",
+      "current_state": "Env-sourced >=32-byte token, constant-time compare, loopback default; Curare binds org slugs server-side but authenticates with the global token.",
+      "proposed_redesign": "Control plane authorizes Cernere-issued credentials: admins present a Cernere JWT/Biscuit with org-admin claims (verified against Cernere's published key); services (Curare) use a Cernere Tool Client credential exchanged for a short-lived (<=1h) control token scoped to `org:<slug>:nodes.read|nodes.write` and never `mesh.*`/`reconcile`; mesh/reconcile/revoke require an interactive admin with step-up. Every admin route writes an audit record {actor, scope, action, target, result, request_id}. mTLS between Curare and control; heartbeat on a separate listener/port from the admin API so widening to the mesh does not expose admin routes.",
+      "alternatives": [
+        "Multiple static tokens with per-token org scope (config map): cheap interim, still no identity/audit/expiry."
+      ],
+      "enforcement": "runtime",
+      "confidence": 0.9,
+      "sources": [
+        "research/breach-containment.md §1.4 (short-lived scoped credentials, OIDC exchange), §1.6 (JIT admin), §6 (CircleCI, LastPass single-credential blast radius)",
+        "AIFormat/web/REVIEW_VULNERABILITY_WEB.md §2 (token scope minimal, short-lived tokens, admin audit log)"
+      ]
+    },
+    {
+      "id": "SEC-AZ-12",
+      "title": "Node registry is observational only: peer_id is self-attested under a copy-pasted node key, the data plane never consumes the registry, and 'revoke' never reaches peers",
+      "theme": "security",
+      "repo": "synergos",
+      "area": "synergos-control api/heartbeat.rs; synergos-core control_heartbeat.rs; daemon accept path",
+      "severity": "high",
+      "kind": "missing-control",
+      "evidence": [
+        {"file_line": "Synergos/synergos-control/src/api/heartbeat.rs:88-91", "quote": "if node.synergos_peer_id.as_deref() != Some(req.peer_id.as_str()) { info!(node = %node.id, peer_id = %req.peer_id, \"heartbeat updated peer_id\"); } node.synergos_peer_id = Some(req.peer_id);"},
+        {"file_line": "Synergos/synergos-core/src/control_heartbeat.rs:103-112", "quote": "let body = serde_json::json!({ \"node_id\": self.config.node_id, \"peer_id\": self.peer_id.to_string(), ... }); let result = client.post(&self.config.heartbeat_url).bearer_auth(&self.node_key).json(&body)"},
+        {"file_line": "Synergos/synergos-net/src/quic/mod.rs:362-407", "quote": "pub async fn accept(&self) -> Result<Option<AcceptedConnection>> { ... hello::recv_hello(&connection) ... self.connections.insert(peer_id.clone(), quic_conn); (no registry/allowlist consulted)"}
+      ],
+      "scenario": "A stolen node key rebinds a legitimate node record to the attacker's peer_id (the control plane logs an info line and accepts). A node removed from the registry or flagged dark keeps full P2P access until an operator manually runs reconcile, and even then only Cloudflare Mesh membership changes; direct/LAN QUIC peers and relay rooms are unaffected because the daemon has no notion of a registry verdict.",
+      "impact_ai_game": "The control plane cannot act as the breach brake the docs promise (prevention/detection/exclusion); offboarding a vendor's render node is a manual, best-effort, Cloudflare-only action.",
+      "current_state": "Heartbeat = bearer node key + self-reported fields; reconcile is manual; no export of allowlist; no revocation feed.",
+      "proposed_redesign": "(1) Registration binds node_id to the node's ed25519 pubkey via a CSR-style enrol (control signs {node_id, org, pubkey, exp}); (2) heartbeat body is signed by that key with a monotonic counter (peer_id proven, not asserted); (3) control plane publishes a signed, versioned membership/revocation bundle per org (ids, revocation ids, exp <= 5 min) that every daemon fetches every <= 60 s and enforces at accept and at stream dispatch, failing closed when stale (configurable grace); (4) `quarantine node` = bundle entry + immediate close of existing QUIC sessions + relay eviction; (5) node keys are short-lived and auto-renewed, not copy-pasted 64-hex strings.",
+      "alternatives": [
+        "Push model (control plane connects to nodes to revoke): fails exactly when the node is hostile; pull with fail-closed is more robust."
+      ],
+      "enforcement": "runtime",
+      "confidence": 0.85,
+      "sources": [
+        "research/breach-containment.md §1.5 (CAEP session revocation), §5.3 (signed revocation bundle, fail closed), catalogue P0-2"
+      ]
+    },
+    {
+      "id": "SEC-AZ-13",
+      "title": "Cu->Sy custody is a confused-deputy with one global secret: a single bearer admits, reads, mints download URLs and irreversibly reclaims any object; the same secret authenticates, signs capabilities and signs receipts; capabilities carry no actor, tenant or nonce",
+      "theme": "security",
+      "repo": "both",
+      "area": "synergos-custody handlers.rs/signature.rs/contract.rs/lib.rs; synergos-control main.rs; curare-server storage/synergos-storage.ts, storage/durable-receipt.ts",
+      "severity": "high",
+      "kind": "design-gap",
+      "evidence": [
+        {"file_line": "Synergos/synergos-custody/src/handlers.rs:33-35", "quote": "let expected = signature::sign(&state.config.receipt_secret, &state.config.token); if !provided.is_some_and(|v| signature::verify(&state.config.receipt_secret, v, &expected))"},
+        {"file_line": "Synergos/synergos-custody/src/handlers.rs:175-184", "quote": "pub async fn reclaim(...) -> Result<Json<Value>> { // Cu owns the no-version-reference decision; only its server credential reaches this route. state.store.reclaim(&signature::object_key(&input.opaque_object_id)).await?;"},
+        {"file_line": "Synergos/synergos-custody/src/handlers.rs:186-190", "quote": "fn capability_url(state: &State, method: &str, key: &str, expires: i64, name: &str) -> String { let signature = signature::sign(&state.config.receipt_secret, &signature::capability_message(method, key, expires, name));"},
+        {"file_line": "Synergos/synergos-custody/src/handlers.rs:127-130", "quote": "let signature = signature::sign(&state.config.receipt_secret, &signature::canonical(&receipt));"},
+        {"file_line": "Synergos/synergos-custody/src/handlers.rs:199-209", "quote": "fn check_capability(...) { if !hex_digest(key) || capability.expires <= Utc::now().timestamp_millis() || !signature::verify(&state.config.receipt_secret, &signature::capability_message(method, key, capability.expires, &capability.name), &capability.signature) { return Err(Error::Denied); }"},
+        {"file_line": "Synergos/synergos-custody/src/contract.rs:8-15", "quote": "pub struct Admission { pub operation_id: String, pub opaque_object_id: String, pub content_hash: String, pub byte_length: u64, pub expires_at: String, pub content_type: String, }"},
+        {"file_line": "Synergos/synergos-control/src/main.rs:76-79", "quote": "let mut router = api::build_router(state, AdminToken(secrets.admin_token)); if let Some(custody) = synergos_custody::config::Config::from_env()? { router = router.merge(synergos_custody::router(custody).await?);"},
+        {"file_line": "Curare/curare-server/src/storage/durable-receipt.ts:17-18", "quote": "const expectedMac = createHmac('sha256', secret).update(canonicalJson(receipt)).digest(); if (!/^[a-f0-9]{64}$/.test(signature) || !timingSafeEqual(expectedMac, Buffer.from(signature, 'hex')))"}
+      ],
+      "scenario": "Curare's per-route checks are correct today (download/plan always resolve blobRef from asset_versions after a 'download' permission check), so there is no direct IDOR; the problem is that custody has no second opinion. Any future Curare bug or compromise that lets a user name a blobRef (e.g. a route resembling /storage/receipts) yields a download capability for any tenant's object, because custody only checks 'the global token holder asked'. The custody token leak = `reclaim` of every object with permanent tombstones. Because Curare holds receipt_secret, Curare (or anyone with its env) can forge 'durable' receipts, so a receipt proves nothing to a third party. Capabilities are replayable until expiry from any IP and leak via proxy/CDN query-string logs.",
+      "impact_ai_game": "Custody is meant to be the durable anchor for release artifacts and datasets; a single symmetric secret shared with the web tier means one web-tier breach is total loss of confidentiality and durability guarantees across all orgs.",
+      "current_state": "One SYNERGOS_CUSTODY_TOKEN (admin), one SYNERGOS_CUSTODY_RECEIPT_SECRET used for token compare, capability HMAC and receipt HMAC; admissions have no tenant; admin and transfer routers share the control listener; no logging.",
+      "proposed_redesign": "(1) Key separation with kids: service auth via mTLS or per-org bearer tokens; capability-signing key (HMAC, rotated with overlapping kid); receipt-signing key = Ed25519 private key held only by custody, public key published so Curare and auditors verify but cannot forge; (2) capabilities become attenuable tokens (Biscuit or macaroon) minted by custody per org with caveats {method, key, byte-range, exp, nonce single-use, actor_hash, org}; Curare attenuates per download instead of calling custody per item (removes the 1000-call fan-out) and custody records capability id + outcome; (3) admissions carry {org_id, project_id}; tokens are scoped to an org so a Curare tenant bug cannot cross tenants; (4) reclaim requires a signed deletion intent {operation_id, reason, actor} and enters a trash/retention window with Object-Lock-style legal hold before unlink; (5) admin router bound to a private listener/mTLS, transfer router public; (6) receipts appended to a per-org Merkle transparency log with witnessed checkpoints.",
+      "alternatives": [
+        "Keep HMAC everywhere but add domain-separation prefixes and kids: cheap, fixes rotation and cross-use, does not fix forgeability by Curare.",
+        "Custody validates a Curare session via token introspection on every GET: strongest binding, adds a round trip per transfer and couples custody availability to Curare."
+      ],
+      "enforcement": "runtime",
+      "confidence": 0.9,
+      "sources": [
+        "research/breach-containment.md §1.3 (Biscuit vs macaroons: verifiers need not hold secrets), §2.3 (Object Lock/legal hold), §3.1 (Rekor-style receipt log), catalogue P0-6",
+        "research/vcs-game-ai.md §3.1 (LFS batch API: href+header+expires_in+verify as the wire model)"
+      ]
+    },
+    {
+      "id": "SEC-AZ-14",
+      "title": "Curare authentication: fresh Cernere WebSocket per request with no cache, rate limit or token pre-check; the actor path accepts ws:// (no scheme check) and reports socket close as 401",
+      "theme": "security",
+      "repo": "curare",
+      "area": "curare-server src/auth/middleware.ts, src/auth/cernere-actor.ts, src/app.ts",
+      "severity": "medium",
+      "kind": "vulnerability",
+      "evidence": [
+        {"file_line": "Curare/curare-server/src/auth/middleware.ts:17-18", "quote": "if (!authorization?.startsWith('Bearer ')) return c.json({ error: 'authentication_required' }, 401); const actor = await resolveCernereActor(authorization.slice(7));"},
+        {"file_line": "Curare/curare-server/src/auth/cernere-actor.ts:10-13", "quote": "const url = new URL('/auth', endpoint); url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'; ... const socket = new WebSocket(url, ['bearer', token]);"},
+        {"file_line": "Curare/curare-server/src/auth/cernere-actor.ts:27", "quote": "const onClose = (): void => finish(new VersioningError('authentication_rejected', 401));"},
+        {"file_line": "Curare/curare-server/src/auth/cernere-command.ts:12", "quote": "if (!['http:', 'https:'].includes(url.protocol)) throw new VersioningError('cernere_endpoint_invalid', 503);"}
+      ],
+      "scenario": "An unauthenticated client sends thousands of requests with `Authorization: Bearer x`; each opens a WebSocket to Cernere and waits up to 10 s, amplifying load on the shared identity service (no bodyLimit/rateLimit middleware exists in src/app.ts). When Cernere sheds load and closes sockets, every Curare user receives 401 and clients clear their tokens. With CERNERE_URL=http://... (not rejected on the actor path) every user token traverses the network in a cleartext ws handshake header.",
+      "impact_ai_game": "Asset sync clients issue 4+ auth round trips per file; a 10k-file clone is 40k Cernere handshakes, which is both a DoS surface and an availability coupling for every studio tool.",
+      "current_state": "Live verification per request by design ('request-time' synchronization); no cache, no limiter, scheme check only on the command path.",
+      "proposed_redesign": "Local verification of Cernere-issued JWTs against a published JWKS (5-min key cache) with a bounded actor/membership cache (TTL <= 5 min, keyed by token hash) and a CAEP/SSF receiver that invalidates entries on session-revoked/membership-changed events; keep request-time re-check for destructive operations (grants, decisions, member changes, release finalize). Add syntactic pre-check (3 JWT segments, size cap), per-IP and per-token-hash negative cache and rate limit, circuit breaker toward Cernere; map close codes (1008/4xxx -> 401, 1006/1011 -> 503); enforce https/wss outside NODE_ENV=development at boot.",
+      "alternatives": [
+        "Persistent per-user Cernere session held by Curare (RULE.md §1.3 model): matches the org's connected-session rule but requires Cernere support for delegated sessions."
+      ],
+      "enforcement": "runtime",
+      "confidence": 0.9,
+      "sources": [
+        "AIFormat/FORMAT_AUTH.md §3 (id-cache middleware, 5-min cache) as cited in the cu-auth-access map",
+        "research/breach-containment.md §1.5 (SSF/CAEP)"
+      ]
+    },
+    {
+      "id": "SEC-AZ-15",
+      "title": "Creator omnipotence and no separation of duties: the logical-asset creator holds every permission forever (including review/release), org owners/admins have no implicit rights, and projects/releases are creator-only",
+      "theme": "security",
+      "repo": "curare",
+      "area": "curare-server src/access/policy.ts, src/db/review-repository.ts, src/db/access-repository.ts, src/db/release-repository.ts",
+      "severity": "high",
+      "kind": "design-gap",
+      "evidence": [
+        {"file_line": "Curare/curare-server/src/access/policy.ts:13-16", "quote": "export function hasAssetPermission(actor, scope, creatorId, granted, permission) { return belongsToScope(actor, scope) && (actor.userId === creatorId || granted.includes(permission) || granted.includes('manage')); }"},
+        {"file_line": "Curare/curare-server/src/db/review-repository.ts:13", "quote": "const submission = await requireSubmission(actor, id, input.decision === 'cancelled' ? 'submit' : 'review', tx);"},
+        {"file_line": "Curare/curare-server/src/db/access-repository.ts:43", "quote": "if (!actor.organizationIds.includes(project.organizationId) || (manage && project.createdBy !== actor.userId)) {"},
+        {"file_line": "Curare/curare-server/src/db/release-repository.ts:33", "quote": "if (!release || release.createdBy !== actor.userId) throw new VersioningError('release_access_denied', 403);"}
+      ],
+      "scenario": "A contractor creates a logical asset, saves, submits, approves their own submission (recordDecision never compares submission.createdBy with the reviewer) and finalizes a release containing it. Conversely, when an artist moves teams or an AI pipeline service account created thousands of assets, no org owner/admin can view, re-grant or transfer them; a project created by someone who left cannot be edited or deleted by anyone else.",
+      "impact_ai_game": "Review/release is the product's core control over what ships; without SoD and org-role inheritance the 'approved' state is meaningless for compliance, and generated-asset ownership by service users becomes an operational dead end.",
+      "current_state": "Two-factor policy (scope membership AND creator-or-grant) is sound for revocation on leaving the org, but creator is a permanent super-user and Cernere roles are consulted only for member management and shared nodes.",
+      "proposed_redesign": "Introduce explicit `owner` on logical assets/projects/releases with an audited transfer endpoint; derive a capability matrix from Cernere org roles (owner/admin => manage+review+release on org spaces; member => per-space defaults) and merge with per-asset grants; SoD rule in recordDecision: `decision.createdBy != submission.createdBy` and reviewer must not hold only self-granted rights, overridable per space by an audited policy flag; releases scoped to the org/space with role-based `release`; org-admin break-glass requiring a fresh Cernere step-up assertion and an audit record.",
+      "alternatives": [
+        "Keep creator-omnipotence but add ownership transfer only: fixes orphaning, not self-approval."
+      ],
+      "enforcement": "runtime",
+      "confidence": 0.9,
+      "sources": [
+        "research/breach-containment.md §1.6 (step-up / JIT admin)",
+        "research/vcs-game-ai.md §1.2 (P4 review/admin levels), §2.7 (Plastic ACL inheritance)"
+      ]
+    },
+    {
+      "id": "SEC-AZ-16",
+      "title": "Grants accept any UUID, delegate without bound (manage grants manage), never expire, record no grantor, and the 404/403 split is an existence oracle",
+      "theme": "security",
+      "repo": "curare",
+      "area": "curare-server src/db/access-repository.ts, src/routes/logical-assets.ts",
+      "severity": "medium",
+      "kind": "design-gap",
+      "evidence": [
+        {"file_line": "Curare/curare-server/src/db/access-repository.ts:55-60", "quote": "export async function setGrant(actor, logicalId, userId, permissions) { ... await requireLogicalAccess(actor, logicalId, 'manage', tx); await tx.insert(schema.assetGrants).values({ assetId: logicalId, userId, permissions }).onConflictDoUpdate(...)"},
+        {"file_line": "Curare/curare-server/src/db/access-repository.ts:14-18", "quote": "if (!row) throw new VersioningError('asset_not_found', 404); ... if (!hasAssetPermission(...)) { throw new VersioningError('asset_access_denied', 403); }"},
+        {"file_line": "Curare/curare-server/src/routes/logical-assets.ts:26-28", "quote": "routes.put('/:id/grants/:userId', async (c) => { const body = z.object({ permissions: z.array(z.enum(permissions)) }).strict().parse(await c.req.json()); await setGrant(getActor(c), ..., z.string().uuid().parse(c.req.param('userId')), body.permissions);"}
+      ],
+      "scenario": "A manager grants `manage` to a typo'd UUID; the dormant row activates the day that UUID joins the org. A `manage` grantee grants `manage` onward indefinitely, so privilege spreads with no owner awareness. External reviewers cannot be given time-boxed access, so permanent grants accumulate. Any member can distinguish existing-but-forbidden assets (403) from non-existent ones (404).",
+      "impact_ai_game": "Vendor onboarding/offboarding for a 50-person outsourcing team is per-asset per-user rows with no expiry and no record of who granted what; incident reconstruction is impossible.",
+      "current_state": "Grants are a (asset, user, permissions[]) row with DB CHECK on verbs; no grantor/time; delegation unbounded; removal only by PUT [].",
+      "proposed_redesign": "Validate grantee against Cernere member.list (or a Cernere group id) at grant time; add `granted_by`, `granted_at`, optional `expires_at`, `reason`; delegation cap: only owner/org-admin may grant `manage`; explicit DELETE; append-only `access_events` (actor, subject, permission diff, request_id); uniform 404 for unauthorized reads; group/team grants from Cernere so onboarding is one row per team.",
+      "alternatives": [
+        "Keep per-user grants but add expiry only: minimal change, still no audit or delegation cap."
+      ],
+      "enforcement": "runtime",
+      "confidence": 0.85,
+      "sources": [
+        "AIFormat/web/REVIEW_VULNERABILITY_WEB.md §1 (IDOR / ownership checks), §2 (admin audit log)"
+      ]
+    },
+    {
+      "id": "SEC-AZ-17",
+      "title": "Revocation does not propagate: Curare grants die with membership, but issued capabilities, 24 h admissions, Synergos peer sessions, relay rooms and custody have no revocation path; no SSF/CAEP receiver exists on any surface",
+      "theme": "security",
+      "repo": "both",
+      "area": "curare-server upload/acquisition capabilities; synergos-custody check_capability; synergos daemon accept; spec/feature/server-client-architecture.md",
+      "severity": "high",
+      "kind": "missing-control",
+      "evidence": [
+        {"file_line": "Curare/spec/feature/server-client-architecture.md:46", "quote": "発行済み短期転送URLは期限まで有効になり得る。除名時の即時失効を保証しない。"},
+        {"file_line": "Curare/curare-server/src/routes/upload.ts:33", "quote": "expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),"},
+        {"file_line": "Synergos/synergos-custody/src/handlers.rs:199-209", "quote": "fn check_capability(...) { if !hex_digest(key) || capability.expires <= Utc::now().timestamp_millis() || !signature::verify(...) { return Err(Error::Denied); }"},
+        {"file_line": "Synergos/synergos-net/src/quic/mod.rs:384-400", "quote": "accept(): verify hello, insert connection (no allowlist, no revocation list consulted)"},
+        {"file_line": "Curare/curare-server/src/access/policy.ts:7-10", "quote": "return scope.organizationId === null ? actor.userId === scope.ownerId : actor.organizationIds.includes(scope.organizationId);"}
+      ],
+      "scenario": "A contractor is removed from the Cernere org at 10:00. Curare correctly denies their next API call (membership is re-fetched per request), but: the 1000 download URLs from a plan issued at 09:59 work until 10:04 (MinIO) / 10:14 (custody); their upload admission accepts a PUT until the next day; their Synergos daemon stays connected to every peer and keeps receiving FileOffers and serving FileWants indefinitely (there is nothing to revoke); any relay room they joined keeps forwarding. No event from Cernere reaches Curare, custody, control or the daemons.",
+      "impact_ai_game": "Offboarding (the most common studio security event) cannot be made instantaneous; the P2P layer in particular never forgets a peer.",
+      "current_state": "Documented and accepted for short URLs; undocumented and unbounded for the P2P layer.",
+      "proposed_redesign": "Cernere acts as an SSF/CAEP transmitter (session-revoked, membership-changed events); Curare, synergos-control and custody run receivers. Curare invalidates actor cache and marks the user's open admissions cancelled; custody keeps a short revocation list of capability ids/org+actor hashes checked in check_capability (capabilities therefore must carry a capability id and actor hash, see SEC-AZ-13) and lowers TTLs (download <= 120 s, upload admission <= 1 h with renewal); control publishes the signed revocation bundle consumed by daemons (SEC-AZ-12) which close sessions and evict relay rooms. Target SLA: < 60 s to full revocation.",
+      "alternatives": [
+        "Pure TTL reduction without events: cheap but cannot reach the P2P sessions at all."
+      ],
+      "enforcement": "runtime",
+      "confidence": 0.85,
+      "sources": [
+        "research/breach-containment.md §1.5 (OpenID CAEP / Shared Signals), §5.3 (GitHub/Okta token revocation events), catalogue P0-2"
+      ]
+    },
+    {
+      "id": "SEC-AZ-18",
+      "title": "Operator roles live in env allowlists outside Cernere, and the Curare->daemon IPC proxy makes the Curare process a daemon superuser for every org",
+      "theme": "security",
+      "repo": "both",
+      "area": "curare-server src/routes/synergos.ts, src/routes/storage-operations.ts, src/synergos/ipc-client.ts; synergos-core ipc_server.rs",
+      "severity": "medium",
+      "kind": "design-gap",
+      "evidence": [
+        {"file_line": "Curare/curare-server/src/routes/synergos.ts:13-15", "quote": "routes.use('*', async (c, next) => { const allowed = (process.env.SYNERGOS_OPERATOR_IDS ?? '').split(',')...; if (!allowed.includes(getActor(c).userId)) return c.json({ error: 'synergos_control_denied' }, 403);"},
+        {"file_line": "Curare/curare-server/src/routes/storage-operations.ts:23-24", "quote": "const allowed = (process.env.STORAGE_OPERATOR_IDS ?? '').split(',')...; if (!allowed.includes(getActor(c).userId)) throw new VersioningError('storage_operator_required', 403);"},
+        {"file_line": "Curare/curare-server/src/synergos/ipc-client.ts:8-11", "quote": "export async function synergosCommand(command: string | Record<string, unknown>): Promise<unknown> { const path = process.env.SYNERGOS_IPC_PATH; ... const body = Buffer.from(encode(command));"}
+      ],
+      "scenario": "Operators are UUID strings in .env with no revocation except redeploy and no audit of what they did. Because the daemon trusts any same-uid socket client (SEC-AZ-09) and synergosCommand encodes arbitrary command objects, a server-side bug in any Curare route (SSRF, prototype pollution, deserialization) that reaches synergosCommand can send Shutdown, HistoryGc{purge}, ProjectJoin or PeerSendStream; the route allowlist is the only filter and it lives inside the vulnerable process.",
+      "impact_ai_game": "Studio IT cannot manage operator rights from the identity system; the web tier becomes the softest path to the history nodes' destructive commands.",
+      "current_state": "Env allowlists; daemon-wide IPC without scopes; node listing additionally checks Cernere org admin (good).",
+      "proposed_redesign": "Operator authority comes from a Cernere system/org role or a Curare-specific capability claim; each operator action is audited with actor and request id. On the daemon side (SEC-AZ-09) Curare's IPC credential is scoped to read/status and the specific project operations the test UI needs; destructive commands are never reachable from the Curare socket. Replace positional msgpack arrays with a typed, versioned command schema shared between repos and tested in CI.",
+      "alternatives": [
+        "Keep env allowlists but validate UUID format and log actions: minimal, still outside Cernere."
+      ],
+      "enforcement": "runtime",
+      "confidence": 0.85,
+      "sources": []
+    },
+    {
+      "id": "SEC-AZ-19",
+      "title": "Pins ('approved', 'release' labels) are mutable, non-unique, unaudited and require only the `save` permission",
+      "theme": "security",
+      "repo": "curare",
+      "area": "curare-server src/routes/versions.ts pins; src/auth/resource-boundary.ts",
+      "severity": "medium",
+      "kind": "vulnerability",
+      "evidence": [
+        {"file_line": "Curare/curare-server/src/routes/versions.ts:67-78", "quote": "versions.post('/:assetId/pins', async (c) => { ... const version = await assetVersionRepo.findByAssetAndVersion(assetId, body.versionNum); ... const updated = await assetVersionRepo.updatePin(version.id, body.pinName); return c.json(updated);"},
+        {"file_line": "Curare/curare-server/src/auth/resource-boundary.ts:12", "quote": "let permission: Permission = c.req.method === 'GET' ? 'view' : 'save';"}
+      ],
+      "scenario": "Any user with `save` on a resource pins a never-submitted working version as 'approved' or re-points the 'release' pin; downstream consumers and DCC plugins that select versions by pin name pull the wrong bytes; nothing records who pinned or when.",
+      "impact_ai_game": "Pins are the git-tag analogue studios use to say 'ship this'; spoofable labels undermine the submission/review/release chain the product is built around.",
+      "current_state": "Pin = mutable text column on asset_versions, set via the generic save boundary.",
+      "proposed_redesign": "Pins require `release` (or `review` for review-stage labels); reserved names are only settable by the release workflow; unique per (asset, pin_name); pin changes are append-only events {actor, from_version, to_version, at}; expose pin history in the API.",
+      "alternatives": [
+        "Drop pins in favour of release/alias objects (MLflow alias model): cleaner but larger API change."
+      ],
+      "enforcement": "runtime",
+      "confidence": 0.8,
+      "sources": [
+        "research/ai-dev-data.md §2.3 (MLflow aliases + status tags instead of stages)"
+      ]
+    },
+    {
+      "id": "SEC-AZ-20",
+      "title": "Development identity header ships in the production binary, and the Web UI/CLI handle raw long-lived Cernere tokens",
+      "theme": "security",
+      "repo": "curare",
+      "area": "curare-server src/auth/middleware.ts; public/app.js, public/api.js; src/client/cli.ts",
+      "severity": "low",
+      "kind": "design-gap",
+      "evidence": [
+        {"file_line": "Curare/curare-server/src/auth/middleware.ts:9-13", "quote": "if (process.env.AUTH_MODE === 'development' && process.env.NODE_ENV === 'development' && !authorization) { const id = z.string().uuid().safeParse(c.req.header('X-User-Id')); ... c.set('actor' as never, { userId: id.data, organizationIds: [] } as never);"},
+        {"file_line": "Curare/curare-server/public/app.js:14-15", "quote": "setToken(document.querySelector('#token').value.trim()); const identity = await api('me');"},
+        {"file_line": "Curare/curare-server/public/api.js:2-8", "quote": "let token = ''; ... headers: { Authorization: 'Bearer ' + token, ..."}
+      ],
+      "scenario": "A host with both env flags set and reachable beyond loopback lets anyone impersonate any personal space (org spaces are safe because organizationIds is empty). Users paste raw Cernere access tokens into a form (and into CURARE_TOKEN env for the CLI), encouraging long-lived token storage in files/shell history; no CSP backstops token theft via injected script.",
+      "impact_ai_game": "DCC/headless pipeline users are the ones most likely to persist tokens in scripts; the dev header is a classic misconfiguration path on on-prem studio servers.",
+      "current_state": "Double-gated dev identity with UUID check and no org membership (well contained); token memory-only in the browser; no OAuth flow.",
+      "proposed_redesign": "Remove the header path from the server build (use a local Cernere stub for development) or additionally bind it to loopback and a dev secret validated at boot; Web UI uses an OIDC authorization-code + PKCE flow against Cernere with refresh handling; CLI uses device-code flow and OS keychain storage; add a strict CSP and SRI on the UI.",
+      "alternatives": [
+        "Keep dev header but refuse to start when AUTH_MODE=development and the listener is not loopback."
+      ],
+      "enforcement": "ci-gate",
+      "confidence": 0.85,
+      "sources": [
+        "AIFormat/web/REVIEW_VULNERABILITY_WEB.md §1 (authentication bypass), §3 (CSP, session management)"
+      ]
+    },
+    {
+      "id": "SEC-AZ-21",
+      "title": "Boundary hygiene: unvalidated targetId on DELETE deps, project hard-delete by creator, and shared-node internals returned to every org member",
+      "theme": "security",
+      "repo": "curare",
+      "area": "curare-server src/routes/workflow.ts, src/routes/projects.ts, src/db/shared-node-repository.ts",
+      "severity": "low",
+      "kind": "inconsistency",
+      "evidence": [
+        {"file_line": "Curare/curare-server/src/routes/workflow.ts:71-74", "quote": "const deleted = await assetDependencyRepo.delete(c.req.param('assetId'), c.req.param('targetId'),);"},
+        {"file_line": "Curare/curare-server/src/routes/projects.ts:66", "quote": "const deleted = await projectRepo.delete(c.req.param('id'));"},
+        {"file_line": "Curare/curare-server/src/db/shared-node-repository.ts:14-16", "quote": "export async function sharedNodeList(actor, organizationId) { requireOrganization(actor,organizationId); return db.select().from(schema.sharedNodes)..."}
+      ],
+      "scenario": "A non-UUID targetId reaches SQL and yields a 500 (noise generator); a project creator physically deletes a project (cascading folder and workflow definitions) with no soft-delete or audit; every org member sees registrationHash, createdBy and internal node ids. No cross-tenant IDOR was found on /assets/:id, /logical-assets/:id, upload download or acquisition paths: each resolves the object first and then checks permission on the owning logical asset.",
+      "impact_ai_game": "Minor individually; together they show the boundary is applied per-route by convention rather than by construction, which is how the 2026-09-08 cross-tenant list leak happened.",
+      "current_state": "Route-level boundary covers /assets/:id*; other routes do their own checks; schemas not uniformly strict.",
+      "proposed_redesign": "Validate all path ids with zod at the router; make project delete a logical delete requiring org-admin and recorded in audit; project member-view projections for shared nodes; consider PostgreSQL RLS with `SET LOCAL app.actor/app.orgs` per transaction so tenant scoping is structural; add a route-inventory test that asserts every /api/v1 route is behind a named authorization check.",
+      "alternatives": [
+        "Repository base class that injects logicalAccessFilter automatically (application-level alternative to RLS)."
+      ],
+      "enforcement": "ci-gate",
+      "confidence": 0.8,
+      "sources": []
+    },
+    {
+      "id": "SEC-AZ-22",
+      "title": "No actor-attributed audit trail on any surface: Curare's access log has no actor, custody logs nothing, control logs no principal, and the daemon IPC has no client identity",
+      "theme": "security",
+      "repo": "both",
+      "area": "curare-server src/app.ts access log; synergos-custody handlers (download/reclaim); synergos-control handlers; synergos-core ipc_server",
+      "severity": "medium",
+      "kind": "missing-control",
+      "evidence": [
+        {"file_line": "Curare/curare-server/src/app.ts:53-57", "quote": "logger.info('http_request', { requestId: c.get('requestId' as never), method: c.req.method, path: c.req.path, status: c.res.status, durationMs: ... });"},
+        {"file_line": "Synergos/synergos-custody/src/handlers.rs:151-185", "quote": "pub async fn download(...) { ... Ok(Json(json!({\"downloadUrl\": capability_url(...)}))) } pub async fn reclaim(...) { state.store.reclaim(...).await?; Ok(Json(json!({\"reclaimed\":true}))) } (no log statements)"},
+        {"file_line": "Synergos/synergos-core/src/ipc_server.rs:231-250", "quote": "fn verify_peer_uid(stream) -> Result<(), String> { ... if peer_uid != self_uid { return Err(...) } Ok(()) } (uid is the only identity; not propagated to dispatch)"}
+      ],
+      "scenario": "After a suspected leak, nobody can answer 'which user received download URLs for which versions', 'who granted manage to whom', 'who reclaimed object X', 'who purged the history store', or 'which admin reissued the node key' - the checklist item '管理者操作に対する監査ログ' is unmet on every surface, and exfiltration-volume analytics (mass download alerts) have no data source.",
+      "impact_ai_game": "Studios subject to TPN/MPA or AI-Act documentation duties need per-asset access evidence; without it, the platform cannot support incident response or compliance attestations.",
+      "current_state": "Structured request logs without principal; domain_events outbox exists but is write-only; custody and control emit nothing per operation.",
+      "proposed_redesign": "A shared audit event schema {ts, actor (Cernere uuid or node id), service, action, target (org/project/asset/version/object), outcome, request_id, capability_id} written append-only (Curare: `access_events` table; custody/control: JSONL + shipped) into a Merkle history tree with daily checkpoints exported to the immutable replica tier and to the customer org; alerting on per-identity volume baselines. Retention policy per org rule (UUIDs only, no PII).",
+      "alternatives": [
+        "Plain append-only tables without tamper evidence: adequate for forensics, not for proving the vendor did not alter logs."
+      ],
+      "enforcement": "runtime",
+      "confidence": 0.9,
+      "sources": [
+        "research/breach-containment.md §3.2 (Crosby-Wallach tamper-evident logs), §5.1 (mass download / impossible travel detection), §7 (TPN requirements)",
+        "AIFormat/web/REVIEW_VULNERABILITY_WEB.md §2 (admin audit log)"
+      ]
+    }
+  ],
+  "coverage_notes": "Read all 11 available maps and the 4 research notes in full (source-URL appendices of the research notes were skimmed). The map sy-clients-docs.md never appeared: checked before code work and again after the first verification batch (two retries); the Tauri GUI, Dioxus admin UI client code, ars plugin and user-facing Synergos docs were therefore NOT independently audited for auth boundaries beyond what sy-control-custody.md covered (admin UI session/token handling). Every finding's evidence lines were re-read from source during this pass; where a claim rests on a map line I did not re-open (e.g. absolute-path leak in build_catalog_snapshot, AWS credentials in hook env via s3.rs) it is phrased as reported by the map. Scope covered per the lens: synergos-control admin/node/org APIs and token issuance; custody admin API and HMAC transfer URLs; /peer-info; relay join; IPC uid/SID checks and privileged commands; gossip/DHT authenticity and membership; hook registration/execution; Curare routes (upload/confirm/download, acquisition plan, versions/pins, logical-assets grants, projects, submissions/decisions, releases, identity, shared-nodes, synergos proxy, storage operations, workflow/assignments); Cernere WS verification and dev header; grant revocation after除名; Web UI token handling; Cu->Sy confused deputy. IDOR check: no direct cross-tenant IDOR found on object routes (ids are resolved then checked against the owning logical asset's scope+grant); residual issues are the 404/403 oracle, unvalidated ids and member-visible internals (SEC-AZ-16/21). CSRF is not applicable (Bearer-only auth, CORS restricted to FRONTEND_URL). Not done: no tests were executed, no live Cernere/Sy/Cu endpoints exercised, Windows-specific IPC code not built, relay production wiring assumed dormant per the discovery map. Findings on rate limiting/body limits, supply chain, and encryption at rest are left to the other security lenses except where they intersect auth (SEC-AZ-14)."
+}

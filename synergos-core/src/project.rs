@@ -396,10 +396,7 @@ impl ProjectManager {
         Ok(())
     }
 
-    async fn load_version_state_unlocked(
-        &self,
-        project_id: &str,
-    ) -> Result<(), std::io::Error> {
+    async fn load_version_state_unlocked(&self, project_id: &str) -> Result<(), std::io::Error> {
         let root = self
             .project_root(project_id)
             .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, project_id))?;
@@ -637,8 +634,7 @@ impl ProjectManager {
         }
         if changed {
             snapshot.save(&root).await?;
-            self.version_states
-                .insert(project_id.to_string(), snapshot);
+            self.version_states.insert(project_id.to_string(), snapshot);
         }
         Ok(())
     }

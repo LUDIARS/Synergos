@@ -1,0 +1,519 @@
+{
+  "findings": [
+    {
+      "id": "TRN-WP-01",
+      "title": "quinn transport left at defaults: 1.25 MB per-stream window caps any single-file transfer at ~1.25 MB per RTT (100 Mbps at 100 ms)",
+      "theme": "transfer",
+      "repo": "synergos",
+      "area": "synergos-net/src/quic/mod.rs (TransportConfig), synergos-net/src/config.rs QuicConfig",
+      "severity": "high",
+      "kind": "inefficiency",
+      "evidence": [
+        {"file_line": "Synergos/synergos-net/src/quic/mod.rs:477-484", "quote": "let mut transport = quinn::TransportConfig::default();\n transport.max_concurrent_bidi_streams(self.config.max_concurrent_streams.into());\n transport.max_idle_timeout(Some(...))"},
+        {"file_line": "Synergos/synergos-net/src/quic/mod.rs:496-502", "quote": "server side sets the same two knobs only; no stream_receive_window / send_window / receive_window / keep_alive / ack_frequency / congestion controller"},
+        {"file_line": "quinn-proto 0.11.17 src/config/transport.rs:359-372 (downloaded tag source, scratchpad/dl-quinn/transport.rs)", "quote": "const EXPECTED_RTT: u32 = 100; const MAX_STREAM_BANDWIDTH: u32 = 12500 * 1000; ... stream_receive_window: STREAM_RWND.into(), receive_window: VarInt::MAX, send_window: (8 * STREAM_RWND).into()"},
+        {"file_line": "Synergos/synergos-net/src/config.rs:706-713", "quote": "max_concurrent_streams: 100, idle_timeout_ms: 30000, max_udp_payload_size: 1452, enable_0rtt: false (the last two have no reader outside config.rs)"},
+        {"file_line": "Synergos/synergos-net/src/transfer/mod.rs:22-25", "quote": "/// 1 チャンクあたりのバイト数 (64 KiB)。 QUIC の congestion window を越えない範囲で ... pub const CHUNK_SIZE: usize = 64 * 1024;"}
+      ],
+      "scenario": "Reviewer: run two daemons with `tc qdisc add dev lo root netem delay 50ms` (100 ms RTT) on a 1 Gbps link and publish a 500 MB PSD. The TXFR stream is bounded by the receiver's default stream_receive_window of 1,250,000 B: throughput <= 1.25 MB / 0.1 s = 12.5 MB/s (100 Mbps), so the file takes ~40 s instead of ~5 s; a 100 GB checkpoint takes ~2.2 h instead of ~15 min. `transfer list` speed plateaus at ~100 Mbps on every path with >= 100 ms RTT regardless of link capacity. With 50 files in parallel the connection-level send_window (10 MB) caps the whole connection at 100 MB/s at 100 ms. Memory is unbounded in the other direction: receive_window is VarInt::MAX.",
+      "impact_ai_game": "Cross-site studios (Tokyo/Osaka/overseas outsourcers), remote artists on 30-100 ms paths and cloud GPU nodes pulling checkpoints are all BDP-bound; the link is mostly idle while artists wait. The DESIGN promise of bandwidth-aware classes cannot work when the per-stream window silently caps every class.",
+      "current_state": "Both ClientConfig and ServerConfig set only max_concurrent_bidi_streams and max_idle_timeout; every other quinn knob is at the 0.11.17 default (Cubic, initial_mtu 1200 with DPLPMTUD to 1452, GSO on, keep_alive None, ack_frequency None, stream window 1.25 MB, send_window 10 MB, receive_window unbounded). `max_udp_payload_size` and `enable_0rtt` are parsed but never applied.",
+      "proposed_redesign": "Add an explicit transport profile in QuicConfig and apply it in build_client_config_for/build_server_config: stream_receive_window = clamp(target_bw * max_rtt, 1.25 MiB, 32 MiB) (default 16 MiB), send_window = 4 x stream window (64 MiB), receive_window = min(max_concurrent_streams x stream window, 256 MiB) to bound receiver memory, datagram buffers unchanged, keep MTU discovery on with initial_mtu 1200 (tunnels/VPN), keep Cubic as default and expose BBR behind `congestion = \"bbr\"` (experimental), optional ack_frequency_config for >1 Gbps paths. Derive the live BDP from quinn::Connection::stats().path.rtt and delivered bytes to pick the lan/wan profile per peer. Delete or implement the dead knobs (max_udp_payload_size -> transport.initial_mtu/min_mtu; enable_0rtt -> remove until a replay-safe stream class exists). Validate in NetConfig::validate that window >= 2 x CHUNK_SIZE and <= memory budget.",
+      "alternatives": [
+        "Spread a file across N parallel streams (needed anyway, TRN-WP-03/04): N x 1.25 MB in flight, but the connection send_window (10 MB) still caps at 100 MB/s at 100 ms RTT unless raised",
+        "Several QUIC connections per peer as DESIGN 15.3 max_connections suggests: more complex registry, same window problem per connection",
+        "Kernel TCP/TLS for intra-datacenter bulk moves where QUIC's per-core cost dominates (research: kernel TCP up to 3x best QUIC stack)"
+      ],
+      "enforcement": "ci-gate",
+      "confidence": 0.9,
+      "sources": [
+        "research/transfer-efficiency.md section 4.1 (quinn TransportConfig defaults, BDP rule 1 Gbps x 100 ms = 12.5 MB, GSO/GRO, QUIC vs TCP at >500 Mbps)",
+        "quinn-proto 0.11.17 quinn-proto/src/config/transport.rs lines 359-372, 385, 393, 395 (fetched from github tag quinn-proto-0.11.17)"
+      ]
+    },
+    {
+      "id": "TRN-WP-02",
+      "title": "No QUIC keepalive: connections die after 30 s of silence and the next publish/want fails silently (no reconnect, no retry)",
+      "theme": "transfer",
+      "repo": "synergos",
+      "area": "synergos-net/src/quic/mod.rs, synergos-core/src/daemon.rs (fan-out, dispatch), synergos-core/src/exchange/mod.rs (execute_send)",
+      "severity": "high",
+      "kind": "design-gap",
+      "evidence": [
+        {"file_line": "Synergos/synergos-net/src/quic/mod.rs:479-483", "quote": "transport.max_idle_timeout(Some(Duration::from_millis(self.config.idle_timeout_ms) ...)) — no transport.keep_alive_interval anywhere (grep keep_alive in synergos-net/src + synergos-core/src: 0 hits)"},
+        {"file_line": "quinn-proto 0.11.17 src/config/transport.rs:385", "quote": "keep_alive_interval: None,"},
+        {"file_line": "Synergos/synergos-net/src/config.rs:708", "quote": "idle_timeout_ms: 30000,"},
+        {"file_line": "Synergos/synergos-core/src/daemon.rs:780-786", "quote": "let (send, mut recv) = match connection.accept_bi().await { Ok(pair) => pair, Err(e) => { tracing::debug!(\"connection {} closed: {e}\", ...); return; } }; — registry entry is not removed, no reconnect"},
+        {"file_line": "Synergos/synergos-core/src/daemon.rs:879-893", "quote": "match quic.open_stream(&peer, StreamType::Control).await { ... Err(e) => { tracing::debug!(\"gossip open_stream to {} failed: {e}\", ...) } } — offer silently dropped"},
+        {"file_line": "Synergos/synergos-core/src/exchange/mod.rs:641-649,678-681", "quote": "let (send, _recv) = quic.open_stream(&target_peer, StreamType::Data {..}).await.map_err(...)?; ... Err(e) => { self.fail_transfer(&transfer_id, format!(\"{e}\")); — no retry"}
+      ],
+      "scenario": "Reviewer: start two daemons, `peer add-url`, publish a file (works), wait 45 s without traffic (gossip heartbeat trims mesh state only and sends nothing on the wire; PeerStatus broadcast is never invoked in production), then publish again. Both quinn endpoints have expired the connection at 30 s; the fan-out's open_stream fails at debug level, the remote never sees the FileOffer, `peer list` still shows the peer Connected (stale DashMap entry), and nothing re-dials because Conduit is unused and bootstrap runs only at startup. A FileWant from the other side fails the same way inside execute_send and the transfer is marked Failed with no retry. The multi-minute local pre-processing in TRN-WP-06 (4.7 min for a 100 GB publish) makes this the normal case, not an edge case.",
+      "impact_ai_game": "Any real session has >30 s of quiet; auto-pull stops working until a daemon restart, which artists experience as 'sync is flaky'. Long checkpoint hashing before an Offer guarantees the idle expiry on quiet meshes.",
+      "current_state": "idle timeout 30 s on both sides, keep_alive_interval None, no connection-closed hook, no reconnect/backoff, send failures logged at debug and not retried; e2e tests complete in seconds and never cross the idle boundary.",
+      "proposed_redesign": "Set transport.keep_alive_interval = min(10 s, idle_timeout/3) on both configs; spawn a per-connection watcher on quinn::Connection::closed() that removes the registry entry, marks presence Disconnected, emits PeerDisconnectedEvent and schedules reconnect with exponential backoff using the stored peer-info URL / last address (happy-eyeballs v6/v4); make gossip fan-out and execute_send retry through the reconnect path (bounded attempts, jitter) and surface persistent failure as a warn-level NetworkStatus event; add a wire-level Ping/Pong on a long-lived control stream so RTT/liveness are refreshed (see TRN-WP-11).",
+      "alternatives": [
+        "Raise idle_timeout_ms to hours (keeps zombies, delays loss detection, still no reconnect)",
+        "Application-level heartbeat gossip every N s (costs a stream per peer per beat; QUIC PING frames are free)"
+      ],
+      "enforcement": "ci-gate",
+      "confidence": 0.85,
+      "sources": [
+        "research/transfer-efficiency.md section 4.1 (quinn keep_alive_interval default None, max_idle_timeout 30 s)",
+        "maps/sy-transport.md W-24, W-23; maps/sy-discovery.md W30 (stale connections), section 1.4 (register_self/PeerStatus never called)"
+      ]
+    },
+    {
+      "id": "TRN-WP-03",
+      "title": "One sequential stream per file with 64 KiB msgpack frames, two copies per chunk on send, per-frame allocation on receive and no disk/network overlap",
+      "theme": "transfer",
+      "repo": "synergos",
+      "area": "synergos-net/src/transfer/mod.rs, synergos-core/src/exchange/mod.rs execute_send",
+      "severity": "high",
+      "kind": "inefficiency",
+      "evidence": [
+        {"file_line": "Synergos/synergos-net/src/transfer/mod.rs:11-12", "quote": "//! - 再送 / 並列取得 / resume は追って拡張する。現バージョンは単一ストリームで順次送る最小仕様。"},
+        {"file_line": "Synergos/synergos-net/src/transfer/mod.rs:93-99", "quote": "let hash = Blake3Hash(*blake3::hash(&buf[..filled]).as_bytes()); let frame = ChunkFrame { index, hash, data: buf[..filled].to_vec() }; write_frame(&mut writer, &FrameKind::Chunk(frame)).await?;"},
+        {"file_line": "Synergos/synergos-net/src/transfer/mod.rs:325-329", "quote": "let payload = rmp_serde::to_vec(frame) ...; writer.write_all(&len).await?; writer.write_all(&payload).await?;"},
+        {"file_line": "Synergos/synergos-net/src/transfer/mod.rs:172-196", "quote": "loop { let frame = read_frame(&mut reader).await?; ... hasher.update(&c.data); file.write_all(&c.data).await?; — strictly sequential read -> hash -> write"},
+        {"file_line": "Synergos/synergos-net/src/transfer/mod.rs:345-347", "quote": "let mut payload = vec![0u8; len]; reader.read_exact(&mut payload).await?; rmp_serde::from_slice(&payload)"},
+        {"file_line": "Synergos/synergos-core/src/exchange/mod.rs:652", "quote": "let file = tokio::fs::File::open(&source_path).await?; — tokio::fs: one spawn_blocking op per 64 KiB read"},
+        {"file_line": "Synergos/DESIGN.md:1530-1534", "quote": "pub struct ChunkSizeConfig { pub large: u32, // 1 MiB ... pub medium: u32, // 256 KiB ... pub small: u32, // 64 KiB"},
+        {"file_line": "Synergos/synergos-net/src/types.rs:207-216", "quote": "pub fn classify(size: u64) -> Self { ... } — FileSizeClass::classify has 0 callers in synergos-net/src and synergos-core/src"}
+      ],
+      "scenario": "Reviewer: send a 100 GB checkpoint over 10 GbE loopback. The sender issues 1.6 M frames, each costing one blocking file read, one 64 KiB BLAKE3, two 64 KiB memcpys (to_vec, msgpack encode) and two write_all calls; the receiver allocates a Vec per frame, decodes (copy), hashes, then awaits an unbuffered tokio File write before reading the next frame, so network receive and disk write never overlap. Per the research, a single QUIC connection on one core sustains roughly 0.5-1.5 Gbps even with GSO, so the 100 GB transfer takes 9-27 min where the line allows 80 s; on 1 GbE the pipeline is line-bound (13.3 min) but a slow receiver disk (HDD/NAS 150 MB/s) directly throttles the stream because the write is inline.",
+      "impact_ai_game": "Checkpoint and dataset movement inside a studio LAN/cluster is CPU-bound far below 10 GbE; large FBX/PSD sets are serialized through one stream each, so a single slow receiver disk or hash thread sets the pace for the whole file.",
+      "current_state": "Fixed 64 KiB msgpack frames with serde-encoded hashes, one bidi stream per file, sequential loops on both ends, no read-ahead or write-behind, no size-class chunking, no Bytes/zero-copy; MAX_FRAME = 66560.",
+      "proposed_redesign": "Replace the frame format with a fixed binary header (magic, version, flags, u64 offset, u32 len) and payload passed as bytes::Bytes from a pooled buffer into quinn::SendStream::write_chunk (zero copy); frame size by class (1 MiB Large, 256 KiB Medium, 64 KiB Small) as DESIGN 15.2 specifies; sender pipeline = disk reader task (read-ahead 4-8 frames, 1-4 MiB reads) -> bounded channel -> stream writer; receiver pipeline = stream reader -> bounded channel -> verifier/writer with >= 1 MiB coalesced writes (BufWriter or direct), hashing in the verifier task; split a file into N range-partitioned streams (N from class and measured BDP) so one slow stream does not stall the file; use rayon/multithreaded BLAKE3 for the tree hash (TRN-WP-08).",
+      "alternatives": [
+        "Only enlarge CHUNK_SIZE (cuts per-frame overhead but keeps the sequential loop and single stream)",
+        "Kernel TCP+TLS or plain QUIC datagrams for LAN bulk (loses QUIC stream semantics; only for DC-internal moves)"
+      ],
+      "enforcement": "ci-gate",
+      "confidence": 0.85,
+      "sources": [
+        "research/transfer-efficiency.md section 4.1 (Fastly per-core 240->431 Mbps with GSO batching, Chrome QUIC 45% slower than HTTP/2 at 1 Gbps, ETH quinn 4x fewer socket writes per GSO batch)",
+        "maps/sy-content.md W24, section 5 (TXFR)"
+      ]
+    },
+    {
+      "id": "TRN-WP-04",
+      "title": "No resume, no byte ranges, no multi-source: any interruption restarts a multi-hour transfer from byte 0 and only one pusher serves a file",
+      "theme": "transfer",
+      "repo": "synergos",
+      "area": "synergos-net/src/transfer/mod.rs, synergos-core/src/exchange/mod.rs handle_incoming_transfer/handle_file_want",
+      "severity": "high",
+      "kind": "missing-feature",
+      "evidence": [
+        {"file_line": "Synergos/synergos-net/src/transfer/mod.rs:28-46", "quote": "pub struct TransferHeader { transfer_id, project_id, file_id, total_size, chunk_count, total_hash, version } — no offset/range/resume token"},
+        {"file_line": "Synergos/synergos-core/src/exchange/mod.rs:734-740", "quote": "let header = match receive_over_quic_with_header(&mut recv, header, &tmp_path).await { Ok(h) => h, Err(e) => { // 中断・検証失敗の残骸を残さない let _ = tokio::fs::remove_file(&tmp_path).await; return Err(...)"},
+        {"file_line": "Synergos/synergos-core/src/exchange/mod.rs:936-957", "quote": "let req = ShareRequest { ... target_peer: Some(requester.clone()), version: record.version }; tokio::spawn(async move { ... share_and_send(ex, req).await — whole-file push from exactly one peer per want"},
+        {"file_line": "Synergos/synergos-net/src/content/session.rs:46-62", "quote": "BitswapSession { quic, peer, store, max_inflight_streams: 4 } — single peer, and the content path is dormant (catalog blocks only)"}
+      ],
+      "scenario": "Reviewer: start a 100 GB checkpoint pull over a 100 Mbps link (2.2 h) and drop the connection at 95 % (Wi-Fi roam, VPN rekey, laptop sleep, publisher daemon restart). The receiver deletes incoming-<uuid>.part, the ActiveTransfer becomes Failed, nothing retries; the user re-issues the want and pays another 2.2 h. Three history nodes that all hold the version cannot share the load: handle_file_want on whichever node answers first pushes the whole file alone, and the fastest node is not chosen (bandwidth estimate is always 0, TRN-WP-11).",
+      "impact_ai_game": "Multi-GB checkpoints, datasets and cinematic assets over WAN are exactly the transfers that get interrupted; per-range verification and multi-source striping are what Kraken/Dragonfly/BitTorrent/Storj use to make such transfers finish predictably (p99 18 s for 3 GB to 2,600 hosts in Kraken).",
+      "current_state": "Push-only whole-file protocol; header has no range; failure path unlinks the partial file; one source per transfer; the IPFS-style multi-source design in DESIGN 15.1 exists only as dormant catalog-block bitswap code.",
+      "proposed_redesign": "Content-addressed range pull protocol: receiver opens a TXFR stream with WANT { project, path, version, blake3, ranges[] } and the holder replies with verified range frames; keep the .part file plus a verified-range bitmap (persisted next to it) so resume requests only missing ranges; verify every range against the whole-file BLAKE3 using a Bao outboard tree (16 KiB groups, ~0.4 % overhead) shipped once per file, so a corrupt range from one source aborts that source only; stripe disjoint ranges across all peers that announced the hash (history nodes first), re-issue slow ranges to another source near the end (endgame/hedged requests); sweep stale .part files by age. Offers carry the hash so receivers can pull from any holder, not only the publisher.",
+      "alternatives": [
+        "tus-style offset resume without per-range verification (simpler; a corrupt tail forces full re-download; no multi-source)",
+        "Erasure coding across history nodes (Storj k/n) — overhead unjustified for 3-10 nodes; range striping with hedging gives the same tail-latency benefit",
+        "Revive BitswapSession/ChunkDag for data (fixed 256 KiB chunks, 16 MiB single-level root caps files at ~56 GiB; would still need verification tree and multi-peer logic)"
+      ],
+      "enforcement": "ci-gate",
+      "confidence": 0.9,
+      "sources": [
+        "research/transfer-efficiency.md section 1.4 (BLAKE3/Bao verified streaming, outboard overhead), section 4.3 (resumable upload/range), section 4.4 (BitTorrent endgame, Kraken/Dragonfly numbers, Storj hedged requests)",
+        "maps/sy-content.md W11, W17, W24, W25"
+      ]
+    },
+    {
+      "id": "TRN-WP-05",
+      "title": "The 5-minute fetch pin is checked only after the whole file is received, so slow restores/checkouts of big assets are downloaded in full and then rejected as stale",
+      "theme": "transfer",
+      "repo": "synergos",
+      "area": "synergos-core/src/exchange/mod.rs (pinned_fetch), synergos-core/src/checkout.rs",
+      "severity": "medium",
+      "kind": "design-gap",
+      "evidence": [
+        {"file_line": "Synergos/synergos-core/src/exchange/mod.rs:26", "quote": "const PINNED_FETCH_TTL_MS: u64 = 5 * 60 * 1000;"},
+        {"file_line": "Synergos/synergos-core/src/exchange/mod.rs:734,757-758", "quote": "let header = match receive_over_quic_with_header(&mut recv, header, &tmp_path).await ... let pin = self.pinned_fetch(&header.project_id, &file_id, version); let pinned = pin.is_some(); — evaluated after the body"},
+        {"file_line": "Synergos/synergos-core/src/exchange/mod.rs:767-783", "quote": "let is_stale = local.version > version; ... if (is_stale || is_conflict) && !pinned { let _ = tokio::fs::remove_file(&tmp_path).await; ... \"refusing stale transfer v{version}; local version is v{}\""},
+        {"file_line": "Synergos/synergos-core/src/checkout.rs:224-240", "quote": "exchange.pin_fetch_version(project_id, file_id, version, expected_size_crc); exchange.fetch_file(FetchRequest { ... version }) — pin set at request time, no transfer binding"}
+      ],
+      "scenario": "Reviewer: local manifest has big.psd v5; run `project restore big.psd --version 2` for a 5 GB file on a 100 Mbps link (400 s). The history node pushes v2; at 400 s the receiver finishes writing and CRC-ing 5 GB, then finds the pin expired at 300 s, computes is_stale (5 > 2) and deletes the file with a debug-level log; the CLI already reported 'Requested'. The same happens for every file of a 2,000-file checkout that lands after minute 5. Combined with TRN-WP-01 (12.5 MB/s at 100 ms RTT) a 4 GB file always misses the window on WAN.",
+      "impact_ai_game": "Rolling back a large scene/texture/checkpoint to an older version is the core 'restore' promise; over WAN it silently fails and wastes the full file's bandwidth.",
+      "current_state": "Wall-clock pin TTL of 5 min, checked after full receipt; no linkage between the pin and the in-flight stream; failures are debug logs; checkout has no completion tracking.",
+      "proposed_redesign": "Evaluate pin/stale/conflict/size rules from the header before accepting the body (reset the stream otherwise) and bind the pin to the accepted transfer (keyed by transfer_id/stream) so it cannot expire while bytes are flowing; expire only idle pins; checkout/restore return a job id with per-file completion/failure events and automatic re-request; log rejections at warn with reason.",
+      "alternatives": [
+        "Raise the TTL to hours (still races with queueing and retries)",
+        "Treat any pinned-version push whose hash matches the manifest as acceptable regardless of time (needs the hash in the manifest, see TRN-WP-06)"
+      ],
+      "enforcement": "ci-gate",
+      "confidence": 0.9,
+      "sources": [
+        "maps/sy-core-versioning.md W-18, W-09"
+      ]
+    },
+    {
+      "id": "TRN-WP-06",
+      "title": "Publisher reads every asset 3-6 times (CRC, history copy + CRC + BLAKE3, then BLAKE3 again for every requester) before the first byte can leave; the hash is never persisted",
+      "theme": "transfer",
+      "repo": "synergos",
+      "area": "synergos-core/src/ipc_server.rs PublishUpdate, synergos-core/src/history/store.rs create_snapshot, synergos-core/src/exchange/mod.rs spawn_send_after_share",
+      "severity": "high",
+      "kind": "inefficiency",
+      "evidence": [
+        {"file_line": "Synergos/synergos-core/src/ipc_server.rs:1323-1326", "quote": "// 全体を RAM に載せずにストリーミングで CRC を取る ... let (crc, file_size) = match crate::manifest::crc32_of_file(&resolved.canonical).await"},
+        {"file_line": "Synergos/synergos-core/src/ipc_server.rs:1388-1406,1418", "quote": "ctx.exchange.archive_to_history(...).await — runs for every file before ctx.exchange.publish_updates(notifications)"},
+        {"file_line": "Synergos/synergos-core/src/history/store.rs:657,661,675", "quote": "tokio::fs::copy(src, &tmp) ... crate::manifest::crc32_of_file(&tmp) ... synergos_net::transfer::hash_file(&tmp)"},
+        {"file_line": "Synergos/synergos-core/src/exchange/mod.rs:1138-1139", "quote": "// 全体ハッシュを事前計算 let (total_hash, total_size, chunk_count) = match synergos_net::transfer::hash_file(&path).await — inside spawn_send_after_share, i.e. once per FileWant"},
+        {"file_line": "Synergos/synergos-net/src/transfer/mod.rs:289-302", "quote": "pub async fn hash_file(path) ... let mut buf = vec![0u8; CHUNK_SIZE]; loop { let n = file.read(&mut buf).await?; ... hasher.update(&buf[..n]);"},
+        {"file_line": "Synergos/synergos-core/src/manifest.rs:165-171", "quote": "let json = serde_json::to_vec_pretty(self) ...; tokio::fs::write(&tmp, json).await?; — ManifestEntry carries version/size/crc/updated_at/publisher, no blake3"}
+      ],
+      "scenario": "Reviewer: enable history on the publisher and publish a 100 GB checkpoint from NVMe (2 GB/s read, 1.5 GB/s write; BLAKE3 ~1.5 GB/s single thread). Before the FileOffer is gossiped the daemon performs CRC (50 s) + copy (50 s read + 67 s write) + CRC of the copy (50 s) + BLAKE3 of the copy (67 s) = ~4.7 min, during which the QUIC connection idles out (TRN-WP-02). Then each FileWant triggers hash_file again (67 s) before execute_send opens the stream, so with five requesters the publisher reads 500 GB and hashes 500 GB for one publish, and every requester waits >1 min for the first byte. On an HDD/NAS depot (150 MB/s) the same publish costs ~55 min plus 11 min per requester. Without history the publish still costs 3 full reads (CRC, hash_file, send).",
+      "impact_ai_game": "Time-to-first-byte for checkpoints and big scenes is dominated by local re-reads, not the network; per-requester rehashing makes fan-out to a render farm/cluster O(N x file size) on the publisher's disk.",
+      "current_state": "CRC32 is the only persisted identity; BLAKE3 is computed for the history object and again per send, never stored in the manifest or shared_files; the history archive copies the source with tokio::fs::copy; no (size, mtime, inode)->hash cache.",
+      "proposed_redesign": "Single streaming pass at publish that computes BLAKE3 (with a Bao outboard tree) and size, stores blake3 in ManifestEntry/SharedFileRecord/FileOffer (the content_hash field already exists) and reuses it for TransferHeader; archive to history by hard-link or reflink (FICLONE / APFS clonefile / ReFS block clone) of an immutable snapshot instead of copy+rehash, verifying by hash equality only when the link cannot be made; a verified-cache keyed by (path, size, mtime_ns, inode/file_id) so an unchanged file is never rehashed; drop CRC32 to a legacy/optional field; multithreaded BLAKE3 (rayon, mmap) for the one pass; run the archive off the IPC/publish critical path (offer first, archive async, since the snapshot is immutable).",
+      "alternatives": [
+        "Hash during the copy (one read, one write) if reflink is unavailable",
+        "Keep per-send hashing but cache by (path, size, mtime) — still one full pass per publish plus the archive copy"
+      ],
+      "enforcement": "ci-gate",
+      "confidence": 0.9,
+      "sources": [
+        "research/transfer-efficiency.md section 1.4 (BLAKE3 throughput, Bao outboard)",
+        "maps/sy-core-versioning.md W-21, W-06; maps/sy-history-hooks-ipc.md W18"
+      ]
+    },
+    {
+      "id": "TRN-WP-07",
+      "title": "Receiver writes each asset twice and reads it four times (600 GB of disk traffic for a 100 GB file); CRC and history archive run inline after the last byte",
+      "theme": "transfer",
+      "repo": "synergos",
+      "area": "synergos-net/src/transfer/mod.rs receive_body, synergos-core/src/exchange/mod.rs handle_incoming_transfer, synergos-core/src/history/store.rs",
+      "severity": "high",
+      "kind": "inefficiency",
+      "evidence": [
+        {"file_line": "Synergos/synergos-net/src/transfer/mod.rs:166,196,232", "quote": "let mut file = tokio::fs::File::create(out_path).await?; ... file.write_all(&c.data).await?; ... file.flush().await?; — no sync_data before the later rename"},
+        {"file_line": "Synergos/synergos-core/src/exchange/mod.rs:743", "quote": "let (crc, _) = match crate::manifest::crc32_of_file(&tmp_path).await — full re-read of the file just written"},
+        {"file_line": "Synergos/synergos-core/src/exchange/mod.rs:798,836-847", "quote": "crate::manifest::replace_file_atomically(&tmp_path, &final_path) ... self.archive_to_history(ArchiveRequest { ... path: final_path.clone() }).await — copy + CRC + BLAKE3 of the final file (store.rs:657-675)"},
+        {"file_line": "Synergos/synergos-core/src/exchange/mod.rs:824-835,887", "quote": "if let Some(hook) = &self.received_hook { hook(...).await; } ... self.complete_transfer(&transfer_id); — manifest+state rewrite and archive precede TransferCompleted"},
+        {"file_line": "Synergos/synergos-core/src/history/store.rs:703-713", "quote": "validate_object: crc32_of_file(path) ... synergos_net::transfer::hash_file(path) — dedup check re-reads the existing object too"}
+      ],
+      "scenario": "Reviewer: receive a 100 GB checkpoint on a history-enabled node (NVMe). After the stream ends: CRC re-read 50 s, rename, then history copy 117 s, CRC 50 s, BLAKE3 67 s, index rewrite — about 5.8 min before TransferCompleted fires and before the next want for that file can be served; the disk sees 200 GB of writes and 400 GB of reads for 100 GB received (SSD wear x2). On a NAS at 150 MB/s the post-receive phase is ~1 h. The BLAKE3 digest was already computed streaming (hasher.update at transfer/mod.rs:195) and thrown away.",
+      "impact_ai_game": "Cluster nodes and build machines that receive many large artifacts spend more time copying/hashing locally than receiving; history nodes (the LFS-server equivalent) double their write amplification.",
+      "current_state": "Temp write, CRC re-read, rename, inline manifest/state JSON rewrite under the project lock, inline history copy+CRC+hash, then completion event; no fsync before rename; no reuse of the streaming hash.",
+      "proposed_redesign": "Compute any secondary digest inside receive_body's existing pass; treat the received .part as the history object: fdatasync, rename into objects/<blake3> (same volume is already enforced by the .synergos/incoming rule) and hard-link/reflink into the working tree, so bytes are written once; verify dedup by hash equality not re-read; move manifest/index persistence to a batched writer off the stream path and emit TransferCompleted at verification time; add receive-side progress events from the pipeline (currently none).",
+      "alternatives": [
+        "Reflink only on CoW filesystems with copy fallback that hashes during copy",
+        "Keep the working tree copy and link the history object from it (same effect; choose direction by which path must be immutable)"
+      ],
+      "enforcement": "ci-gate",
+      "confidence": 0.9,
+      "sources": [
+        "maps/sy-core-versioning.md W-21, W-10 (no receive progress), W-20; maps/sy-history-hooks-ipc.md W18, W33"
+      ]
+    },
+    {
+      "id": "TRN-WP-08",
+      "title": "Hashing placement: BLAKE3 computed twice per side (per-chunk + running), hash is sender-claimed, corruption/stale/conflict discovered only after the full file is on disk",
+      "theme": "transfer",
+      "repo": "synergos",
+      "area": "synergos-net/src/transfer/mod.rs, synergos-net/src/types.rs Blake3Hash, synergos-core/src/exchange/mod.rs",
+      "severity": "medium",
+      "kind": "inefficiency",
+      "evidence": [
+        {"file_line": "Synergos/synergos-net/src/transfer/mod.rs:93,182,195", "quote": "let hash = Blake3Hash(*blake3::hash(&buf[..filled]).as_bytes()); (sender) ... let expected_hash = Blake3Hash(*blake3::hash(&c.data).as_bytes()); ... hasher.update(&c.data); (receiver: chunk hash + running hash)"},
+        {"file_line": "Synergos/synergos-net/src/transfer/mod.rs:40-41,208-219", "quote": "/// 全体 Blake3 ハッシュ (受信側で最終検証) pub total_hash ... FrameKind::Footer(f) => { let total = ...finalize(); if total != f.total_hash ... if total != header.total_hash — compared only to sender-supplied values, at the end"},
+        {"file_line": "Synergos/synergos-net/src/types.rs:133-134", "quote": "#[derive(... Serialize, Deserialize)] pub struct Blake3Hash(pub [u8; 32]); — serialized by rmp_serde as a 32-element int array (no serde_bytes)"},
+        {"file_line": "Synergos/synergos-core/src/exchange/mod.rs:757-783", "quote": "version / pin / stale / conflict checks execute after receive_over_quic_with_header and crc32_of_file"}
+      ],
+      "scenario": "Reviewer: push a 20 GB file whose content differs from what the receiver's manifest expects (or a stale version). The receiver hashes every 64 KiB chunk, hashes the running total, writes 20 GB, CRCs 20 GB, and only then rejects. Hashing CPU is 2 x file size on each side (100 GB: 2 x 67 s per side single-threaded) although QUIC's AEAD already guarantees in-order, unmodified delivery, so per-chunk hashes add nothing but early localization of a corrupt source. A truncated or corrupt source is detected only at the footer.",
+      "impact_ai_game": "Wasted CPU on hash-heavy checkpoint traffic and full-size waste on rejected transfers; without a verification tree, resume and multi-source (TRN-WP-04) are impossible to do safely.",
+      "current_state": "Flat per-chunk hashes plus a final whole-file hash, both chosen by the sender; no tree; no early abort; hash wire encoding ~1.5x larger than needed; receiver acceptance rules evaluated after the body.",
+      "proposed_redesign": "One BLAKE3 tree pass at publish producing the whole-file hash and a Bao outboard (16 KiB groups, ~0.4 % size); receivers obtain the expected hash from the signed offer/manifest (not the header) and verify each incoming range against it with the outboard nodes, aborting the stream on the first bad group; evaluate version/stale/pin/size from the header before accepting the body (STOP_SENDING otherwise); drop per-chunk hashes from frames; encode hashes with serde_bytes or a fixed binary header.",
+      "alternatives": [
+        "Keep chunk hashes but drop the running hash (halves CPU; no verified resume/multi-source)",
+        "Merkle list of chunk hashes shipped up front (Xet term-verification style) instead of Bao (second hash scheme next to the file hash)"
+      ],
+      "enforcement": "ci-gate",
+      "confidence": 0.85,
+      "sources": [
+        "research/transfer-efficiency.md section 1.4 (Bao spec, abao 16 KiB groups, bao-tree)",
+        "maps/sy-content.md W22, W25; maps/sy-core-versioning.md W-09"
+      ]
+    },
+    {
+      "id": "TRN-WP-09",
+      "title": "Three gossip hops and one QUIC stream per (message, peer) before any byte flows; a 256-slot broadcast channel drops offers under bursts; catalog fetch per publish is wasted",
+      "theme": "transfer",
+      "repo": "synergos",
+      "area": "synergos-core/src/daemon.rs (fan-out, subscriber), synergos-core/src/exchange/mod.rs publish_updates/fetch_file, synergos-net/src/gossip/transport.rs",
+      "severity": "medium",
+      "kind": "inefficiency",
+      "evidence": [
+        {"file_line": "Synergos/synergos-core/src/exchange/mod.rs:1346-1390", "quote": "for notif in &notifications { ... self.broadcast_offer(&notif.project_id, &notif.file_id, ...) } — one gossip message per file"},
+        {"file_line": "Synergos/synergos-core/src/daemon.rs:864-871,872-896", "quote": "let peers = if outbound.peers.is_empty() { quic.list_connections()... } ...; for peer in peers { ... tokio::spawn(async move { match quic.open_stream(&peer, StreamType::Control).await"},
+        {"file_line": "Synergos/synergos-net/src/gossip/transport.rs:50-73", "quote": "pub async fn send_gossip(mut send: quinn::SendStream, msg: &GossipWireMessage) ... send.write_all(GOSSIP_STREAM_MAGIC) ... send.finish() — one message per stream"},
+        {"file_line": "Synergos/synergos-core/src/daemon.rs:981-995,1048-1050", "quote": "if auto_pull_eligible { ... exchange.fetch_file(req).await ... } ... Err(RecvError::Lagged(n)) => { tracing::warn!(\"gossip subscriber lagged; dropped {n} messages\"); }"},
+        {"file_line": "Synergos/synergos-core/src/exchange/mod.rs:1312,947", "quote": "self.broadcast_want(&request.project_id, &request.file_id, request.version); ... tokio::spawn(async move { ... share_and_send(ex, req).await — Offer -> Want -> hash_file -> TXFR"},
+        {"file_line": "Synergos/synergos-core/src/exchange/mod.rs:1397-1449", "quote": "Step 4: RootCatalog snapshot を ContentStore に put ... Step 5: gossip CatalogUpdate — every peer then fetches the block via bitswap and discards it (catalog_sync.rs:175-178)"},
+        {"file_line": "Synergos/synergos-core/src/exchange/mod.rs:878", "quote": "bytes_transferred: header.total_size, — receive side reports progress only at completion"}
+      ],
+      "scenario": "Reviewer: publish 1,024 files (MAX_PATHS_PER_PUBLISH) to 5 peers. The publisher opens 5,120 Offer streams + 5 CatalogUpdate streams; each receiver's gossip handler delivers into a tokio broadcast channel of capacity 256 while its subscriber is busy spawning fetch_file tasks, so Lagged(n) fires and the dropped offers are never pulled until that path is republished; each receiver then broadcasts 1,024 Want streams to all 5 peers (5,120 more), every peer fetches the catalog block over bitswap and discards it, and the publisher spawns 1,024 hash_file + TXFR tasks. Per-file latency floor = Offer (0.5 RTT) + Want (0.5 RTT) + open_bi/header (0.5 RTT) + publisher hash time; the receiving GUI shows 0 % until the file completes.",
+      "impact_ai_game": "OFPA-style Unreal levels and texture sets are thousands of small files; the control-plane chatter (2 n m + m streams) and lossy delivery dominate, and batch publishes silently lose files.",
+      "current_state": "Per-file fire-and-forget gossip over one stream per message with all-connections fallback, three-hop push chain, lossy broadcast channels (capacity 256), unused catalog snapshot fetch per publish, no receive-side progress.",
+      "proposed_redesign": "Publish one signed batch Offer (manifest delta: path, version, size, blake3, up to N entries or just the manifest hash) per publish on a long-lived per-peer control stream; receivers reconcile a durable per-project wanted-set from the manifest/catalog (not from channel delivery) and pull directly: one TXFR stream carrying WANT {path, version, blake3, ranges} with data returned on the same stream (1 RTT, no gossip Want); replace broadcast channels with bounded mpsc + backpressure; remove the catalog bitswap round trip until the catalog carries a real diff; emit receive progress from the pipeline.",
+      "alternatives": [
+        "Keep gossipsub semantics but implement IHAVE/IWANT batching and a proper mesh so fan-out is not all-connections",
+        "Increase channel capacity (hides the burst problem until the next size)"
+      ],
+      "enforcement": "ci-gate",
+      "confidence": 0.85,
+      "sources": [
+        "maps/sy-core-versioning.md section 5 (2 n m + m streams), W-24, W-10, W-23; maps/sy-discovery.md W27; maps/sy-content.md W35-W37",
+        "research/vcs-game-ai.md section 4 (OFPA many small files), section 3.1 (LFS batch API shape)"
+      ]
+    },
+    {
+      "id": "TRN-WP-10",
+      "title": "No transfer scheduler: unbounded concurrent pushes/receives, TransferPriority and StreamAllocation ratios ignored, no bandwidth cap, control streams compete with data",
+      "theme": "transfer",
+      "repo": "synergos",
+      "area": "synergos-core/src/exchange/mod.rs, synergos-core/src/daemon.rs dispatch_peer_streams, synergos-net/src/config.rs StreamAllocationConfig",
+      "severity": "medium",
+      "kind": "missing-feature",
+      "evidence": [
+        {"file_line": "Synergos/synergos-core/src/exchange/mod.rs:3-4", "quote": "//! 優先度キュー、帯域制御、チャンク分割・再組立を管理する。 — none of these exist in the module"},
+        {"file_line": "Synergos/synergos-core/src/exchange/mod.rs:943,947", "quote": "priority: TransferPriority::Interactive, ... tokio::spawn(async move { ... share_and_send(ex, req).await — every want spawns immediately"},
+        {"file_line": "Synergos/synergos-core/src/daemon.rs:800", "quote": "tokio::spawn(async move { if &magic == DHT_STREAM_MAGIC ... else if &magic == TRANSFER_STREAM_MAGIC { exchange.handle_incoming_transfer(recv, sender_cloned).await — one task per inbound stream, no cap"},
+        {"file_line": "Synergos/synergos-net/src/config.rs:643-656", "quote": "impl StreamAllocationConfig { pub fn validate(&self) ... — the only consumer; grep stream_allocation. in net/core src: 0 hits"},
+        {"file_line": "Synergos/synergos-core/src/checkout.rs:80-110", "quote": "for (rel, entry) in &target.files { ... request_version(ctx.exchange, project_id, &file_id, entry.version, Some((entry.size, entry.crc))).await?; — one want per differing file, no batching or limit"},
+        {"file_line": "quinn-proto 0.11.17 src/config/transport.rs:372-373", "quote": "send_window: (8 * STREAM_RWND).into(), send_fairness: true, — 10 MB shared round-robin across all streams of a connection"}
+      ],
+      "scenario": "Reviewer: start a 500 MB interactive restore for an artist while a build node checks out 2,000 files (5 GB) from the same publisher. All 2,000 pushes open streams at once (bounded only by max_concurrent_streams = 100 per connection, which also starves gossip/DHT control streams); quinn's send fairness gives the restore ~1/100 of the link; the HDD-backed receiver gets 100 concurrent writers plus 100 CRC re-reads (seek storm) and its manifest lock serializes completions. There is no per-peer byte cap, so one requester can saturate a history node's uplink (also a DoS lever, W-07 in the versioning map).",
+      "impact_ai_game": "Artists' interactive pulls must beat background farm syncs; without classes/priorities the DESIGN 15.2 '60/30/10' budget is fiction and large checkouts degrade everyone.",
+      "current_state": "TransferPriority is stored and never read; StreamAllocationConfig and FileSizeClass are unused; pause/cancel are flags only; no concurrency or bandwidth budget anywhere.",
+      "proposed_redesign": "A per-peer and global transfer scheduler in Exchange: priority queue (Interactive > Background > Prefetch), per-class concurrency budget (e.g. Large 2 / Medium 4 / Small 16 per peer), token-bucket bandwidth caps (global, per peer, per project) using quinn's max_outgoing_bytes_per_second where available, SendStream::set_priority for interactive streams, reserved stream credits for control (or a separate QUIC connection for control vs data), cancellation via JoinHandle + stream reset codes, queue depth visible in `transfer list`.",
+      "alternatives": [
+        "Separate QUIC connection for control traffic only (fixes HoL for gossip but not fairness between transfers)",
+        "OS-level shaping (tc) — cannot see priorities"
+      ],
+      "enforcement": "runtime",
+      "confidence": 0.85,
+      "sources": [
+        "maps/sy-core-versioning.md W-11, W-12, W-07; maps/sy-transport.md W-37",
+        "DESIGN.md:1542-1568 BandwidthScheduler"
+      ]
+    },
+    {
+      "id": "TRN-WP-11",
+      "title": "DESIGN section 15 vs reality: speed test, bandwidth classes, peer selection, multicast, monitoring and route fallback are dead code or absent; RTT is frozen at handshake and bandwidth is always 0",
+      "theme": "transfer",
+      "repo": "synergos",
+      "area": "DESIGN.md 15.2-15.7, synergos-net/src/quic/mod.rs, synergos-net/src/conduit/mod.rs, synergos-core/src/daemon.rs maintenance loop",
+      "severity": "medium",
+      "kind": "inconsistency",
+      "evidence": [
+        {"file_line": "Synergos/DESIGN.md:1571-1587", "quote": "15.3 スピードテストに基づくコネクション数決定 ... 1. Latency QUIC Ping x 5 ... 2. Bandwidth 64 KiB x 10 ... 3. Capacity 並列ストリーム x 4"},
+        {"file_line": "Synergos/synergos-net/src/quic/mod.rs:106-130,442-457", "quote": "ConnectionCalibrator::calibrate (0 callers) ... probe_rtt measures local open+write elapsed (0 callers); update_bandwidth_estimate (0 callers)"},
+        {"file_line": "Synergos/synergos-net/src/quic/mod.rs:238,380,434-439", "quote": "let rtt = connection.rtt().as_millis() as u32; (once at connect/accept) ... get_bandwidth_estimate ... .unwrap_or(0)"},
+        {"file_line": "Synergos/synergos-core/src/daemon.rs:610-616", "quote": "for info in net.quic.list_connections() { ctx.presence.update_rtt(&info.peer_id, info.rtt_ms); let bw = net.quic.get_bandwidth_estimate(&info.peer_id); if bw > 0 { — never true"},
+        {"file_line": "Synergos/synergos-net/src/config.rs:727-746", "quote": "stream_allocation 60/30/10, speed_test enabled: true retest 300 s probe_count 10, peer_selection 0.7/0.3/60, monitor 1000 ms/3600/1 s — all parsed, none consumed (grep: 0 readers outside config.rs)"},
+        {"file_line": "Synergos/DESIGN.md:1811-1839", "quote": "15.6 QUIC マルチキャスト・ブロードキャスト ... ゼロコピー送信 ... 帯域が最も広いピアから順に送信開始 — only the gossip N-stream copy exists (daemon.rs:872-896); no data broadcast"},
+        {"file_line": "Synergos/synergos-net/src/conduit/mod.rs:409-427", "quote": "if self.tunnel.is_available().await { return Ok(RouteKind::Tunnel); } ... // WebSocket Relay は今後実装 return Ok(RouteKind::Relay);"},
+        {"file_line": "Synergos/synergos-net/src/config.rs:39-42", "quote": "Cloudflare Tunnel が Cloudflare proxied DNS の裏でホストする公開ノードでは、proxy が UDP/QUIC を通さない (HTTPS のみ)"}
+      ],
+      "scenario": "Reviewer: connect two daemons, then add 200 ms of delay with netem; `NetworkStatus`/`peer list` keep showing the handshake-time RTT forever (update_rtt is only reachable from the dead probe_rtt) and bandwidth 0; `speed_test.enabled = true` in the default config runs nothing; FileSizeClass::classify, StreamAllocationConfig, PeerSelectionConfig and MonitorConfig have no callers; `.stats()` on quinn connections is never read although it provides rtt, cwnd, lost packets and bytes for free. Any operator or designer reading DESIGN 15 or synergos.toml assumes these mechanisms exist.",
+      "impact_ai_game": "No basis exists for choosing the fastest history node, for class budgets or for showing artists a real transfer dashboard; multi-source striping (TRN-WP-04) needs these numbers.",
+      "current_state": "Only ConnectionCalibrator::calibrate (pure function) and a 60 s copy of a frozen rtt_ms into presence are implemented; route fallback returns fake success for Tunnel/Relay; Tunnel cannot carry QUIC at all.",
+      "proposed_redesign": "Implement monitoring from quinn::Connection::stats() sampled every monitor.snapshot_interval_ms (path.rtt, cwnd, lost_packets, congestion_events, udp tx/rx bytes) plus per-transfer byte counters from the transfer pipeline; bandwidth estimate = EWMA of delivered bytes per interval during real transfers (no probe traffic); expose NetworkSnapshot over IPC/event bus; use the per-peer estimate for source ranking in multi-source pulls and for the transport profile (TRN-WP-01); delete the unused config sections and DESIGN 15.3/15.4/15.6 or mark them 'not implemented' in a status table; redefine 15.5 without a QUIC-over-Cloudflare-Tunnel route (see TRN-WP-16).",
+      "alternatives": [
+        "Dedicated speed-test streams per DESIGN 15.3 (adds traffic; stats() already gives rtt/cwnd/loss)"
+      ],
+      "enforcement": "memory",
+      "confidence": 0.9,
+      "sources": [
+        "maps/sy-transport.md W-27, W-39, section 8 table; maps/sy-discovery.md section 8",
+        "research/transfer-efficiency.md section 4.1 (quinn stats/BBR), section 4.4 (Kraken bandwidth-aware seeding)"
+      ]
+    },
+    {
+      "id": "TRN-WP-12",
+      "title": "Every version moves whole-file: 0 % dedup on iterative saves of large files; the chunk/bitswap layer is dormant and could not serve data anyway",
+      "theme": "transfer",
+      "repo": "synergos",
+      "area": "docs/versioning-design.md section 0, synergos-core/src/exchange/mod.rs, synergos-net/src/content/{chunker,session,bitswap}.rs",
+      "severity": "high",
+      "kind": "design-gap",
+      "evidence": [
+        {"file_line": "Synergos/docs/versioning-design.md:9-11", "quote": "バイナリ / 大きいファイルの差分転送をするか | しない。転送は Phase 1 のまま全体転送 (blake3 検証) ... CDC チャンク重複排除案は neco 決定 (2026-08-16) で取り下げ"},
+        {"file_line": "Synergos/synergos-core/src/exchange/mod.rs:1346-1390,936-957", "quote": "per-file FileOffer with size/crc; handle_file_want pushes record.file_path whole via share_and_send"},
+        {"file_line": "Synergos/synergos-net/src/content/chunker.rs:36-41,55-75", "quote": "chunk_size: 256 * 1024 ... fixed-size split loop — add_file/get_file have no callers outside synergos-net tests (content map section 0)"},
+        {"file_line": "Synergos/synergos-net/src/content/session.rs:31,62", "quote": "pub const SESSION_WANTLIST_CHUNK: usize = 128; ... max_inflight_streams: 4 — used only for the RootCatalog block"},
+        {"file_line": "Synergos/DESIGN.md:1428-1436", "quote": "重複排除 | 既に保持しているブロック (CID) はスキップ。差分転送が自然に実現 — not on the live path"}
+      ],
+      "scenario": "Reviewer: an artist saves a 500 MB PSD 20 times a day; each publish ships 500 MB to every peer (10 GB/day/artist, 200 GB/day for a 20-artist team on one link) although a layer edit touches a small fraction of the bytes. A lab publishes 10 fine-tuned checkpoints of one 100 GB base: 1 TB moved and stored per node, although Xet reports 30-85 % dedup for fine-tunes (GPT-2 1.2 GB -> 645 MB across two versions, Gemma GGUF repo 191 -> 97 GB) and ZipLLM 54 % across 3,048 LLMs. Whole-file identity captures ~75 % of block-level savings on general file trees (Meyer-Bolosky) but 0 % for iterative versions of one large file, which is exactly the working-type PSD/MB/safetensors case. No public ratio exists for FBX/DDS/uasset; it must be measured on a real depot.",
+      "impact_ai_game": "The two workloads that justify a dedicated transfer layer (iteratively edited DCC sources and checkpoint families) get no benefit from content addressing today; WAN links and history-node disks scale with version count x file size.",
+      "current_state": "Whole-file BLAKE3 identity only for history dedup of identical files; no chunk map, no CDC, no delta, no compression; chunker/bitswap exist for catalog metadata only (fixed 256 KiB, single-level DAG, 16 MiB frame cap).",
+      "proposed_redesign": "Keep whole-file BLAKE3 + manifest as the identity and the default path; add an optional per-file chunk map for files >= 8 MiB in iterative classes (FastCDC/Gear with Xet constants 8/64/128 KiB and pinned test vectors), published with the offer; transfer becomes: receiver sends have/missing over the chunk list (1 RTT), holder sends missing chunks packed into >= 1 MiB runs (Bao-verified ranges), per-chunk trial LZ4 (skip incompressible PNG/JPEG/compressed FBX automatically), project-scoped dedup index (no cross-tenant chunk oracle); exclude derived GPU textures from versioning (DDC-style derived data). Record the decision through the 4 axes: AI学習量 small (fastcdc crate + existing BLAKE3), 作業コスト medium (chunk map + range protocol shared with TRN-WP-04), 解決度 high for AI/DCC tiers, 主目的との一致 high (less bytes, faster sync).",
+      "alternatives": [
+        "Storage-only zstd --patch-from=previous on history nodes (no differ CPU on clients; transfer stays whole-file)",
+        "rsync/zsync-style receiver signatures (no persistent index; 2 round trips; server CPU per request)",
+        "Keep the 2026-08-16 decision but run the chunker as a measurement tool over a real studio depot before the next ADR"
+      ],
+      "enforcement": "memory",
+      "confidence": 0.7,
+      "sources": [
+        "research/transfer-efficiency.md section 1.1-1.3 (chunker parameters, Xet xorbs, Meyer-Bolosky 75 %, ZipLLM 54 %), section 3.3 (trial compression), section 6 decision matrix and cross-cutting recommendations 1-3",
+        "research/ai-dev-data.md section 1.2 (Xet numbers: GPT-2 -53 %, Gemma 191->97 GB, CORD-19 download 51->19 min)",
+        "research/vcs-game-ai.md section 5.3 (Xet), section 6 lesson 5"
+      ]
+    },
+    {
+      "id": "TRN-WP-13",
+      "title": "Each received or published file rewrites the entire manifest.json and state.json inline under the project lock: O(n^2) bytes for checkouts and a metadata ceiling on small-file throughput",
+      "theme": "transfer",
+      "repo": "synergos",
+      "area": "synergos-core/src/project.rs record_received_file/bump_file_version, synergos-core/src/manifest.rs save, synergos-core/src/exchange/mod.rs received_hook",
+      "severity": "medium",
+      "kind": "inefficiency",
+      "evidence": [
+        {"file_line": "Synergos/synergos-core/src/project.rs:476-477,492-505", "quote": "let lock = self.manifest_lock(project_id); let _guard = lock.lock().await; ... self.note_confirmed_version_unlocked(project_id, rel, version).await?; ... if changed { snapshot.save(&root).await?;"},
+        {"file_line": "Synergos/synergos-core/src/manifest.rs:165-172", "quote": "let json = serde_json::to_vec_pretty(self) ...; tokio::fs::write(&tmp, json).await?; if let Err(error) = replace_file_atomically(&tmp, &path).await"},
+        {"file_line": "Synergos/synergos-core/src/exchange/mod.rs:824-835", "quote": "if let Some(hook) = &self.received_hook { hook(header.project_id.clone(), file_id.clone(), version, ...).await; } — awaited inside handle_incoming_transfer"}
+      ],
+      "scenario": "Reviewer: check out a 50,000-file Unity/Unreal project (manifest ~150 B per pretty-printed entry = 7.5 MB). Each arriving file serializes and writes the full 7.5 MB manifest plus state.json under the project mutex: ~375 GB of JSON written for the checkout and ~50k x 20-50 ms of serialized lock time (20-40 min) independent of network speed; concurrent receives for the same project queue behind the JSON writes, capping small-file receive rate at roughly 25-50 files/s.",
+      "impact_ai_game": "OFPA levels, texture folders and image datasets are tens of thousands of small files; the sync rate becomes a function of manifest size, not bandwidth.",
+      "current_state": "Pretty JSON rewrite of the whole manifest and state per file event, inline before TransferCompleted, under a per-project lock; projects.json also rewritten non-atomically on open/close.",
+      "proposed_redesign": "Append-only per-project journal (.synergos/journal/<ts>.ndjson of entry updates) with periodic/explicit compaction into manifest.json (the git-committed artifact becomes an export produced on demand or at publish), or an embedded KV (sqlite) for the live index; batch received-file notifications (debounce >= 100 ms or per checkout job) into one write; move the hook off the stream path; for very large trees a Merkle/prolly-structured manifest so diffs and partial sync are O(changed subtrees).",
+      "alternatives": [
+        "Write manifest only at checkout completion and on publish (loses crash resilience unless journaled)",
+        "Compact JSON (not pretty) halves bytes but not the O(n^2)"
+      ],
+      "enforcement": "ci-gate",
+      "confidence": 0.85,
+      "sources": [
+        "maps/sy-core-versioning.md W-20, W-28",
+        "research/vcs-game-ai.md section 6 lesson 4 (lakeFS metarange, Dolt prolly trees, Iceberg manifests)"
+      ]
+    },
+    {
+      "id": "TRN-WP-14",
+      "title": "Daemon start CRC-scans every file in every manifest before QUIC/IPC come up: minutes to an hour of unavailability per restart on large projects",
+      "theme": "transfer",
+      "repo": "synergos",
+      "area": "synergos-core/src/daemon.rs Daemon::new, synergos-core/src/restore.rs",
+      "severity": "medium",
+      "kind": "inefficiency",
+      "evidence": [
+        {"file_line": "Synergos/synergos-core/src/daemon.rs:265", "quote": "crate::restore::restore_shared_files_from_manifests(&project_manager, &exchange).await;"},
+        {"file_line": "Synergos/synergos-core/src/restore.rs:44-52", "quote": "let Ok((actual_crc, actual_size)) = crc32_of_file(&path).await else { ... }; if actual_size != entry.size || actual_crc != entry.crc { ... skipped until republished"},
+        {"file_line": "Synergos/synergos-core/src/manifest.rs:436-449", "quote": "pub async fn crc32_of_file(path) ... let mut buf = vec![0u8; 256 * 1024]; loop { let n = f.read(&mut buf).await?;"}
+      ],
+      "scenario": "Reviewer: open a project with 500 GB of published assets and restart the daemon. Daemon::new reads all 500 GB sequentially (>= 4 min on NVMe at 2 GB/s, ~1 h on a 150 MB/s NAS, longer on laptops) before the accept loop, IPC server or history serving start; peers' wants and the GUI get connection refused meanwhile, and every daemon upgrade or crash repeats it.",
+      "impact_ai_game": "History nodes and build machines with large depots are offline after every restart; artists see 'daemon not running'.",
+      "current_state": "Full CRC verification of all manifest entries is synchronous in the constructor; no cheap identity (size, mtime, inode) cache; results are not persisted.",
+      "proposed_redesign": "Register manifest entries immediately, verify cheaply with (size, mtime_ns, inode/file_id) against a persisted verified-cache sidecar, run full hashing lazily on first want or in a low-priority background sweep (parallel, rate-limited), and refuse to serve an entry only until it is verified; expose readiness separately from verification progress.",
+      "alternatives": [
+        "Parallel hashing at startup (shortens but keeps the gate)",
+        "Store BLAKE3 + mtime in the manifest and trust mtime unless a 'verify' command is run (Git index semantics)"
+      ],
+      "enforcement": "ci-gate",
+      "confidence": 0.9,
+      "sources": [
+        "maps/sy-core-versioning.md W-29"
+      ]
+    },
+    {
+      "id": "TRN-WP-15",
+      "title": "Custody HTTP path: one non-resumable PUT with a 30-minute cap (minimum sustained rate = size/1800 s), 4 KiB GET reads, no Range, three SHA-256 passes, per-key lock held across the whole upload",
+      "theme": "transfer",
+      "repo": "both",
+      "area": "synergos-custody/src/{handlers,store}.rs; Curare curare-server/src/storage/synergos-storage.ts (caller)",
+      "severity": "high",
+      "kind": "inefficiency",
+      "evidence": [
+        {"file_line": "Synergos/synergos-custody/src/handlers.rs:237-242", "quote": "tokio::time::timeout(std::time::Duration::from_secs(1800), state.store.put(&key, &admission, body)).await.map_err(|_| Error::Unavailable)??;"},
+        {"file_line": "Synergos/synergos-custody/src/handlers.rs:220", "quote": "let _guard = state.store.lock(&key).await?; — acquired before streaming the body"},
+        {"file_line": "Synergos/synergos-custody/src/store.rs:187-197", "quote": "while let Some(chunk) = stream.next().await { ... file.write_all(&chunk).await?; hash.update(&chunk); } — unbuffered tokio File write per hyper body frame"},
+        {"file_line": "Synergos/synergos-custody/src/store.rs:143-170", "quote": "/// Full re-read for receipt issuance ... let mut buffer = vec![0u8; 128 * 1024]; loop { let n = file.read(&mut buffer).await?; ... hash.update(...) } ... file.sync_all().await?;"},
+        {"file_line": "Synergos/synergos-custody/src/handlers.rs:256-257", "quote": "let file = tokio::fs::File::open(state.store.path(&key, \"data\")).await?; let mut response = Body::from_stream(ReaderStream::new(file)).into_response(); — no Range handling"},
+        {"file_line": "tokio-util 0.7 src/io/reader_stream.rs:8 (local cargo registry)", "quote": "const DEFAULT_CAPACITY: usize = 4096;"},
+        {"file_line": "Curare/curare-server/src/storage/synergos-storage.ts:17 and src/routes/upload.ts:51 + src/routes/versions.ts:61 (per cu-storage-transfer map T4/T5)", "quote": "60 s command timeout; verify called at confirm and again at version creation"}
+      ],
+      "scenario": "Reviewer: upload a 10 GB FBX set archive via Curare on a 50 Mbps home link: 10 GB / 1800 s requires >= 5.6 MB/s sustained, so the PUT is killed at 30 min with 503 and restarts from zero (no offset, no multipart); a 100 GB dataset needs >= 56 MB/s and can never succeed below ~450 Mbps. Download a 10 GB object: ReaderStream reads 4 KiB at a time through tokio::fs (one spawn_blocking op each, ~2.6 M ops, ~30-50 s of dispatch overhead and a few hundred MB/s ceiling), no Range so a dropped download restarts. Confirm: Curare calls verify twice, each a full SHA-256 re-read under the per-key lock with a 60 s client timeout, so any object that takes >60 s to read (tens of GB on HDD/NAS) cannot be confirmed, and concurrent head/get on that key wait 10 s then 503. If the custody origin is behind an orange-clouded Cloudflare hostname, bodies above 100-500 MB are rejected before reaching custody.",
+      "impact_ai_game": "This is the only Curare-integrated transfer path; multi-GB DCC exports and any dataset upload from artists on consumer links fail by construction, and release verification of large objects times out.",
+      "current_state": "Single PUT (If-None-Match + X-Content-SHA256), 1800 s cap, unbuffered writes, SHA-256 on PUT plus full re-hash on every verify, 4 KiB streaming GET without Range/ETag, per-key async mutex spanning the request.",
+      "proposed_redesign": "Resumable uploads following draft-ietf-httpbis-resumable-upload (Upload-Offset/Upload-Complete/Upload-Limit, 409 returns the current offset, interim 104), parts >= max(10 MiB, size/10,000) with per-part SHA-256 and a composite digest persisted with the admission; record the digest computed during PUT plus fsync evidence and make verify return it without re-reading (or an async verify job + poll) so confirm is O(1); Range/If-Range on GET with ETag = content hash and ReaderStream::with_capacity(1 MiB) (or sendfile-style streaming); BufWriter/>= 1 MiB writes on PUT; replace the request-spanning lock with a lease (claim, stream, commit); keep large bodies off the Cloudflare HTTP proxy (grey-cloud origin or the QUIC tunnel data plane); hand objects above a threshold to the Synergos P2P range protocol (TRN-WP-04) with custody as the durable anchor.",
+      "alternatives": [
+        "S3 multipart on the MinIO backend for Curare (10,000 parts, 5 MiB-5 GiB) while custody stays single-PUT for small objects",
+        "tus 1.0 (creation + concatenation) instead of the IETF draft"
+      ],
+      "enforcement": "ci-gate",
+      "confidence": 0.85,
+      "sources": [
+        "research/transfer-efficiency.md section 4.2 (Cloudflare body caps 100/200/500 MB, cacheable 512 MB), section 4.3 (S3/MinIO multipart limits, tus, IETF resumable upload headers, RFC 9110 Range)",
+        "maps/cu-storage-transfer.md T1-T5, T12; maps/sy-control-custody.md W30-W33",
+        "tokio-util 0.7 io/reader_stream.rs:8 DEFAULT_CAPACITY = 4096"
+      ]
+    },
+    {
+      "id": "TRN-WP-16",
+      "title": "Peers behind NAT have no data path: Cloudflare Tunnel cannot carry inbound QUIC, the relay client is unwired and 'route fallback' returns fake success",
+      "theme": "transfer",
+      "repo": "synergos",
+      "area": "synergos-net/src/conduit/mod.rs, synergos-net/src/relay/mod.rs, synergos-relay, synergos-net/src/config.rs",
+      "severity": "high",
+      "kind": "missing-feature",
+      "evidence": [
+        {"file_line": "Synergos/synergos-net/src/config.rs:39-42", "quote": "proxy が UDP/QUIC を通さない (HTTPS のみ) ため、サーブレットは EC2 の real public IPv6 / IPv4 を返してクライアントに直結させる必要がある。"},
+        {"file_line": "Synergos/synergos-net/src/conduit/mod.rs:409-419", "quote": "// Tunnel が利用可能なら接続成功として扱う if self.tunnel.is_available().await { return Ok(RouteKind::Tunnel); }"},
+        {"file_line": "Synergos/synergos-net/src/conduit/mod.rs:421-427", "quote": "// WebSocket Relay は今後実装 return Ok(RouteKind::Relay);"},
+        {"file_line": "Synergos/synergos-relay/src/server.rs:85", "quote": "let _ = client.tx.try_send(payload.to_vec()); — relay server copies the payload per recipient; RelaySession::connect has no production caller (discovery map section 1.4)"},
+        {"file_line": "Synergos/DESIGN.md:1761-1768", "quote": "IPv6 NG + Tunnel OK → Tunnel | IPv6 NG + Tunnel NG → Relay/Error ... 経路断 → 自動フォールバック (< 3秒)"}
+      ],
+      "scenario": "Reviewer: run one daemon behind a home NAT (no port forward, no WARP) and one in the studio; `peer add-url` from home to studio works (outbound connect), but the studio can only push TXFR streams over that one connection, which dies after 30 s of quiet (TRN-WP-02) and can never be re-established from the studio side; two home peers (or any pair behind symmetric NATs) cannot exchange a byte because STUN is a dead single-shot stub, there is no hole punching and relay-only mode has no data path. Tailscale reports >90 % direct success with full NAT traversal, so ~10 % of pairs still need a relay sized for full-rate traffic.",
+      "impact_ai_game": "Remote artists, outsourcers and laptops are the users that need the sync most; today the product's connectivity assumption is 'inside the Cloudflare Mesh/WARP range' only.",
+      "current_state": "Direct QUIC only; cloudflared can expose peer-info/control HTTP but not the QUIC data plane; relay crate exists (plaintext WS, room id as secret) but is not wired; promotion logic marks nodes RelayOnly with nothing behind it.",
+      "proposed_redesign": "Replace Tunnel-as-QUIC-route with: (1) real STUN + ICE-style hole punching with happy-eyeballs dial (v6, v4, punched, relay) under a 3 s budget; (2) a relay that forwards opaque QUIC datagrams by PeerId (DERP-style, end-to-end encrypted so the relay sees ciphertext; authenticated join), run studio-side next to history nodes so relayed throughput approaches direct; (3) Cloudflare Tunnel only for the HTTP peer-info/control surface; (4) QUIC connection migration awareness so laptops changing networks keep transfers (combine with TRN-WP-04 resume).",
+      "alternatives": [
+        "Cloudflare WARP private-network UDP for every peer (requires enrolling every device; current mesh docs already assume it for studios but not for external vendors)",
+        "Application-level WebSocket relay carrying TXFR frames (relay sees plaintext; needs separate auth/encryption; simpler to deploy behind cloudflared)"
+      ],
+      "enforcement": "ci-gate",
+      "confidence": 0.85,
+      "sources": [
+        "research/transfer-efficiency.md section 4.2 (cloudflared QUIC/UDP constraints), section 4.4 (Tailscale direct-success rates, DERP throughput, peer relays)",
+        "maps/sy-transport.md W-23, W-25, W-30, W-33; maps/sy-discovery.md W16-W21"
+      ]
+    },
+    {
+      "id": "TRN-WP-17",
+      "title": "No throughput, large-file, slow-link or interruption test exists; every transfer fixture is a few KB, so none of the above regressions can be caught in CI",
+      "theme": "transfer",
+      "repo": "synergos",
+      "area": "synergos-net/tests, synergos-core/tests (transfer_e2e, auto_pull_e2e, two_node_full_e2e), CI gate",
+      "severity": "medium",
+      "kind": "missing-control",
+      "evidence": [
+        {"file_line": "Synergos (repo-wide grep)", "quote": "no benches/ directory in synergos-net or synergos-core; grep 'throughput|MiB/s|MB/s|bytes_per_sec' over synergos-net/tests and synergos-core/tests: 0 files"},
+        {"file_line": "Synergos/synergos-net/src/transfer/mod.rs:358-363", "quote": "// 10 KiB のランダムデータをメモリ上の双方向パイプで送受信する。 let data = vec![42u8; 10 * 1024];"},
+        {"file_line": "Synergos/synergos-core/tests/transfer_e2e.rs:106-107 (per read)", "quote": "let (total_hash, total_size, chunk_count) = hash_file(&src_file).await.unwrap(); — single small temp file over loopback"},
+        {"file_line": "maps/sy-core-versioning.md section 7", "quote": "Not tested: Performance/regression tests for large files (>1 GiB), many files (>10k), or slow links; idle timeout expiry / reconnect (sy-transport section 7)"}
+      ],
+      "scenario": "Reviewer: change CHUNK_SIZE to 4 KiB, set idle_timeout_ms to 5 s, or revert the receive loop to buffer the whole file in memory; the full test suite stays green. None of TRN-WP-01..15 would have been detected by CI, and the quantitative model in this report cannot be validated or tracked over time.",
+      "impact_ai_game": "Transfer speed is the product's main measurable promise for large assets; without budgets in CI it will regress silently as features land.",
+      "current_state": "Functional e2e tests only, all with tiny payloads on loopback with no netem, no I/O accounting, no interruption cases.",
+      "proposed_redesign": "A transfer-bench harness (cargo test --ignored on a Linux runner with tc netem profiles: lan 1 ms, wan 30 ms, wan 100 ms, 0.1 % loss): single-stream MB/s for 4 GiB, 50 x 100 MB set, 10k x 64 KB set, resume after killing the connection at 50 % (<= 55 % bytes resent), publish and receive I/O bytes via /proc/self/io (<= 1.1 x file size), time-to-first-byte after publish, daemon readiness with a 10 GB fixture, idle-45 s-then-publish; thresholds committed as budgets (docs/performance.md) and enforced in the HARNESS gate with a regression tolerance; publish the numbers per release.",
+      "alternatives": [
+        "Manual benchmark runbook only (not enforced; will drift)"
+      ],
+      "enforcement": "ci-gate",
+      "confidence": 0.9,
+      "sources": [
+        "maps/sy-core-versioning.md section 7; maps/sy-transport.md section 7; maps/sy-content.md section 7"
+      ]
+    }
+  ],
+  "coverage_notes": "Inputs: all 11 available subsystem maps (sy-transport, sy-discovery, sy-content, sy-core-versioning, sy-history-hooks-ipc, sy-control-custody, cu-auth-access, cu-storage-transfer, cu-versioning-core, cu-workflow-infra, cu-docs) and the 4 research notes were read in full; sy-clients-docs.md was absent at start and after one retry before code work, so GUI/CLI/ars-plugin/docs surfaces were not reviewed through that map (only via DESIGN.md and docs/versioning-design.md read directly). Code verified at file:line: synergos-net transfer/mod.rs, quic/mod.rs, quic/hello.rs, config.rs, types.rs, content/chunker.rs, content/session.rs, gossip/transport.rs, conduit/mod.rs; synergos-core exchange/mod.rs, daemon.rs, ipc_server.rs (publish path), history/store.rs, manifest.rs, project.rs, checkout.rs, restore.rs, peer_bootstrap.rs; synergos-custody handlers.rs and store.rs; synergos-relay server.rs; DESIGN.md sections 15.1-15.8; docs/versioning-design.md section 0. quinn defaults were verified against the quinn-proto 0.11.17 tagged source (Cargo.lock pins quinn 0.11.11 / quinn-proto 0.11.17), downloaded to scratchpad/dl-quinn/transport.rs: stream_receive_window 1,250,000 B, send_window 10,000,000 B, receive_window VarInt::MAX, initial/min MTU 1200 with DPLPMTUD upper_bound 1452, Cubic, GSO on, keep_alive None, idle 30 s. tokio-util ReaderStream capacity 4096 verified in the local cargo registry. Dead-call claims verified by grep (0 callers): probe_rtt, update_bandwidth_estimate, ConnectionCalibrator::calibrate, FileSizeClass::classify, stream_allocation./speed_test./peer_selection./monitor. readers, Connection::stats(). No code was executed; no throughput was measured — all numbers are a model. QUANTITATIVE MODEL (assumptions: NVMe 2 GB/s read / 1.5 GB/s write; HDD/NAS 150 MB/s; BLAKE3 single-thread ~1.5 GB/s; CRC32 I/O-bound; single quinn connection ~0.5-1.5 Gbps per core per research 4.1; links: LAN 1 GbE 1 ms, LAN 10 GbE, WAN 1 Gbps/100 ms, WAN 100 Mbps/30 ms; history enabled on both ends). TODAY — 500 MB PSD: LAN 1 GbE ~6.6 s (wire 4.2 s = 64 %, publisher passes 1.1 s, per-requester hash 0.33 s, receiver passes 1.0 s); WAN 1 Gbps/100 ms ~42.5 s (wire 40 s, window-bound at 12.5 MB/s = 10x below line); WAN 100 Mbps ~44 s (line-bound). 5 GB FBX set (50 x 100 MB): LAN ~67 s (wire 40 s, publish passes 12 s, hashes 3.3 s, receiver passes 12 s) plus 100+ gossip streams per peer and a 256-slot channel that drops offers in bigger batches; WAN 1 Gbps/100 ms ~77 s (50 streams share the 10 MB send_window = 100 MB/s cap); WAN 100 Mbps ~7 min. 100 GB checkpoint: publisher passes ~4.7 min before the Offer is gossiped (connection idles out meanwhile) + 67 s hash per requester before the first byte; wire LAN 1 GbE 13.3 min, LAN 10 GbE 9-27 min (CPU-bound single stream vs 80 s line), WAN 1 Gbps/100 ms ~2.2 h, WAN 100 Mbps ~2.2 h; receiver ~5.8 min of post-receive I/O (600 GB disk traffic per 100 GB); any drop restarts from 0; a checkout pin expires at 5 min. AFTER the proposed changes (01 windows, 02 keepalive, 03 pipeline + 1 MiB frames + N streams, 04 resume/multi-source, 06/07 single pass + hard-link/reflink, 09 batch offers + pull, 12 optional CDC): 500 MB: LAN ~4.5 s, WAN 1 Gbps/100 ms ~5-6 s (8x), iterative-save wire bytes x0.1-0.3 with CDC (unmeasured for PSD; must benchmark); 5 GB set: LAN ~42 s, WAN 1 Gbps/100 ms ~45 s (line/CPU-bound), control streams 2 n m + m -> 2 m; 100 GB: publisher 67 s once (0 s per requester), LAN 10 GbE ~2-3 min with 4-8 streams, WAN 1 Gbps/100 ms ~15-20 min, receiver post-receive I/O ~0, a drop at 90 % costs 10 %, checkpoint families move 25-54 % fewer bytes. DESIGN section 15 status: 15.1 IPFS pipeline dormant (catalog blocks only); 15.2 size classes/ratios parsed, unused; 15.3 speed test only the pure calibrate(); 15.4 peer selection absent (bandwidth always 0); 15.5 route detection fake-success, tunnel cannot carry QUIC, relay unwired; 15.6 multicast absent (gossip copies only); 15.7 monitoring = handshake-time RTT copied every 60 s. Not covered by this lens: security of the wire path (replayable HLO1, missing membership ACL, header authenticity) beyond their throughput consequences; the Curare MinIO presigned path except as the custody caller; GUI/plugin rendering of transfer state; relay server internals beyond the per-recipient copy."
+}

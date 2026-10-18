@@ -16,9 +16,7 @@ pub fn build_post_receive_hook(
 ) -> PostReceiveHook {
     Arc::new(move |project_id, file_id, version, sender| {
         let Some(root) = projects.project_root(&project_id) else {
-            tracing::debug!(
-                "post-receive hook skipped: project {project_id} is not open"
-            );
+            tracing::debug!("post-receive hook skipped: project {project_id} is not open");
             return;
         };
         let Some(abs_path) = projects.resolve_file_path(&project_id, &file_id) else {

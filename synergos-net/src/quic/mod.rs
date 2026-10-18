@@ -564,9 +564,7 @@ impl QuicManager {
             Some(
                 Duration::from_millis(self.config.idle_timeout_ms)
                     .try_into()
-                    .unwrap_or_else(|_| {
-                        quinn::IdleTimeout::from(quinn::VarInt::from_u32(30_000))
-                    }),
+                    .unwrap_or_else(|_| quinn::IdleTimeout::from(quinn::VarInt::from_u32(30_000))),
             )
         };
         transport.max_idle_timeout(idle_timeout);

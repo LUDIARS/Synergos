@@ -150,15 +150,11 @@ impl HookDef {
                 "hook timeout_sec must be between 1 and {MAX_HOOK_TIMEOUT_SEC}"
             ));
         }
-        if self
-            .r#match
-            .iter()
-            .any(|pattern| {
-                pattern.is_empty()
-                    || pattern.len() > MAX_HOOK_PATTERN_LEN
-                    || pattern.chars().any(char::is_control)
-            })
-        {
+        if self.r#match.iter().any(|pattern| {
+            pattern.is_empty()
+                || pattern.len() > MAX_HOOK_PATTERN_LEN
+                || pattern.chars().any(char::is_control)
+        }) {
             return Err(
                 format!(
                     "hook match patterns must be 1..={MAX_HOOK_PATTERN_LEN} bytes and contain no control characters"
@@ -174,9 +170,7 @@ impl HookDef {
         if self.r#match.is_empty() {
             return true;
         }
-        self.r#match
-            .iter()
-            .any(|pattern| glob_match(pattern, path))
+        self.r#match.iter().any(|pattern| glob_match(pattern, path))
     }
 }
 
@@ -228,21 +222,19 @@ pub fn glob_match(pattern: &str, path: &str) -> bool {
         match token {
             Token::Literal(expected) => {
                 for position in 1..=path.len() {
-                    current[position] =
-                        previous[position - 1] && path[position - 1] == expected;
+                    current[position] = previous[position - 1] && path[position - 1] == expected;
                 }
             }
             Token::One => {
                 for position in 1..=path.len() {
-                    current[position] =
-                        previous[position - 1] && path[position - 1] != '/';
+                    current[position] = previous[position - 1] && path[position - 1] != '/';
                 }
             }
             Token::Star => {
                 current[0] = previous[0];
                 for position in 1..=path.len() {
-                    current[position] = previous[position]
-                        || (path[position - 1] != '/' && current[position - 1]);
+                    current[position] =
+                        previous[position] || (path[position - 1] != '/' && current[position - 1]);
                 }
             }
             Token::GlobStar => {
@@ -354,7 +346,7 @@ fn default_rotation_interval_hours() -> u64 {
 }
 
 /// `[history.rotation.backend]` — 退避先。`type` タグで 3 種を選ぶ。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RotationBackendConfig {
     /// AWS S3 (または互換 API)。認証は環境変数 / workload identity — 設定ファイルに鍵を書かない。
@@ -373,13 +365,8 @@ pub enum RotationBackendConfig {
     },
     /// 未設定 (既定)。`rotation.enabled = true` のときはこのままだと validate が失敗する。
     #[serde(other)]
+    #[default]
     Unset,
-}
-
-impl Default for RotationBackendConfig {
-    fn default() -> Self {
-        Self::Unset
-    }
 }
 
 impl RotationBackendConfig {

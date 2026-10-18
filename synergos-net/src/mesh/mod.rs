@@ -322,29 +322,34 @@ impl Mesh {
 
     // ── 内部ヘルパー ──
 
-    /// DNS-over-HTTPS で AAAA レコードを解決 (複数プロバイダ + DNSSEC 検証)
+    /// DNS-over-HTTPS で AAAA レコードを解決 (複数プロバイダ)
     ///
     /// Cloudflare → Google の順で試行し、いずれか応答が得られればそれを返す。
-    /// DNSSEC 検証を常時 ON にすることで、中間者による偽 AAAA 注入を防ぐ (S23)。
+    ///
+    /// NOTE: 旧実装は `ResolverOpts::validate = true` で DNSSEC 検証を要求していたが、
+    /// hickory の `dnssec-*` feature を有効にしていなかったため hickory 側で警告の上
+    /// 無視されており、実際には検証されていなかった。hickory 0.26 ではこのフィールド自体が
+    /// `dnssec-*` feature 無しでは存在しないため、挙動を変えずに設定を外している。
+    /// DNSSEC 検証 (S23) と DoH 用の信頼ルート (webpki-roots 等) の導入は別途対応する。
     async fn resolve_doh(&self, fqdn: &str) -> Result<Vec<Ipv6Addr>> {
-        use hickory_resolver::config::{ResolverConfig, ResolverOpts};
-        use hickory_resolver::TokioAsyncResolver;
-
-        let providers: Vec<(&str, ResolverConfig)> = vec![
-            ("cloudflare_https", ResolverConfig::cloudflare_https()),
-            ("google_https", ResolverConfig::google_https()),
-        ];
+        use hickory_resolver::config::ResolverOpts;
 
         let mut last_err: Option<String> = None;
-        for (name, cfg) in providers {
+        for (name, cfg) in doh_provider_configs() {
             let mut opts = ResolverOpts::default();
-            opts.validate = true; // DNSSEC 検証を要求
             opts.timeout = Duration::from_secs(5);
 
-            let resolver = TokioAsyncResolver::tokio(cfg, opts);
+            let resolver = match build_resolver(cfg, opts) {
+                Ok(resolver) => resolver,
+                Err(e) => {
+                    tracing::debug!("DoH ({}) resolver setup failed: {e}", name);
+                    last_err = Some(format!("{name}: {e}"));
+                    continue;
+                }
+            };
             match resolver.ipv6_lookup(fqdn).await {
                 Ok(response) => {
-                    let addrs: Vec<Ipv6Addr> = response.iter().map(|aaaa| aaaa.0).collect();
+                    let addrs = aaaa_addresses(&response);
                     if !addrs.is_empty() {
                         tracing::debug!(
                             "DoH ({}) resolved {} → {} addresses",
@@ -370,20 +375,95 @@ impl Mesh {
 
     /// 通常の DNS で AAAA レコードを解決
     async fn resolve_standard(&self, fqdn: &str) -> Result<Vec<Ipv6Addr>> {
-        use hickory_resolver::config::{ResolverConfig, ResolverOpts};
-        use hickory_resolver::TokioAsyncResolver;
+        use hickory_resolver::config::ResolverOpts;
 
-        let resolver =
-            TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default());
+        let resolver = build_resolver(standard_resolver_config(), ResolverOpts::default())
+            .map_err(|e| {
+                SynergosNetError::DnsResolution(format!("DNS resolver setup failed: {}", e))
+            })?;
 
         let response = resolver
             .ipv6_lookup(fqdn)
             .await
             .map_err(|e| SynergosNetError::DnsResolution(format!("DNS lookup failed: {}", e)))?;
 
-        let addrs: Vec<Ipv6Addr> = response.iter().map(|aaaa| aaaa.0).collect();
+        let addrs = aaaa_addresses(&response);
 
         tracing::debug!("DNS resolved {} → {} addresses", fqdn, addrs.len());
         Ok(addrs)
+    }
+}
+
+/// DoH で試すプロバイダ (優先順: Cloudflare → Google)。
+fn doh_provider_configs() -> [(&'static str, hickory_resolver::config::ResolverConfig); 2] {
+    use hickory_resolver::config::{ResolverConfig, CLOUDFLARE, GOOGLE};
+
+    [
+        ("cloudflare_https", ResolverConfig::https(&CLOUDFLARE)),
+        ("google_https", ResolverConfig::https(&GOOGLE)),
+    ]
+}
+
+/// DoH 失敗時にフォールバックする通常 DNS の設定 (Google Public DNS, UDP+TCP)。
+///
+/// hickory 0.24 の `ResolverConfig::default()` は Google Public DNS だったが、
+/// 0.26 では name server 無しの空設定になったため明示的に組み立てる。
+fn standard_resolver_config() -> hickory_resolver::config::ResolverConfig {
+    use hickory_resolver::config::{ResolverConfig, GOOGLE};
+
+    ResolverConfig::udp_and_tcp(&GOOGLE)
+}
+
+/// tokio ランタイム上で動く hickory resolver を組み立てる。
+fn build_resolver(
+    config: hickory_resolver::config::ResolverConfig,
+    opts: hickory_resolver::config::ResolverOpts,
+) -> std::result::Result<hickory_resolver::TokioResolver, hickory_resolver::net::NetError> {
+    use hickory_resolver::net::runtime::TokioRuntimeProvider;
+    use hickory_resolver::TokioResolver;
+
+    TokioResolver::builder_with_config(config, TokioRuntimeProvider::default())
+        .with_options(opts)
+        .build()
+}
+
+/// lookup 結果の answer から AAAA レコードのアドレスだけを取り出す
+/// (CNAME 等の他レコードは無視する。0.24 の `Ipv6Lookup::iter` と同じ挙動)。
+fn aaaa_addresses(lookup: &hickory_resolver::lookup::Lookup) -> Vec<Ipv6Addr> {
+    use hickory_resolver::proto::rr::RData;
+
+    lookup
+        .answers()
+        .iter()
+        .filter_map(|record| match &record.data {
+            RData::AAAA(aaaa) => Some(aaaa.0),
+            _ => None,
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hickory_resolver::config::ResolverOpts;
+
+    /// hickory 0.26 で `ResolverConfig::default()` が空になった件の回帰防止:
+    /// DoH / 通常 DNS とも name server を持ち、resolver を組み立てられること。
+    #[tokio::test]
+    async fn dns_resolver_configs_have_name_servers_and_build() {
+        let configs = doh_provider_configs();
+        assert_eq!(configs[0].0, "cloudflare_https");
+        assert_eq!(configs[1].0, "google_https");
+        for (name, cfg) in configs
+            .into_iter()
+            .chain([("standard", standard_resolver_config())])
+        {
+            assert!(
+                !cfg.name_servers().is_empty(),
+                "{name}: name servers must not be empty"
+            );
+            build_resolver(cfg, ResolverOpts::default())
+                .unwrap_or_else(|e| panic!("{name}: resolver build failed: {e}"));
+        }
     }
 }

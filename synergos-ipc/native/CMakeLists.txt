@@ -1,0 +1,8 @@
+add_library(synergos_ipc_native STATIC frame.cpp)
+target_include_directories(synergos_ipc_native PUBLIC include)
+target_link_libraries(synergos_ipc_native PUBLIC synergos_native_options)
+if(BUILD_TESTING)
+  add_executable(synergos_ipc_frame_test tests/frame_test.cpp)
+  target_link_libraries(synergos_ipc_frame_test PRIVATE synergos_ipc_native)
+  add_test(NAME native.ipc.framing COMMAND synergos_ipc_frame_test)
+endif()

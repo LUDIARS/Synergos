@@ -148,11 +148,8 @@ impl ProjectManifest {
             ));
         }
         if m.files.iter().any(|(rel, entry)| {
-            safe_rel_to_local(rel).is_none()
-                || entry.version == 0
-                || entry.version == u64::MAX
-        })
-        {
+            safe_rel_to_local(rel).is_none() || entry.version == 0 || entry.version == u64::MAX
+        }) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "manifest contains an invalid file path or version",
@@ -205,10 +202,7 @@ impl ProjectManifest {
         match self.files.get_mut(rel) {
             Some(e) if e.size == size && e.crc == crc => BumpOutcome::Unchanged(e.version),
             Some(e) => {
-                e.version = e
-                    .version
-                    .saturating_add(1)
-                    .max(floor.saturating_add(1));
+                e.version = e.version.saturating_add(1).max(floor.saturating_add(1));
                 e.size = size;
                 e.crc = crc;
                 e.updated_at = now_ms;

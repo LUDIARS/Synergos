@@ -1,0 +1,573 @@
+{
+  "findings": [
+    {
+      "id": "AGD-AI-01",
+      "title": "No dataset/collection aggregate: every file costs a logical asset, a resource, an admission row, a version row and 4-5 authenticated calls",
+      "theme": "ai-game",
+      "repo": "curare",
+      "area": "catalog / upload admission / client SDK",
+      "severity": "high",
+      "kind": "design-gap",
+      "evidence": [
+        {"file_line": "Curare/spec/plan/versioning-types.md:35", "quote": "現行の assets は1ファイルを表す。MB と FBX は別 asset とし、それぞれタイプを設定する。"},
+        {"file_line": "Curare/curare-server/src/db/catalog-repository.ts:47-49", "quote": "const logical = input.logicalAssetId ? await requireLogicalAccess(actor, input.logicalAssetId, 'save', tx) : await createLogicalAsset(actor, { name: input.name, organizationId: project?.organizationId }, tx);"},
+        {"file_line": "Curare/curare-server/src/client/curare-client.ts:31-51", "quote": "const { versions } = await this.history(input.resourceId); ... await this.request('upload', 'POST', ...); ... await this.request('upload/confirm', 'POST', { blobRef: admission.blobRef }); return this.request(`assets/${input.resourceId}/versions`, 'POST', ...)"},
+        {"file_line": "Curare/curare-server/src/routes/upload.ts:29", "quote": "const proposedBlobRef = `uploads/${body.assetId}/${uuidv4()}`;"},
+        {"file_line": "Curare/curare-server/src/auth/cernere-actor.ts:31-36", "quote": "if (msg.type === 'connected') { userId = ...; socket.send(JSON.stringify({ type: 'module_request', module: 'organization', action: 'list' })); (one WebSocket per API request)"}
+      ],
+      "scenario": "A data engineer registers ImageNet-1k (1,281,167 train images) through the SDK. Each image needs POST /assets (logical_assets + assets rows), GET history, POST /upload (version_uploads row with a 24 h admission), the PUT, POST /upload/confirm (storage HEAD) and POST /versions (HEAD again). That is more than 6.4 M authenticated API calls, each opening a Cernere WebSocket, and about 5 M PostgreSQL rows before one training job can start. GET /assets/:id/versions is unpaginated and no batch or manifest endpoint exists, so there is no faster path.",
+      "impact_ai_game": "Datasets of 10^5-10^7 files are the normal unit of AI work (HF caps 10k entries per folder and 100k files per repo and still needs manifests). With a per-file aggregate, dataset ingestion is O(files) round trips against the shared identity service and the per-asset access predicate runs per row, so the catalog cannot act as the system of record for training data.",
+      "current_state": "One resource = one file; no manifest or collection object; search and list are per asset; Synergos has a per-project manifest.json but rewrites it whole on every file event (see AGD-AI-15).",
+      "proposed_redesign": "Add a `datasets` aggregate (kind: dataset | model | asset_set) whose content is an immutable manifest addressed by a BLAKE3 Merkle root: `manifests{hash PK, entry_count, total_bytes, parent_hash, created_by_principal, created_at}` plus packed, sorted entry files `manifest_entries{manifest_hash, path, content_hash, size, mode, chunk_map_ref?}` stored as range files (lakeFS metarange / Iceberg manifest-list pattern) rather than one row per path. API: `POST /api/v1/datasets/{id}/manifests` accepts an NDJSON manifest stream (path, digest, size); `POST /api/v1/uploads/batch` follows Git LFS batch semantics (server returns actions only for objects it does not already hold, <=1000 objects per page); `POST /api/v1/datasets/{id}/snapshots` pins a manifest hash as a named snapshot. Git commits only the manifest hash (DVC .dir / LFS pointer pattern); file-level history is derived by manifest diff.",
+      "alternatives": [
+        "Keep per-file assets but add a bulk endpoint (fewer calls, same O(files) rows and permission checks)",
+        "Store each snapshot as one tar shard (simple, but loses per-file dedup and partial fetch)",
+        "Delegate datasets to lakeFS/DVC and link snapshot ids from Curare (fast, but breaks the single-catalog goal and the Synergos custody story)"
+      ],
+      "enforcement": "ci-gate",
+      "confidence": 0.9,
+      "sources": [
+        "research/ai-dev-data.md §0 takeaway 1, §1.1 (DVC .dir manifest), §1.3 (HF 10k/folder, 100k/repo), §6 row 'Pin a training set exactly'",
+        "research/vcs-game-ai.md §5.2 lakeFS metarange, §6 lesson 4",
+        "https://github.com/git-lfs/git-lfs/blob/main/docs/api/batch.md"
+      ]
+    },
+    {
+      "id": "AGD-AI-02",
+      "title": "Hard caps of 500 versions per submission, 500 submissions per release and a 1000-version closure make a multi-thousand-file dataset release impossible to finalize or acquire",
+      "theme": "ai-game",
+      "repo": "curare",
+      "area": "submissions / releases / acquisition",
+      "severity": "high",
+      "kind": "design-gap",
+      "evidence": [
+        {"file_line": "Curare/curare-server/src/submissions/contract.ts:16", "quote": "versionIds: z.array(z.string().uuid()).min(1).max(500),"},
+        {"file_line": "Curare/curare-server/src/routes/releases.ts:11", "quote": "const ids = z.array(z.string().uuid()).min(1).max(500);"},
+        {"file_line": "Curare/curare-server/src/db/acquisition-repository.ts:17", "quote": "if (visited.size >= 1000) throw new VersioningError('acquisition_too_large', 409);"},
+        {"file_line": "Curare/curare-server/src/db/release-repository.ts:57-58", "quote": "const closure = await resolveVersionClosure(actor, [...selected], tx); if (closure.some(({ version }) => !selected.has(version.id))) throw new VersioningError('release_missing_approved_dependency', 409);"}
+      ],
+      "scenario": "A curator approves a 2,400-image dataset as five submissions (<=500 each) and composes a release. POST /releases/:id/finalize calls resolveVersionClosure over the 2,400 selected versions; at the 1,000th visited node it throws acquisition_too_large (409) inside the transaction, so the release can never be finalized. Even a 900-file release that finalizes cannot be acquired if its dependency closure crosses 1,000 nodes, and acquisitionPlan then issues up to 1,000 presigned URLs in one Promise.all.",
+      "impact_ai_game": "Dataset snapshots routinely contain 10^4-10^6 entries and models ship with tokenizer/config/weight shards plus datasets; the release object, the only immutable approved set in the product, cannot represent them, so training reproducibility has no anchor.",
+      "current_state": "Fixed zod caps and an in-memory BFS over per-version rows (about 5 queries per node) with storage HEAD per node inside the lock; release snapshot is a JSON array of ids.",
+      "proposed_redesign": "Make submissions and releases reference manifest hashes (AGD-AI-01) so a 1 M-entry dataset is one row; compute closure as a recursive CTE over manifest_entries UNION version_dependencies with a server-side limit measured in bytes, not nodes; replace the bulk plan with a cursor-paginated `GET /releases/{id}/manifest?cursor=` that streams entries and a lazy per-entry or per-range capability endpoint; validate dependencies at finalize by manifest diff rather than per-version HEAD under FOR SHARE locks.",
+      "alternatives": [
+        "Raise the constants (buys 10x, still O(n) HEAD calls inside a transaction)",
+        "Split datasets across many releases (breaks the one-immutable-set guarantee that training reproducibility needs)"
+      ],
+      "enforcement": "ci-gate",
+      "confidence": 0.95,
+      "sources": [
+        "research/ai-dev-data.md §1.6 scale reference points (ImageNet 1.28 M files, LAION 5.86 B)",
+        "maps/cu-versioning-core.md A2 (independently re-verified at the cited lines)"
+      ]
+    },
+    {
+      "id": "AGD-AI-03",
+      "title": "`reproducible` is a rejection, not a cache: derived artifacts (previews, embeddings, training shards, converted textures) have no home, no recipe key, no TTL and no release pinning",
+      "theme": "ai-game",
+      "repo": "curare",
+      "area": "versioning policy / production-pipeline domain",
+      "severity": "high",
+      "kind": "missing-feature",
+      "evidence": [
+        {"file_line": "Curare/curare-server/src/versioning/policy.ts:24-25", "quote": "if (type === 'reproducible') { throw new VersioningError('reproducible_content_is_not_versioned', 409);"},
+        {"file_line": "Curare/spec/plan/versioning-types.md:22", "quote": "| reproducible | 再生成可能な中間物 | 拒否 | 拒否 | 一時 FBX、プレビュー、変換キャッシュ |"},
+        {"file_line": "Curare/spec/feature/business-domain-design.md:45", "quote": "| 生成・比較連携 (production-pipeline) | 支援 | Recipe/Run、入力版、ツール版、設定、生成来歴、DCC起動要求 | 中間物の恒久保管の独断 |"},
+        {"file_line": "Curare/spec/domains/production-pipeline.domain.json:3", "quote": "生成元版・生成ツール版・設定ハッシュ・出力版の来歴を所有する支援ドメイン。提出後に来歴と依存を追加変更しない。DCC起動と生成ジョブ実行は後続範囲。"},
+        {"file_line": "Curare/docs/architecture.md:279-280", "quote": "bucket: curare-thumbnails └── {asset_id}/{version_id}/thumb.png (promised; grep 'thumbnail' over curare-server/src returns nothing)"}
+      ],
+      "scenario": "An ML engineer exports a dataset snapshot as 128 WebDataset tar shards (1 GB each) for the GPU cluster. Registering them with versioningType=reproducible returns 409; registering them as `working` makes 128 GB of regenerable bytes permanent and undeletable (AGD-AI-06); keeping them outside the platform loses the link between the shards and the source manifest, so nobody can prove which snapshot a model was trained on. The same applies to CLIP embeddings, thumbnails and BCn texture builds.",
+      "impact_ai_game": "ML pipelines are dominated by derived data (shards, embeddings, parquet previews, tokenized caches, converted textures). DVC's run cache and HF's refs/convert/parquet show the needed semantics: outputs keyed by hash(inputs, params, tool), evictable, and pinned when a release references them.",
+      "current_state": "The type exists only to be refused. Recipe/Run are listed as owned by production-pipeline but the only implementation is the single-row version_provenance table; thumbnails/CDN promised in G2 docs are absent.",
+      "proposed_redesign": "Implement reproducible as a cache tier: `recipes{recipe_hash PK = blake3(tool_id, tool_version, params_canonical, input_manifest_hash), tool, version, params, created_by_principal}` and `derived_artifacts{recipe_hash, output_manifest_hash, storage_class='cache', expires_at, last_access, pinned_by[] (release ids)}`; `POST /api/v1/recipes/{hash}/outputs` registers results; snapshot acquisition may request `format=webdataset|mds|parquet|thumbnail` and the server returns the cached derived manifest or enqueues a sandboxed job; a GC job evicts unpinned, expired derived artifacts from a separate reclaimable bucket/prefix (Delta vacuum semantics); finalizing a release pins the derived artifacts it references (HF side-ref pattern). Keep the rule that derived outputs never justify deleting a submitted source.",
+      "alternatives": [
+        "Allow reproducible as a normal version with a TTL flag (simpler, but mixes regenerable bytes into the immutable version table and GC must special-case triggers)",
+        "Push derived data to an external DDC/lakeFS and store only the recipe hash (works if a DDC exists; loses release pinning)"
+      ],
+      "enforcement": "runtime",
+      "confidence": 0.9,
+      "sources": [
+        "research/ai-dev-data.md §1.1 DVC run cache, §1.3 HF Data Studio side ref, §2.4 store vs recompute",
+        "research/transfer-efficiency.md §3.4 derived textures as DDC-style data"
+      ]
+    },
+    {
+      "id": "AGD-AI-04",
+      "title": "Provenance is one flat, forward-only row per output with free-form JSON: no run/job identity, no multi-step chains, no reverse lineage index, no AI-generation facets (digitalSourceType, model hash, prompt, seed); C2PA cannot carry it for 3D formats",
+      "theme": "ai-game",
+      "repo": "curare",
+      "area": "version_provenance / lineage",
+      "severity": "high",
+      "kind": "design-gap",
+      "evidence": [
+        {"file_line": "Curare/curare-server/src/db/submission-schema.ts:29-32", "quote": "outputVersionId: uuid('output_version_id').primaryKey(), sourceVersionIds: uuid('source_version_ids').array().notNull(), tool: text('tool').notNull(), toolVersion: text('tool_version').notNull(), settings: jsonb('settings').notNull(), settingsHash: text('settings_hash').notNull(),"},
+        {"file_line": "Curare/curare-server/src/submissions/contract.ts:21", "quote": "settings: z.record(z.unknown()),"},
+        {"file_line": "Curare/curare-server/src/db/provenance-repository.ts:63-66", "quote": "export async function provenanceDetail(actor: Actor, outputId: string) { await requireVersion(actor, outputId, 'view'); const [row] = await db.select().from(schema.versionProvenance).where(eq(schema.versionProvenance.outputVersionId, outputId));"},
+        {"file_line": "Curare/curare-server/migrations/004_submissions.sql:18-21", "quote": "CREATE TABLE IF NOT EXISTS version_provenance ( output_version_id UUID PRIMARY KEY REFERENCES asset_versions(id), source_version_ids UUID[] NOT NULL, tool TEXT NOT NULL, tool_version TEXT NOT NULL, settings JSONB NOT NULL, settings_hash TEXT NOT NULL, ... (no index on source_version_ids)"},
+        {"file_line": "Curare/spec/plan/versioning-types.md:41", "quote": "生成の来歴は sourceVersionIds、生成ツールと版、設定のハッシュ、出力のハッシュで表現する。"}
+      ],
+      "scenario": "Publisher policy (Steam AI disclosure, EU AI Act Art. 50) requires a list of every shipped asset whose chain contains AI-generated media, with model identity. An asset went txt2img (model A, seed 42) -> upscale (model B) -> manual retopo in Blender. Curare can hold one provenance row for the final version: the two generation steps cannot both be recorded (PK is output_version_id; a second write returns provenance_already_recorded), `settings` has no schema so 'model' is spelled ten ways, and 'what was derived from source X' needs a sequential scan of a uuid[] column. The report cannot be produced reliably.",
+      "impact_ai_game": "Lineage model -> dataset -> code -> config is the core reproducibility and compliance artifact of AI work; OpenLineage and MLflow already define the vocabulary. c2pa-rs supports no glTF/FBX/USD, so the catalog must be the system of record for provenance of game assets.",
+      "current_state": "Single-row, forward-only provenance with JSON settings; cycle check and post-submission immutability exist; no run entity; domain_events are written but never consumed, so nothing can be emitted to a lineage store.",
+      "proposed_redesign": "Replace with a run graph: `provenance_runs{run_id uuid PK, job_namespace, job_name, tool, tool_version, environment{container_digest, code_commit, hardware}, principal_id, started_at, ended_at, state}`; `provenance_io{run_id, version_id | manifest_hash, direction in|out, role}` indexed on (version_id, direction); typed facets `generation_facets{run_id, digital_source_type (IPTC URI), model_id, model_weights_hash, prompt, negative_prompt, seed, sampler, params_hash}` and `quality_facets{run_id, assertion, success, column?}`. Queries: `GET /lineage/versions/{id}?direction=upstream|downstream&depth=` via recursive CTE; `GET /releases/{id}/ai-content-report` listing every entry whose upstream contains trainedAlgorithmicMedia. Emit OpenLineage RunEvents (datasetVersion = manifest hash, sourceCodeLocation = commit) from the outbox; for 2D/video formats Synergos embeds a C2PA manifest via c2pa-rs with hard binding = blob hash.",
+      "alternatives": [
+        "Keep the single row but add a JSON schema for settings (cheap; still no multi-step runs or efficient reverse queries)",
+        "Store lineage only in MLflow/W&B and link by id (loses the release-time compliance export inside the catalog)"
+      ],
+      "enforcement": "ci-gate",
+      "confidence": 0.9,
+      "sources": [
+        "research/ai-dev-data.md §2.2 OpenLineage object model, §3.2 C2PA digitalSourceType and c2pa-rs supported formats, §3.7 storefront disclosure, §6 rows 'Lineage' and 'Provenance of generated assets'",
+        "research/breach-containment.md §3.3 C2PA hard binding"
+      ]
+    },
+    {
+      "id": "AGD-AI-05",
+      "title": "No per-asset rights/licence/consent/AI-use record and no purpose-aware dataset build: training sets can be assembled from assets whose holder reserved AI training",
+      "theme": "ai-game",
+      "repo": "curare",
+      "area": "catalog schema / access policy / dataset build",
+      "severity": "high",
+      "kind": "missing-control",
+      "evidence": [
+        {"file_line": "Curare/curare-server/src/db/schema.ts:60-63", "quote": "name: text('name').notNull(), properties: jsonb('properties').notNull().default({}), tags: text('tags').array().notNull().default([]), visibility: text('visibility').notNull().default('public'),"},
+        {"file_line": "Curare/curare-server/src/db/types.ts:69-70", "quote": "properties: z.record(z.unknown()).optional(), tags: z.array(z.string()).optional(),"},
+        {"file_line": "Curare/spec/feature/business-domain-design.md:134", "quote": "会社別承認段階、保持期間、外部委託の契約項目、生成ツール対応順は設定/後続要件として残す。"},
+        {"file_line": "Curare/curare-server/src/db/acquisition-repository.ts:33-38", "quote": "export async function acquisitionPlan(actor: Actor, ids: string[], knownHashes: string[]) { const entries = await resolveVersionClosure(actor, ids); ... needsDownload: !known.has(version.contentHash) })); (no purpose or rights check)"},
+        {"file_line": "grep -ri 'license|licence|consent|opt-out' Curare/curare-server/src", "quote": "no matches (only package.json:50 \"license\": \"MIT\")"}
+      ],
+      "scenario": "An outsourcing vendor delivers 3,000 character illustrations under a contract that forbids machine-learning use. A year later the R&D team calls POST /acquisition/plan with the version ids (any `download` grantee can) and trains a style model. Nothing records the holder or the reservation, nothing stops the build, and the EU AI Act Art. 53 copyright policy or the JP Art. 30-4 'unreasonable prejudice' analysis cannot be performed because the purpose of the acquisition is never declared.",
+      "impact_ai_game": "Governance for AI training data is now a per-asset rights/consent bitmap plus provenance; CAWG defines the four entries, GPAI providers must publish training-content summaries, and storefronts require disclosure. Without the record the platform cannot be the system of record for AI governance in a studio.",
+      "current_state": "Assets carry name/properties/tags only; contract terms are deferred to later requirements; vendor sharing (Magic Link) is unimplemented.",
+      "proposed_redesign": "Add append-only `asset_rights{id, logical_asset_id, holder_party_id (Cernere org/user id only, no PII), license_id (SPDX or org licence registry), cawg_data_mining, cawg_ai_inference, cawg_ai_generative_training, cawg_ai_training ∈ allowed|notAllowed|constrained, constraints_info, reservation_uri, effective_from, recorded_by_principal, source_contract_id}` with a current-state view; require `purpose ∈ {production, inference, ai_training, ai_generative_training, data_mining}` on dataset snapshot creation and on acquisition plans above N entries; the build rejects (or lists) entries whose effective bits conflict with the purpose; `GET /datasets/{id}/rights-summary` exports holder/licence/bit counts for the Art. 53 summary; rights changes emit events that invalidate derived training shards (AGD-AI-03).",
+      "alternatives": [
+        "Model rights as tags/properties (unenforceable, uncontrolled vocabulary)",
+        "Enforce only at release time (too late: training happens from working snapshots)",
+        "Hold the policy in Cernere as org policy (holder identity belongs there, but per-asset bits must live next to the asset)"
+      ],
+      "enforcement": "runtime",
+      "confidence": 0.85,
+      "sources": [
+        "research/ai-dev-data.md §3.1 CAWG training-mining assertion, §3.5 EU AI Act Art. 53, §3.6 Japan Art. 30-4, §3.7 storefront policies, §6 row 'Licence / consent / opt-out per asset'"
+      ]
+    },
+    {
+      "id": "AGD-AI-06",
+      "title": "Nothing can be erased: version rows are undeletable by trigger, referenced blobs are never reclaimed, archive is a visibility flag, Synergos manifests have no tombstone, history nodes keep every version under age-only GC, and custody reclaim is instant with no hold",
+      "theme": "ai-game",
+      "repo": "both",
+      "area": "retention / deletion / legal hold",
+      "severity": "high",
+      "kind": "missing-control",
+      "evidence": [
+        {"file_line": "Curare/curare-server/migrations/005_releases.sql:24", "quote": "IF TG_OP='DELETE' THEN RAISE EXCEPTION 'retain resource versions'; END IF;"},
+        {"file_line": "Curare/curare-server/src/db/upload-lifecycle-repository.ts:27", "quote": "sql`NOT EXISTS (SELECT 1 FROM asset_versions v WHERE v.blob_ref=${schema.versionUploads.blobRef})`,"},
+        {"file_line": "Curare/curare-server/src/db/repository.ts:158-160", "quote": "async archive(id: string) { const [row] = await db.update(schema.assets) .set({ visibility: 'archived', updatedAt: new Date() })"},
+        {"file_line": "Synergos/synergos-core/src/manifest.rs:35-46", "quote": "pub struct ManifestEntry { pub version: u64, pub size: u64, pub crc: u32, pub updated_at: u64, #[serde(default)] pub publisher: String, } (no deleted/tombstone field)"},
+        {"file_line": "Synergos/docs/operations-readiness.md:26", "quote": "| 削除 / リネームの伝搬 | ❌ 未実装 | manifest に tombstone を持たせれば可 (P1) |"},
+        {"file_line": "Synergos/synergos-core/src/history/gc.rs:22-26", "quote": "/// 1. `keep` に含まれる版は決して削らない /// 2. `max_versions_per_file > 0`: path ごとに新しい N 版を残す /// 3. `max_age_days > 0`: `stored_at` がそれより古い版を削る (no targeted purge, no legal hold)"},
+        {"file_line": "Synergos/synergos-custody/src/store.rs:210-215", "quote": "pub async fn reclaim(&self, key: &str) -> Result<()> { let _guard = self.lock(key).await?; ... match tokio::fs::remove_file(self.path(key, \"data\")).await {"},
+        {"file_line": "Synergos/synergos-core/src/history/rotation/mod.rs:97-99", "quote": "pub fn object_key(project_id: &str, hash: &str) -> String { format!(\"{}/{hash}\", blake3::hash(project_id.as_bytes()).to_hex()) } (plaintext offload keyed by content hash)"}
+      ],
+      "scenario": "A scraped-web image dataset turns out to contain a person's ID card and an erasure request (GDPR Art. 17) or an AI Act Art. 10(5) deletion duty arrives. In Curare the version row cannot be deleted (trigger), the blob is excluded from reclaim because a version references it, and 'archive' only hides the asset. In Synergos the file stays in every peer's working tree (no tombstone propagation), every history node keeps all versions, offloaded copies sit in S3/GDrive in plaintext under the content hash, and embeddings/thumbnails derived from it are untracked. Conversely, a compromised Curare credential can call custody reclaim and unlink any object instantly with no grace period or hold.",
+      "impact_ai_game": "AI datasets are where consent withdrawal, opt-out and special-category deletion actually happen. 'Retain every version whole-file' must coexist with targeted, auditable erasure and legal hold; otherwise the platform cannot legally host training data, and a single reclaim credential can destroy a release.",
+      "current_state": "Immutability is absolute in Curare; Synergos has no delete semantics; custody delete has no brake. Org rule RULE.md §2 forbids DROP but expects logical deletion (`is_active = false`).",
+      "proposed_redesign": "Tombstone-based erasure with holds on both sides. Curare: columns `tombstoned_at, tombstone_reason, retain_until, legal_hold bool, retention_class` on asset_versions (trigger allows only these to change); `POST /api/v1/versions/{id}/erase` requires `manage` + step-up + reason, writes an `erasure_requests` audit row, keeps hash and metadata, marks derived artifacts (AGD-AI-03) and fingerprints for invalidation, and a purge job deletes the blob after the grace period unless legal_hold; `POST .../legal-hold` blocks purge and GC. Synergos: manifest format 2 with `{deleted: true, deleted_at}` entries and `FileOffer{deleted}` propagation; history nodes consume a Curare-signed purge list (hash, project, reason) and remove objects, sidecars and offloaded copies; offloaded objects are encrypted with a per-project KEK so crypto-shred works; custody `reclaim` gains a trash state with `retain_until` (S3 Object Lock governance-mode semantics) and requires a signed deletion intent referencing the operation.",
+      "alternatives": [
+        "Keep absolute immutability and rely on crypto-shredding only (fails for derived artifacts and plaintext working trees)",
+        "Hard delete with no tombstone (breaks reproducibility proofs; manifests would dangle)"
+      ],
+      "enforcement": "runtime",
+      "confidence": 0.9,
+      "sources": [
+        "research/ai-dev-data.md §3.5 Art. 10(5), §3.8 retention and deletion (Delta tombstones, Iceberg expiry), §6 row 'Deletion / retention / legal hold'",
+        "research/breach-containment.md §2.2 crypto-shredding, §2.3 S3 Object Lock semantics",
+        "AIFormat/RULE.md:213 (DROP TABLE forbidden, logical delete)"
+      ]
+    },
+    {
+      "id": "AGD-AI-07",
+      "title": "No large-object tier for model checkpoints: single presigned PUT, 900 s URL / 1800 s custody timeout, no multipart or resume, no Range GET, no chunk table or CDC; iterative checkpoints are stored and transferred in full",
+      "theme": "ai-game",
+      "repo": "both",
+      "area": "storage port / custody / transfer",
+      "severity": "high",
+      "kind": "inefficiency",
+      "evidence": [
+        {"file_line": "Curare/curare-server/src/storage/minio-client.ts:63-69", "quote": "const command = new PutObjectCommand({ Bucket: bucket, Key: objectKey, ContentType: contentType, ChecksumSHA256: toChecksumSha256(contentHash), IfNoneMatch: '*', });"},
+        {"file_line": "Curare/curare-server/src/storage/minio-client.ts:83-87", "quote": "const command = new GetObjectCommand({ ResponseContentDisposition: downloadName ? 'attachment; filename=\"' + downloadName + '\"' : 'attachment', Bucket: bucket, Key: objectKey, }); (no range-scoped capability)"},
+        {"file_line": "Synergos/synergos-custody/src/handlers.rs:256-257", "quote": "let file = tokio::fs::File::open(state.store.path(&key, \"data\")).await?; let mut response = Body::from_stream(ReaderStream::new(file)).into_response(); (Range header never read)"},
+        {"file_line": "Synergos/synergos-custody/src/signature.rs:5-7", "quote": "pub fn object_key(id: &str) -> String { format!(\"{:x}\", Sha256::digest(id.as_bytes())) }"},
+        {"file_line": "Synergos/synergos-net/src/transfer/mod.rs:11-12,25", "quote": "/// - 再送 / 並列取得 / resume は追って拡張する。現バージョンは単一ストリームで /// 順次送る最小仕様。 ... pub const CHUNK_SIZE: usize = 64 * 1024;"},
+        {"file_line": "Synergos/docs/versioning-design.md:11", "quote": "| バイナリ / 大きいファイルの **差分転送** をするか | **しない**。転送は Phase 1 のまま全体転送 (blake3 検証)。差分の検知は `version` + size + CRC で足りる。CDC チャンク重複排除案は neco 決定 (2026-08-16) で取り下げ |"},
+        {"file_line": "Synergos/synergos-net/src/content/chunker.rs:37-41", "quote": "Self { chunk_size: 256 * 1024, } (fixed-size chunker, no production caller)"},
+        {"file_line": "Curare/curare-server/src/client/curare-client.ts:43-44", "quote": "const response = await fetch(admission.uploadUrl, { method: 'PUT', headers: { ...admission.requiredHeaders, 'Content-Length': String(file.size) }, body: stream ..., signal: AbortSignal.timeout(30 * 60_000) }"}
+      ],
+      "scenario": "A 40 GB bf16 checkpoint: on AWS S3 a single PUT is limited to 5 GB, so the MinIO-adapter path fails outright on S3-compatible clouds; the custody path caps a PUT at 1800 s (>=22 MB/s sustained) and a WAN drop restarts at byte 0; the client must first SHA-256 the 40 GB in one pass (the web client loads it into memory). Thirty fine-tune checkpoints of the same base are stored thirty times although 30-85 % of their bytes are shared; a GPU worker that needs one tensor downloads the whole file because no byte range can be requested or verified.",
+      "impact_ai_game": "Model artifacts (1-100 GB, iteratively edited) are the one workload where whole-file dedup provably yields 0 % and CDC yields 25-85 %; training loaders rely on 8-16 MB range reads of safetensors; without resume and ranges the platform cannot host model weights at all.",
+      "current_state": "Whole-file identity (BLAKE3/SHA-256) is sound, but transfer is single-stream whole-object on every path; the 2026-08-16 decision excluded CDC for all files; the chunker exists but is fixed-size and dormant.",
+      "proposed_redesign": "Add a size-tiered large-object policy (threshold e.g. >= 64 MiB or `kind=model|dataset_shard`): (1) keep whole-file BLAKE3 as identity; (2) store a Bao outboard tree per blob (~0.4 % at 16 KiB groups) so any byte range can be verified against the file hash and resumed; (3) for the tier compute a CDC chunk map with pinned Xet constants (GearHash, 64 KiB target, 8-128 KiB bounds, 64 MiB xorbs) and dedup chunks tenant-scoped; (4) uploads use IETF resumable-upload/tus headers with multipart parts >= max(10 MiB, size/10,000); (5) custody and MinIO GET honour `Range` with range-scoped signed capabilities (X-Xet-Signed-Range model); (6) receipts carry `digests[]` {sha256, blake3} plus chunk_count so clients hash once. Revisit the 2026-08-16 decision for this tier only, scored on HARNESS §3.5 axes: AI学習量 medium (Xet spec and xet-core exist), 作業コスト medium, 解決度 high, 主目的との一致度 high for AI assets.",
+      "alternatives": [
+        "Server-side `zstd --patch-from=previous` for storage only (no differ, no client change; transfer stays whole-file)",
+        "Tensor-aware dedup (ZipLLM-style safetensors parsing) for higher ratios at the cost of format-specific code",
+        "Delegate model weights to HF Hub/Xet and only link (loses custody and on-prem goals)"
+      ],
+      "enforcement": "ci-gate",
+      "confidence": 0.85,
+      "sources": [
+        "research/ai-dev-data.md §1.2 Xet parameters and measured 30-85 % checkpoint dedup, §1.5 safetensors lazy load, §1.7 S3 range patterns",
+        "research/transfer-efficiency.md §1.4 Bao outboard, §4.3 S3/MinIO multipart limits and IETF resumable upload, §6 row '10-100 GB model checkpoints' and recommendations 1-2 and 5",
+        "AIFormat/HARNESS.md:244-249 §3.5 decision axes"
+      ]
+    },
+    {
+      "id": "AGD-AI-08",
+      "title": "No training-cluster access surface: per-file 300 s capability URLs, sequential whole-file clone into flattened `<versionId><ext>` names, no S3-compatible or range gateway, no lazy mount, no shard export",
+      "theme": "ai-game",
+      "repo": "both",
+      "area": "acquisition / clone client / custody GET",
+      "severity": "high",
+      "kind": "missing-feature",
+      "evidence": [
+        {"file_line": "Curare/curare-server/src/db/acquisition-repository.ts:40-41", "quote": "downloadUrl: items[i]!.needsDownload ? await (await storagePort(version.storageBackend)).download(version.blobRef, 300, version.id + (resource.name.match(/\\.[a-z0-9]{1,16}$/i)?.[0] ?? '')) : null"},
+        {"file_line": "Curare/curare-server/src/client/local-acquisition.ts:10", "quote": "return item.versionId + (item.name.match(/\\.[a-z0-9]{1,16}$/i)?.[0].toLowerCase() ?? '');"},
+        {"file_line": "Synergos/synergos-custody/src/handlers.rs:245-273", "quote": "pub async fn get_bytes(...) ... response.headers_mut().insert(header::CONTENT_DISPOSITION, HeaderValue::from_str(&format!(\"attachment; filename=\\\"{}\\\"\", capability.name)) (whole object, no Range/ETag)"},
+        {"file_line": "Curare/spec/feature/ux-definition.md:95-96", "quote": "4. 別プロジェクトで使う時は、元を参照して版を固定するか、独立した派生を作るかを選ぶ。派生には出典版を残し、元の更新・権限を無条件に複製しない。"}
+      ],
+      "scenario": "A PyTorch job on an 8-GPU node needs dataset snapshot S (120k images plus captions.jsonl). The only path is POST /acquisition/plan (<=1000 versions, 300 s URLs, N custody calls), after which the Node client downloads sequentially into `<uuid>.jpg`, so the relative paths inside captions.jsonl no longer resolve; every worker repeats the download because there is no shared cache or mount; URLs expire mid-clone and the refresh re-plans everything. WebDataset/MDS loaders, the S3 connector for PyTorch, lakeFS-mount or FSx lazy loading cannot be pointed at Curare at all.",
+      "impact_ai_game": "GPU time is the expensive resource; the industry pattern is an S3-compatible, range-readable, presigned surface over sharded sequential layouts plus a node-local NVMe cache. HF, lakeFS and Unreal Cloud DDC all expose one; per-file 300 s URLs are sized for artist clones, not epochs.",
+      "current_state": "Capability-per-file plans; names flattened by version id (spec forbids path rewriting); Synergos could fan out P2P but has neither range nor multi-source support.",
+      "proposed_redesign": "Expose each immutable snapshot/release through (a) a read-only S3-compatible gateway `s3://curare-{org}/{snapshot_hash}/{original/relative/path}` implemented as a thin ListObjectsV2 / GetObject(Range) / HeadObject facade over manifest_entries -> blob store, authorised by a scoped capability token (Biscuit attenuated to snapshot + expiry) instead of per-object URLs; (b) manifest entries that keep the original relative path (also fixes DCC cross-references); (c) `POST /datasets/{id}/exports{format: webdataset|mds|parquet, shard_bytes}` producing a reproducible derived artifact (AGD-AI-03) pinned by the release; (d) a Synergos 'cache node' role that serves ranges from the history store to the cluster with Bao-verified striping across history nodes; (e) documented loaders: s3-connector-for-pytorch, WebDataset, lakeFS-mount-style NFS loopback.",
+      "alternatives": [
+        "Ship only a FUSE/ProjFS lazy mount (fragile across OS releases; tools that walk trees hydrate everything)",
+        "Require users to export to their own S3 bucket (works, but lineage and rights gates are lost at the boundary)"
+      ],
+      "enforcement": "runtime",
+      "confidence": 0.85,
+      "sources": [
+        "research/ai-dev-data.md §1.5 training formats, §1.7 GPU access patterns and S3 numbers, §5 workflow integration, §7 'not to build' (loaders, parallel FS)",
+        "research/transfer-efficiency.md §5 lazy-fetch table and §6 row '10 M-file image datasets'",
+        "research/breach-containment.md §1.3 Biscuit capability tokens"
+      ]
+    },
+    {
+      "id": "AGD-AI-09",
+      "title": "No content-addressed dedup across datasets or orgs: blobRef is a random UUID per upload, content_hash is unindexed, custody keys objects by opaque id, Synergos history dedups only per project",
+      "theme": "ai-game",
+      "repo": "both",
+      "area": "storage layout / admission",
+      "severity": "medium",
+      "kind": "inefficiency",
+      "evidence": [
+        {"file_line": "Curare/curare-server/src/routes/upload.ts:29", "quote": "const proposedBlobRef = `uploads/${body.assetId}/${uuidv4()}`;"},
+        {"file_line": "Curare/curare-server/migrations/001_initial.sql:45-47", "quote": "CREATE INDEX IF NOT EXISTS idx_assets_project ON assets(project_id); CREATE INDEX IF NOT EXISTS idx_assets_tags ON assets USING GIN(tags); CREATE INDEX IF NOT EXISTS idx_assets_name_search ON assets USING GIN(to_tsvector('simple', name)); (no index on asset_versions.content_hash or blob_ref in any migration)"},
+        {"file_line": "Curare/curare-server/src/db/version-write-repository.ts:42-44", "quote": "const identity = input.submissionKey ? eq(schema.assetVersions.submissionKey, input.submissionKey) : eq(schema.assetVersions.blobRef, input.blobRef);"},
+        {"file_line": "Curare/docs/architecture.md:283", "quote": "- **Content-Addressable Storage**: 同一バイナリの重複排除 (promised, not implemented)"},
+        {"file_line": "Synergos/docs/versioning-design.md:151", "quote": "- 版の実体は **チャンク化しない**。ファイル全体を objects に置く。重複排除はファイル単位のみ"}
+      ],
+      "scenario": "Dataset train-v2 shares 95 % of its 200k files with train-v1 and the same textures appear in three game projects; every re-registration uploads and stores the bytes again (knownHashes only skips client downloads). Storage and WAN cost scale with snapshots x files, and 'which datasets contain this exact image' cannot be answered without a sequential scan of asset_versions.",
+      "impact_ai_game": "Whole-file dedup alone captures about 75 % of block-level savings on general trees and is essentially free once objects are content-addressed; dataset versioning is dominated by overlapping snapshots, so the missing index/key turns every snapshot into a full copy.",
+      "current_state": "Hashes are verified but not used as addresses; Synergos history dedups per project by BLAKE3; custody keys by sha256(opaqueObjectId).",
+      "proposed_redesign": "Introduce `blobs{org_id, content_hash PK, size, storage_backend, storage_key, refcount, chunk_map_ref, bao_ref}`; `asset_versions` and `manifest_entries` reference (org_id, content_hash); admission short-circuits with `state: 'present'` when the org already holds the hash (tenant-scoped to avoid a cross-tenant existence oracle; cross-org dedup only with an explicit possession proof such as HMAC(hash, server nonce) over a sampled range); unique index (org_id, content_hash); refcounted reclaim replaces the NOT EXISTS scan; the custody object key becomes the content hash under an org prefix with the same tombstone discipline.",
+      "alternatives": [
+        "Dedup only inside Synergos history nodes (does nothing for MinIO/custody users)",
+        "Global cross-org dedup (saves more but leaks asset existence between tenants)"
+      ],
+      "enforcement": "ci-gate",
+      "confidence": 0.85,
+      "sources": [
+        "research/transfer-efficiency.md §1.3 Meyer & Bolosky whole-file vs block-level dedup",
+        "research/vcs-game-ai.md §5.3 cross-tenant dedup side channel, §5.6 W&B digest-based no-op versions"
+      ]
+    },
+    {
+      "id": "AGD-AI-10",
+      "title": "Search is name-only (`simple` tsvector); tags and properties are uncontrolled and unindexed; no controlled facets (modality, licence, provenance type), no perceptual or embedding fingerprints, no near-duplicate detection",
+      "theme": "ai-game",
+      "repo": "curare",
+      "area": "search / metadata",
+      "severity": "medium",
+      "kind": "missing-feature",
+      "evidence": [
+        {"file_line": "Curare/curare-server/src/db/repository.ts:121-123", "quote": "sql`to_tsvector('simple', ${schema.assets.name}) @@ plainto_tsquery('simple', ${query})`,"},
+        {"file_line": "Curare/curare-server/src/routes/search.ts:13-21", "quote": "const params = searchQuerySchema.parse({ q: ..., projectId: ..., tags: ..., status: ..., include_archived: ..., page: ..., limit: ... }); (only parameters)"},
+        {"file_line": "Curare/curare-server/src/db/types.ts:69-70", "quote": "properties: z.record(z.unknown()).optional(), tags: z.array(z.string()).optional(),"},
+        {"file_line": "Curare/curare-server/migrations/001_initial.sql:46-47", "quote": "CREATE INDEX IF NOT EXISTS idx_assets_tags ON assets USING GIN(tags); CREATE INDEX IF NOT EXISTS idx_assets_name_search ON assets USING GIN(to_tsvector('simple', name));"}
+      ],
+      "scenario": "A curator needs 'image assets, licence CC-BY, not AI-generated, no near-duplicates of hero_01.png, Japanese name contains 勇者' for a training subset. Japanese is not tokenised by the simple dictionary, licence and generation type do not exist as fields, properties are unindexed JSON, and there is no fingerprint, so duplicates (which inflate dataset weight and leak evaluation data into training) cannot be found.",
+      "impact_ai_game": "Dataset curation is a search-and-filter workload (SemDeDup, imagededup, CLIP retrieval); without controlled fields and fingerprints the catalog cannot drive dataset builds, quality gates or rights filtering.",
+      "current_state": "PostgreSQL GIN on tags and name; Elasticsearch/Meilisearch deferred; no fingerprints or embeddings.",
+      "proposed_redesign": "Split metadata into controlled facets `asset_facets{asset_id, modality ∈ {image,3d,audio,video,text,tabular,model}, license_id, digital_source_type, language, format}` (indexed) and free `properties` validated against per-project property templates (features.md promises typed editors); add `fingerprints{version_id, kind ∈ {blake3, phash, dhash, clip_vit_b32, openshape}, value bytea | vector}` with pgvector/HNSW (or a Lance side index) and `POST /search/similar{version_id | image | text, k, filters}`; CJK tokenisation via pg_bigm or an external index; a submission-time near-duplicate assertion recorded as a quality facet (AGD-AI-04).",
+      "alternatives": [
+        "External search service only, without controlled fields (faster to ship, governance filters still impossible)",
+        "Compute embeddings client-side in DCC plugins (no server cost, inconsistent coverage)"
+      ],
+      "enforcement": "ci-gate",
+      "confidence": 0.8,
+      "sources": [
+        "research/ai-dev-data.md §2.5 layered dedup, §4 search and discovery, §7 'not to build' vector databases"
+      ]
+    },
+    {
+      "id": "AGD-AI-11",
+      "title": "No ingest-time screening or quarantine: uploads become permanent, immediately served versions; no PII/CSAM/NSFW scan, no model-file validation (pickle), no script-node scan, no gate hooks on submission or release",
+      "theme": "ai-game",
+      "repo": "curare",
+      "area": "upload admission / submission lifecycle",
+      "severity": "high",
+      "kind": "missing-control",
+      "evidence": [
+        {"file_line": "Curare/curare-server/src/db/version-write-repository.ts:56-61", "quote": "const [version] = await tx.insert(schema.assetVersions).values({ ...input, storageBackend:upload.storageBackend, ... versionNum: (latest?.versionNum ?? 0) + 1, }).returning(); ... await tx.update(schema.versionUploads).set({ state: 'consumed' }) (no scan state)"},
+        {"file_line": "Curare/curare-server/src/db/submission-schema.ts:12", "quote": "state: text('state').$type<'submitted' | 'approved' | 'changes_requested' | 'cancelled'>().notNull().default('submitted'),"},
+        {"file_line": "Curare/curare-server/migrations/005_releases.sql:24", "quote": "IF TG_OP='DELETE' THEN RAISE EXCEPTION 'retain resource versions'; END IF;"},
+        {"file_line": "grep -ri 'scan|quarantine|presidio|photodna|clamav' Curare/curare-server/src", "quote": "no matches"}
+      ],
+      "scenario": "A vendor uploads a Maya .ma carrying a scriptNode worm, and a data team registers 50k scraped images including faces and documents. Both become versions on the first PUT, enter submissions, are approved by a reviewer who sees only metadata, and are cloned to every artist and GPU node; neither can be removed afterwards (AGD-AI-06). A `.pt` pickle checkpoint uploaded as a model executes code on load for every consumer.",
+      "impact_ai_game": "Screening must be a gate, not a column (LAION keeps NSFW and watermark columns and filters nothing by default); lakeFS pre-merge hooks and ASVS V5.2 define the pattern; Fab.com distributed infected Maya files from 39 sellers in 2025. Training data and model files are the highest-risk inputs a studio ingests.",
+      "current_state": "Zero content inspection; outbox events have no consumer to drive a gate; submissions have no pending or quarantined state.",
+      "proposed_redesign": "Add `scans{version_id, scanner, scanner_version, verdict ∈ pass|flag|block, evidence_hash, at}` and a version `screening_state ∈ pending|cleared|quarantined`; org policy declares required scanners per modality (Presidio for text/metadata, PhotoDNA-class for images, format-aware static scanner for .ma/.mb/.blend/.unitypackage, safetensors header parse plus pickle rejection for `kind=model`); scanners run in a sandbox (gVisor or bubblewrap, no network) as reproducible jobs; `download`, acquisition and submission finalize require `cleared`; results are exported as OpenLineage dataQualityAssertions; quarantined versions are excluded from history-node replication (Synergos consumes the state through the signed purge/hold list).",
+      "alternatives": [
+        "Client-side scanning in the DCC plugin (bypassable)",
+        "Scan at release only (training uses working snapshots; too late)"
+      ],
+      "enforcement": "runtime",
+      "confidence": 0.85,
+      "sources": [
+        "research/ai-dev-data.md §1.5 safetensors vs pickle, §2.6 lakeFS hooks and data-quality gates, §3.4 PII/CSAM screening",
+        "research/breach-containment.md §4.5 ASVS V5.2, §4.6 Maya/Blender/Unity executable formats, catalogue P1-1 and P1-2"
+      ]
+    },
+    {
+      "id": "AGD-AI-12",
+      "title": "No machine/agent principal: AI pipelines and render farms must borrow a human Cernere token; generated versions and provenance are attributed to that human and idempotency keys are per user",
+      "theme": "ai-game",
+      "repo": "curare",
+      "area": "auth / attribution",
+      "severity": "medium",
+      "kind": "design-gap",
+      "evidence": [
+        {"file_line": "Curare/curare-server/src/auth/cernere-actor.ts:32,36", "quote": "userId = z.object({ userId: z.string().uuid() }).parse(msg.user_state).userId; ... finish(undefined, { userId, organizationIds: organizations.map((org) => org.id), organizations: ... });"},
+        {"file_line": "Curare/curare-server/src/db/access-schema.ts:20-24", "quote": "export const assetGrants = pgTable('asset_grants', { assetId: uuid('asset_id').notNull().references(() => logicalAssets.id), userId: uuid('user_id').notNull(), permissions: text('permissions').array().notNull(), }"},
+        {"file_line": "Curare/curare-server/src/db/submission-schema.ts:33", "quote": "createdBy: uuid('created_by').notNull(), (provenance author is the human actor)"},
+        {"file_line": "AIFormat/FORMAT_AUTH.md:12", "quote": "サービス同士の接続には **Tool Client 認証（`client_credentials` グラント）** を使用する。ユーザーセッションではなく、サービス固有の認証情報で JWT を取得するパターンである。"}
+      ],
+      "scenario": "A generation farm produces 50k texture variants overnight using the art lead's token stored in CI. Every version and provenance row says the lead created them; the token is a full user credential, so a leak exposes all of the lead's assets; revoking the farm means revoking the lead; two farm nodes retrying the same operationId collide because idempotency is keyed on (created_by, operation_id).",
+      "impact_ai_game": "AI pipelines are the highest-volume writers; audit, rights (AGD-AI-05) and provenance (AGD-AI-04) need agent plus operator attribution; FORMAT_AUTH already specifies Tool Clients with scopes but Curare resolves only human userIds.",
+      "current_state": "Actor = {userId, organizationIds}; grants per human UUID; no scopes; no principal kinds.",
+      "proposed_redesign": "Introduce `principals{id, kind ∈ human|service|agent, operator_user_id, org_id, scopes[]}` resolved from Cernere Tool Client JWTs (client_credentials with scopes such as dataset:write, model:write); `created_by_principal` on versions, runs and scans; grants and dataset gating accept principal ids; idempotency key = (principal_id, operation_id); provenance_runs record both `agent_principal` and `operator_user_id`; per-principal quotas and rate limits.",
+      "alternatives": [
+        "Keep human tokens with an 'on behalf of' header (unverifiable)",
+        "Separate service accounts in Cernere only (Curare still needs scope checks and attribution columns)"
+      ],
+      "enforcement": "runtime",
+      "confidence": 0.8,
+      "sources": [
+        "AIFormat/FORMAT_AUTH.md §1 Tool Client",
+        "research/breach-containment.md §1.4 short-lived scoped credentials",
+        "maps/cu-auth-access.md W24"
+      ]
+    },
+    {
+      "id": "AGD-AI-13",
+      "title": "No ref/alias/retention model for snapshots: pins are mutable, non-unique labels any saver can set, release snapshots hold only ids, Synergos tags are node-local and unsigned, history GC is age/count only",
+      "theme": "ai-game",
+      "repo": "both",
+      "area": "versioning refs / history retention",
+      "severity": "medium",
+      "kind": "design-gap",
+      "evidence": [
+        {"file_line": "Curare/curare-server/src/routes/versions.ts:74-77", "quote": "const version = await assetVersionRepo.findByAssetAndVersion(assetId, body.versionNum); if (!version) return c.json({ error: 'Version not found' }, 404); const updated = await assetVersionRepo.updatePin(version.id, body.pinName); (boundary permission is `save`; no uniqueness; no actor recorded)"},
+        {"file_line": "Curare/curare-server/src/db/release-repository.ts:63", "quote": "const snapshot = { submissionIds: [...release.submissionIds], versionIds: [...selected].sort() };"},
+        {"file_line": "Synergos/synergos-core/src/history/tags.rs:3-4", "quote": "//! タグは名前付きの (path → version) ピン集合 (git tag に相当)。保管庫直下 //! `<store_dir>/tags/<name>.json` に node ローカルで保存する。git には入れない"},
+        {"file_line": "Synergos/docs/versioning-design.md:104", "quote": "- 履歴ノードは複数あってよい (全部が保持する = 冗長化)。相互の同期はしない (各自が見た版を持つ)。"},
+        {"file_line": "Synergos/synergos-core/src/history/gc.rs:57-58", "quote": "// 3. 保持期間 if config.max_age_days > 0 {"}
+      ],
+      "scenario": "Dataset snapshot 'train-2026Q3' is pinned by one engineer as 'approved' on 1,000 versions; another saver re-pins a newer version 'approved' on half of them; a training job resolving 'approved' gets a mixed set. On the Synergos side the release tag protecting those versions exists only on history node A; node B, configured with max_age_days=90, deletes them; six months later the snapshot cannot be reconstructed, and the release row's id list cannot be verified against content without trusting the mutable DB.",
+      "impact_ai_game": "AI workflows need Iceberg/MLflow-style refs: immutable tags with retention properties, movable aliases (champion/latest), and GC that keeps referenced snapshots; the snapshot must be verifiable offline (manifest hash) for audits.",
+      "current_state": "A pin_name column; release snapshot ids; node-local JSON tags; per-node GC with no shared protection set.",
+      "proposed_redesign": "`refs{scope_id (dataset | logical asset | project), name, kind ∈ tag|alias, target_manifest_hash, retention{min_snapshots_to_keep, max_snapshot_age, max_ref_age}, created_by_principal, signature}` unique per (scope, name); tags immutable, aliases movable with audit rows; release.snapshot stores the manifest root hash plus a server signature; Synergos: tags become entries in the git-committed signed manifest (format 2) and every history node's GC treats manifest- and tag-referenced versions as protected; expose `models:/name@alias` style resolution for training code.",
+      "alternatives": [
+        "Enforce uniqueness on pin_name only (no retention semantics)",
+        "Rely on external registries (MLflow) for aliases (fine for models; datasets and game releases still need refs in Curare)"
+      ],
+      "enforcement": "ci-gate",
+      "confidence": 0.85,
+      "sources": [
+        "research/ai-dev-data.md §1.4 Iceberg refs and retention, §2.3 MLflow aliases, §6 rows 'Snapshot vs working data' and 'Promotion stages'",
+        "research/vcs-game-ai.md §5.9 refs with per-ref retention"
+      ]
+    },
+    {
+      "id": "AGD-AI-14",
+      "title": "No dataset/model card, Croissant export or AI Act documentation surface: the catalog has no fields for collection process, intended use, biases, annotation protocol or a training-content summary",
+      "theme": "ai-game",
+      "repo": "curare",
+      "area": "catalog metadata / governance export",
+      "severity": "medium",
+      "kind": "missing-feature",
+      "evidence": [
+        {"file_line": "Curare/curare-server/src/db/schema.ts:54-67", "quote": "export const assets = pgTable('assets', { logicalAssetId, resourceRole, versioningType, id, projectId, name, properties, tags, visibility, folderRefs, createdBy, createdAt, updatedAt }) (no dataset-level documentation fields)"},
+        {"file_line": "Curare/spec/feature/business-domain-design.md:134", "quote": "会社別承認段階、保持期間、外部委託の契約項目、生成ツール対応順は設定/後続要件として残す。"},
+        {"file_line": "grep -riE 'dataset|データセット|学習データ|machine learning|機械学習' Curare/spec Curare/docs", "quote": "no product-level mention (only spec/plan/vision.md:38 '| Learn（学習） | - |' as a value-principle row)"}
+      ],
+      "scenario": "A studio fine-tunes a model on internal datasets and must produce Art. 10 data-governance evidence and an Art. 53-style training-content summary (or a HF-style card for its internal hub). Nothing in Curare records how the data was collected, its timeframe, annotation protocol, known biases, personal-data status or maintenance plan; the document must be hand-written and cannot be tied to the manifest hash it describes.",
+      "impact_ai_game": "Croissant/RAI and HF cards are the de-facto schema; 86 % of the top-100 downloaded datasets complete every card section; regulators and publishers ask for the same facts; generating cards from catalog fields is cheap once the fields exist.",
+      "current_state": "Free-form properties only; no dataset aggregate; no export endpoint.",
+      "proposed_redesign": "On the dataset aggregate (AGD-AI-01) add `dataset_cards{dataset_id, manifest_hash, intended_use, data_collection{type, timeframe, sources}, preprocessing_protocol, annotation_protocol, personal_sensitive_information, known_biases, limitations, maintenance_plan, annotator_demographics?}` versioned with the snapshot; `GET /datasets/{id}/croissant` emits Croissant JSON-LD (FileObject digests from manifest entries plus RAI fields) and `GET /datasets/{id}/training-content-summary` aggregates rights (AGD-AI-05), modality and provenance counts; model entries carry `base_model`, `datasets[]` and `license` as HF model cards do.",
+      "alternatives": [
+        "Store cards as a markdown file inside the dataset (human-friendly, not queryable, not tied to rights/provenance tables)"
+      ],
+      "enforcement": "ci-gate",
+      "confidence": 0.75,
+      "sources": [
+        "research/ai-dev-data.md §1.3 HF cards, §2.6 Croissant RAI fields, §3.5 EU AI Act Art. 10/53, §6 row 'Regulatory documentation'",
+        "research/vcs-game-ai.md §5.10 dataset cards"
+      ]
+    },
+    {
+      "id": "AGD-AI-15",
+      "title": "Synergos manifest/history scale: whole-manifest JSON rewrite per file event, CRC32-only manifest identity, 1024 paths per publish call, 1 MiB IPC frames, single JSON history index; unusable for 10^5-10^7-file datasets",
+      "theme": "ai-game",
+      "repo": "synergos",
+      "area": "manifest / history index / IPC",
+      "severity": "high",
+      "kind": "inefficiency",
+      "evidence": [
+        {"file_line": "Synergos/synergos-core/src/manifest.rs:169-171", "quote": "let json = serde_json::to_vec_pretty(self) .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?; tokio::fs::write(&tmp, json).await?; (called from every bump/record)"},
+        {"file_line": "Synergos/synergos-core/src/manifest.rs:35-46", "quote": "pub struct ManifestEntry { pub version: u64, pub size: u64, pub crc: u32, pub updated_at: u64, #[serde(default)] pub publisher: String, } (no BLAKE3)"},
+        {"file_line": "Synergos/synergos-core/src/exchange/mod.rs:572-575", "quote": "// TODO(S5): Exchange の呼び出し元から Blake3 を渡せるよう // broadcast_offer のシグネチャを拡張する。現状は CRC だけ // 流して content_hash はゼロ (受信側は CRC フォールバック)。 content_hash: Default::default(),"},
+        {"file_line": "Synergos/synergos-ipc/src/command.rs:227", "quote": "const MAX_PATHS_PER_PUBLISH: usize = 1024;"},
+        {"file_line": "Synergos/synergos-core/src/history/index.rs:55-61", "quote": "pub struct HistoryIndex { #[serde(default = \"default_format\")] pub format: u32, pub project_id: String, #[serde(default)] pub entries: BTreeMap<String, BTreeMap<u64, IndexEntry>>, } (one index.json per project, saved on every archive at store.rs:247)"}
+      ],
+      "scenario": "Publishing a 1,000,000-file dataset through the daemon needs 977 PublishUpdate calls; each file bumps the manifest and rewrites the full pretty-printed JSON (about 150 MB at that size), i.e. roughly 10^14 bytes of writes and O(n^2) time; the receiving history node rewrites index.json per archived file; checkout fans out one FileWant gossip message per file through a 256-slot lossy broadcast; HistoryList/TagAdd responses exceed the 1 MiB IPC frame and the connection drops; conflict detection relies on CRC32, so a crafted collision is treated as 'unchanged'.",
+      "impact_ai_game": "Datasets of millions of small files are the normal AI unit (OFPA trees have the same shape in games); lakeFS, Dolt, Oxen and Iceberg all use Merkle or prolly-tree manifests so diffs and partial sync are O(changed subtrees). The flat JSON manifest also blocks any per-dataset tombstone, signature or rights data.",
+      "current_state": "Phase-1 flat JSON manifest designed for small teams; BLAKE3 is computed for transfer but not persisted; the content-addressed chunker and catalog are dormant.",
+      "proposed_redesign": "Manifest format 2: a Merkle tree of directory nodes `{entries:[{name, kind, blake3, size, version, mtime?, deleted?}], children:[{name, node_hash}]}` content-addressed in the history store with the root hash committed to git; publish and checkout operate on manifest diffs (one IPC call with a streamed NDJSON body, no 1024 cap); a node-local append-only journal with periodic compaction replaces full rewrites; the history index becomes a sqlite/sled KV keyed by (rel, version); FileOffer and TransferHeader carry blake3 and are verified against the signed manifest entry; IPC responses are paginated or streamed.",
+      "alternatives": [
+        "Keep JSON but batch writes per publish/checkout (removes O(n^2) writes but not the IPC cap or CRC identity)",
+        "Delegate dataset trees to Curare manifests and let Synergos move only blobs (consistent with 'git holds the manifest', but Synergos projects still need a tree for checkout)"
+      ],
+      "enforcement": "ci-gate",
+      "confidence": 0.9,
+      "sources": [
+        "research/vcs-game-ai.md §5.2 lakeFS metarange, §5.5 Dolt prolly trees, §6 lesson 4",
+        "research/ai-dev-data.md §1.3 Xet rule 'avoid any strategy that scales 1:1 with chunk count'",
+        "maps/sy-core-versioning.md W-20 and maps/sy-history-hooks-ipc.md W16/W17 (re-verified at the cited lines)"
+      ]
+    },
+    {
+      "id": "AGD-AI-16",
+      "title": "No dataset gating or consent-aware distribution: history nodes answer any version to any connected peer, and Curare grants are per-user per-logical-asset with no request/approve flow, audit export or geo flag",
+      "theme": "ai-game",
+      "repo": "both",
+      "area": "access / distribution",
+      "severity": "medium",
+      "kind": "missing-control",
+      "evidence": [
+        {"file_line": "Synergos/synergos-core/src/exchange/mod.rs:962-968,985-993", "quote": "fn serve_from_history(self: &Arc<Self>, project_id: &str, requester: PeerId, file_id: FileId, version: u64) ... let req = ShareRequest { ... target_peer: Some(requester.clone()), version, }; (no membership or policy check before sending)"},
+        {"file_line": "Synergos/docs/versioning-design.md:101", "quote": "| **履歴ノード** (`history.enabled = true`) | 最新版 (同じ) | 対象プロジェクトの **全 version** (保持ポリシー内) | **任意の version** (保管庫にあれば) |"},
+        {"file_line": "Curare/curare-server/src/db/access-schema.ts:20-24", "quote": "export const assetGrants = pgTable('asset_grants', { assetId, userId: uuid('user_id').notNull(), permissions: text('permissions').array().notNull(), } (no status, expiry, reviewer or geo)"}
+      ],
+      "scenario": "A gated dataset (consent-limited faces or licensed model weights) is stored on a history node; any peer that reaches the QUIC port and knows the project id and path can FileWant every version. On the Curare side a grant must be created per user per logical asset; there is no request/approve flow, no export of who was granted when, and no geo restriction, so the studio cannot meet a licensor's 'approved users only, log every access' term.",
+      "impact_ai_game": "HF gated repos show the expected feature set (per-user grant/revoke, audit export, geo flag); datasets and model weights are routinely licensed with such terms; Synergos distribution bypasses Curare policy entirely (the security theme covers the raw authorization hole; this finding is about the missing dataset-level governance model on top of it).",
+      "current_state": "Curare policy exists only at the API; the Synergos data plane has no ACL; grants have no lifecycle.",
+      "proposed_redesign": "Dataset-level gating in Curare: `dataset_access_requests{dataset_id, principal_id, status ∈ pending|accepted|rejected|revoked, reviewed_by, reviewed_at, extra_fields}` with automatic or manual approval, `geo_restrictions`, and an audit export `{principal, status, time, reviewedAt}`; distribution capabilities (Biscuit) attenuated to dataset + snapshot + expiry become the only way Synergos history/cache nodes serve bytes: `serve_from_history` requires a capability bound to (project, manifest hash) and logs a receipt; gated snapshots are excluded from gossip fan-out.",
+      "alternatives": [
+        "Rely on network-layer membership (Cloudflare Mesh) only (no per-dataset granularity, no audit trail)"
+      ],
+      "enforcement": "runtime",
+      "confidence": 0.8,
+      "sources": [
+        "research/ai-dev-data.md §1.3 HF gating, §3.1 enforcement half, §6 row 'Access control for datasets'",
+        "research/breach-containment.md §1.3 Biscuit",
+        "maps/sy-core-versioning.md W-01 (cross-theme)"
+      ]
+    },
+    {
+      "id": "AGD-AI-17",
+      "title": "Integration surface absent: no LFS batch/custom-transfer, no S3 gateway, no DVC/lakeFS remote, no MLflow/OpenLineage emission (outbox written, never consumed), no UE Virtual Assets backend; adoption requires bespoke clients",
+      "theme": "ai-game",
+      "repo": "both",
+      "area": "APIs / outbox / client SDK",
+      "severity": "medium",
+      "kind": "missing-feature",
+      "evidence": [
+        {"file_line": "grep -rn 'domainEvents' Curare/curare-server/src", "quote": "only inserts: review-repository.ts:22, version-write-repository.ts:62, submission-repository.ts:63, release-repository.ts:65 and :87; no reader anywhere"},
+        {"file_line": "Curare/curare-server/src/client/curare-client.ts:13-58", "quote": "export class CurareClient { ... async save(...) ... history(...) ... submit(...) ... plan(...) } (the only SDK; bespoke JSON API)"},
+        {"file_line": "Curare/curare-server/src/storage/minio-client.ts:77-89", "quote": "export async function getPresignedDownloadUrl(objectKey: string, expiresIn = 3600, downloadName?: string) (per-object presign; no listing/range facade)"},
+        {"file_line": "Synergos/synergos-net/src/transfer/mod.rs:25", "quote": "pub const CHUNK_SIZE: usize = 64 * 1024; (proprietary TXFR framing; no LFS/HTTP adapter)"}
+      ],
+      "scenario": "A team already using DVC and MLflow wants Curare as the system of record. There is no DVC remote (no S3 facade), no `git lfs` batch endpoint for the texture repo, no OpenLineage event or webhook from ReleaseFinalized (the event sits in domain_events), and MLflow cannot reference a Curare snapshot as a DatasetSource; UE's Virtual Assets cannot use Synergos as a backend although both already use BLAKE3. Every integration becomes custom glue.",
+      "impact_ai_game": "The research consistently says 'emit, do not build' for lineage, registries, loaders and table engines; wire compatibility (LFS batch, S3, OpenLineage, UE Virtual Assets) is the cheapest path to adoption by both ML and game toolchains.",
+      "current_state": "Bespoke REST plus a Node SDK; an outbox with no consumer; roadmap webhooks (M2-5) absent.",
+      "proposed_redesign": "Implement (1) an outbox dispatcher emitting OpenLineage RunEvents and signed webhooks (ReleaseFinalized -> datasetVersion = manifest hash); (2) Git LFS batch and locking JSON endpoints on Curare plus a Synergos LFS custom-transfer agent so existing git repos use Synergos for blobs; (3) the S3-compatible snapshot gateway (AGD-AI-08) usable as a DVC/lakeFS/W&B reference remote; (4) a UE Virtual Assets backend speaking FIoHash (BLAKE3-160) over the custody/history API; (5) an MLflow DatasetSource plugin resolving `curare://org/dataset@snapshot`.",
+      "alternatives": [
+        "Ship the REST SDK in more languages (does not meet tools where they already are)"
+      ],
+      "enforcement": "ci-gate",
+      "confidence": 0.8,
+      "sources": [
+        "research/ai-dev-data.md §7 things not to build",
+        "research/vcs-game-ai.md §3.1 LFS batch and custom transfers, §4 UE Virtual Assets, §6 lesson 7",
+        "maps/cu-versioning-core.md A10"
+      ]
+    },
+    {
+      "id": "AGD-AI-18",
+      "title": "Dataset durability depends on a single node: history nodes do not synchronise, GC never checks replica count, and custody 'durable' means one persistent volume; a snapshot's reproducibility can vanish with one disk",
+      "theme": "ai-game",
+      "repo": "synergos",
+      "area": "history retention / custody durability",
+      "severity": "medium",
+      "kind": "design-gap",
+      "evidence": [
+        {"file_line": "Synergos/docs/versioning-design.md:104-106", "quote": "- 履歴ノードは複数あってよい (全部が保持する = 冗長化)。相互の同期はしない (各自が見た版を持つ)。取り逃した版は、保持している別の履歴ノードから取得する。どの履歴ノードも保持していなければ、通常ノードだけでは旧版を復元できない"},
+        {"file_line": "Synergos/synergos-core/src/history/gc.rs:92-101", "quote": "let mut oldest: Vec<(u64, String, u64)> = index.iter_all().filter(|(rel, v, entry)| { entry.offloaded.is_none() && !protected.contains(&(rel, *v)) }).map(|(rel, v, e)| (e.stored_at, rel.to_string(), v)).collect(); oldest.sort(); for (_, rel, v) in oldest { if total <= config.max_bytes { break; } (age only; no replica check)"},
+        {"file_line": "Synergos/synergos-custody/src/handlers.rs:245-253", "quote": "pub async fn get_bytes(...) ... if !state.store.present(&key, &admission).await? { return Err(Error::NotFound); } (single node; present() is a size check, see maps/sy-control-custody.md W33)"}
+      ],
+      "scenario": "A model was trained on snapshot S whose blobs live only on history node A; A reaches max_bytes and evicts the oldest versions, or its disk dies; the training run cannot be reproduced for an audit. Separately, a custody node's volume fails and every Synergos-backed release version is lost although receipts said 'durable'.",
+      "impact_ai_game": "Reproducibility and regulatory evidence require that referenced snapshots exist with a known replica count; git-annex numcopies, Iceberg snapshot expiry and the 3-2-1-1-0 backup rule are the references.",
+      "current_state": "Independent history nodes; age/count GC; a single custody node; receipts list one location.",
+      "proposed_redesign": "Add replication accounting: history nodes gossip signed `HaveVersion{manifest_hash | blob_hash, node_id}` records; GC refuses to drop a blob referenced by any ref or snapshot unless at least `history.min_copies` (default 2) verified copies exist elsewhere; custody receipts carry `locations[]` with >=2 nodes before Curare's receipt policy treats a release blob as durable; a scheduled scrub validates BLAKE3 and repairs from peers; finalized snapshots are copied to an immutable replica tier.",
+      "alternatives": [
+        "Rely on external backups of each history node (no cross-node accounting; restores untested)"
+      ],
+      "enforcement": "runtime",
+      "confidence": 0.75,
+      "sources": [
+        "research/vcs-game-ai.md §3.6 git-annex numcopies, §6 lesson 5",
+        "research/breach-containment.md §2.4 3-2-1-1-0 and catalogue P0-3 immutable replica tier",
+        "research/ai-dev-data.md §1.4 Iceberg expiry keeps referenced snapshots"
+      ]
+    },
+    {
+      "id": "AGD-AI-19",
+      "title": "AI development is not a product requirement anywhere: both repos mention AI only as developer agents or as a decision axis; no persona, use case or acceptance scenario covers datasets, models or generated assets",
+      "theme": "ai-game",
+      "repo": "both",
+      "area": "product spec",
+      "severity": "low",
+      "kind": "design-gap",
+      "evidence": [
+        {"file_line": "Curare/docs/roadmap.md:5", "quote": "実装担当: GPT5.6(コーディングエージェント) (every AI mention in Curare docs concerns who writes Curare; see maps/cu-docs.md §10)"},
+        {"file_line": "Curare/spec/feature/ux-definition.md:35-43", "quote": "personas: 制作者 / QC・リード / プランナー・進行管理 / エンジニア・利用者 / ディレクター・リリース担当 / 外部受託者 / 管理者 (no ML engineer, data curator or compliance role)"},
+        {"file_line": "Synergos/docs/versioning-design.md:15", "quote": "理由: 4 択を LUDIARS の判断 4 軸 (AI 学習量 / 作業コスト / 目的達成度 / 主目的との一致度) で比べると (the only AI mention in Synergos docs)"},
+        {"file_line": "Curare/spec/feature/features.md:36-39", "quote": "- イメージボード: PNG, JPG - モデル/モーション: FBX（運用データ）, Maya（作業データ） - テクスチャ: PNG, JPG, TGA, その他 - テキスト: 世界観やキャラ設定等"}
+      ],
+      "scenario": "A product reviewer asks which acceptance scenario proves that an ML engineer can pin a training set, trace a model to it and prove rights; none exists (UX-01..08 are artist/QC/release flows), so every finding above is out of scope by omission rather than by decision, and the data model keeps optimising for single-file artist saves.",
+      "impact_ai_game": "Without a persona and requirements, AGD-AI-01..18 have no acceptance criteria and no owner; the 'AI asset production' goal stated for the redesign is not represented in either repo's spec.",
+      "current_state": "Game-studio framing only; monetisation and UX docs do not mention datasets or models; Synergos uses 'AI' only in the decision-axis vocabulary.",
+      "proposed_redesign": "Add to spec/feature/ux-definition.md the personas 'MLエンジニア', 'データキュレーター' and 'コンプライアンス担当' with flows E (dataset snapshot -> training -> model registration with lineage), F (generated-asset ingest with provenance and rights) and G (erasure/opt-out request); add acceptance scenarios UX-09..UX-12 with measurable targets (entries per snapshot, time-to-first-batch on a GPU node, lineage query latency, erasure SLA); score the AI-specific design choices on the HARNESS §3.5 axes and register the spec set in Praeforma like the existing three documents.",
+      "alternatives": [
+        "Declare AI data explicitly out of scope (then the 'AI asset production' goal must be dropped from the product thesis)"
+      ],
+      "enforcement": "memory",
+      "confidence": 0.9,
+      "sources": [
+        "maps/cu-docs.md §10 verbatim scan (re-verified by grep over spec/ and docs/)",
+        "AIFormat/HARNESS.md:244-249 §3.5 decision axes"
+      ]
+    }
+  ],
+  "coverage_notes": "Read in full: all 11 available maps (sy-transport, sy-discovery, sy-content, sy-core-versioning, sy-history-hooks-ipc, sy-control-custody, cu-auth-access, cu-storage-transfer, cu-versioning-core, cu-workflow-infra, cu-docs) and the 4 research notes (ai-dev-data, vcs-game-ai, transfer-efficiency, breach-containment). The map sy-clients-docs.md was absent at start, after the other 11 maps, and on a further retry before code work; findings proceed without it, so Tauri GUI / Dioxus admin / ars-plugin client behaviour is covered only through the other maps. Every file:line in the evidence was opened and quoted from the working tree on 2026-10-15 (Curare HEAD b4b48dc per cu-workflow-infra map); where a claim rests on a map rather than my own read, the source names the map (AGD-AI-16 custody present(), AGD-AI-12 W24, AGD-AI-17 A10) and the sentence is phrased accordingly. Doc mentions of AI in both repos were scanned with ripgrep over spec/, docs/ and READMEs: Curare has none at product level (only developer-agent roles in docs/roadmap.md and 'Learn（学習）' in vision.md:38); Synergos has only the 4-axis decision vocabulary in docs/versioning-design.md:15. Not verified from primary sources (inherited from the research notes with their caveats): EU AI Act article text (community mirror), Japan Art. 30-4, S3 single-PUT 5 GB and 10,000-part limits, HF folder/repo limits, Xet dedup percentages; game-asset CDC ratios have no published measurement, so AGD-AI-07's tiering is scoped to model/dataset files only. Overlaps with other themes are intentional and cross-referenced rather than re-derived: the raw Synergos data-plane authorization hole (sy-core-versioning W-01) underlies AGD-AI-16; transfer mechanics (multipart, Range, CDC) underlie AGD-AI-07/08 but are framed here by the checkpoint and GPU-cluster workloads; deletion/legal hold (AGD-AI-06) and screening (AGD-AI-11) are governance controls that the security theme may also list from a breach-containment angle. Severity reflects impact on AI/game asset production fit, not exploitability. All 19 findings are design gaps or missing controls; none is an exploitable vulnerability in the narrow sense."
+}

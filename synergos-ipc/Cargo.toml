@@ -10,7 +10,7 @@ serde = { version = "1", features = ["derive"] }
 rmp-serde = "1"
 
 # Async runtime
-tokio = { version = "1", features = ["io-util", "net", "sync", "macros"] }
+tokio = { version = "1", features = ["io-util", "net", "sync", "macros", "rt"] }
 
 # Error handling
 thiserror = "2"

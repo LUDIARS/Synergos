@@ -1,0 +1,37 @@
+name: Native C++ contracts
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Linux cryptography headers
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev
+      - name: Locate macOS OpenSSL
+        if: runner.os == 'macOS'
+        run: echo "OPENSSL_ROOT_DIR=$(brew --prefix openssl@3)" >> "$GITHUB_ENV"
+      - name: Configure native contracts
+        run: cmake -S . -B build-native -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Release
+      - name: Build native contracts
+        run: cmake --build build-native --config Release --parallel 4
+      - name: Test native contracts
+        run: ctest --test-dir build-native -C Release --output-on-failure
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Test analysis verification policy
+        run: node --test spec/plan/redesign-analysis/workflows/tests/find-verify.test.mjs

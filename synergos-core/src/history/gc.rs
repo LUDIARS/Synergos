@@ -43,10 +43,7 @@ pub fn apply_retention(
                 .map(|(version, _)| *version)
                 .collect();
             sorted.sort_unstable_by(|a, b| b.cmp(a));
-            for v in sorted
-                .into_iter()
-                .skip(keep_count)
-            {
+            for v in sorted.into_iter().skip(keep_count) {
                 if !protected.contains(&(rel.as_str(), v)) {
                     victims.insert((rel.clone(), v));
                 }
@@ -86,14 +83,12 @@ pub fn apply_retention(
                 .and_modify(|(count, _)| *count += 1)
                 .or_insert((1, entry.size));
         }
-        let mut total = object_refs.values().fold(0u64, |sum, (_, size)| {
-            sum.saturating_add(*size)
-        });
+        let mut total = object_refs
+            .values()
+            .fold(0u64, |sum, (_, size)| sum.saturating_add(*size));
         let mut oldest: Vec<(u64, String, u64)> = index
             .iter_all()
-            .filter(|(rel, v, entry)| {
-                entry.offloaded.is_none() && !protected.contains(&(rel, *v))
-            })
+            .filter(|(rel, v, entry)| entry.offloaded.is_none() && !protected.contains(&(rel, *v)))
             .map(|(rel, v, e)| (e.stored_at, rel.to_string(), v))
             .collect();
         oldest.sort();

@@ -1,4 +1,5 @@
 /target
+/build-native/
 
 # synergos-control のレジストリ (組織メンバーのメール / node key ハッシュを含む)
 # と、そこから生成される一時ファイル・実運用設定をリポジトリに入れない。

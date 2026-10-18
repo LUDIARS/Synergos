@@ -413,15 +413,14 @@ impl Exchange {
         version: u64,
         expected_size_crc: Option<(u64, u32)>,
     ) {
-        self.pinned_fetches
-            .insert(
-                (project_id.to_string(), file_id.clone()),
-                PinnedFetch {
-                    version,
-                    expires_at: now_ms().saturating_add(PINNED_FETCH_TTL_MS),
-                    expected_size_crc,
-                },
-            );
+        self.pinned_fetches.insert(
+            (project_id.to_string(), file_id.clone()),
+            PinnedFetch {
+                version,
+                expires_at: now_ms().saturating_add(PINNED_FETCH_TTL_MS),
+                expected_size_crc,
+            },
+        );
     }
 
     /// pin を外す (受信完了 / キャンセル時)。
@@ -445,9 +444,7 @@ impl Exchange {
         version: u64,
     ) -> Option<PinnedFetch> {
         let key = (project_id.to_string(), file_id.clone());
-        let Some(pin) = self.pinned_fetches.get(&key).map(|pin| *pin) else {
-            return None;
-        };
+        let pin = self.pinned_fetches.get(&key).map(|pin| *pin)?;
         if pin.expires_at < now_ms() {
             self.unpin_fetch_version(project_id, file_id, pin.version);
             return None;
@@ -1484,8 +1481,11 @@ impl FileSharing for Exchange {
                         &transfer.file_id,
                         transfer.version,
                     );
-                    self.ledger
-                        .cancel_want(&transfer.file_id, transfer.version, &self.local_peer_id);
+                    self.ledger.cancel_want(
+                        &transfer.file_id,
+                        transfer.version,
+                        &self.local_peer_id,
+                    );
                 }
 
                 Ok(())

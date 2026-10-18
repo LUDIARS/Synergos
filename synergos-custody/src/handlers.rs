@@ -31,9 +31,7 @@ pub async fn authenticate(
     // Compare HMACs of both sides rather than the raw strings: equal digests imply an
     // equal token, and the comparison itself is constant time and length independent.
     let expected = signature::sign(&state.config.receipt_secret, &state.config.token);
-    if !provided
-        .is_some_and(|v| signature::verify(&state.config.receipt_secret, v, &expected))
-    {
+    if !provided.is_some_and(|v| signature::verify(&state.config.receipt_secret, v, &expected)) {
         return Error::Denied.into_response();
     }
     next.run(request).await

@@ -1,0 +1,136 @@
+{
+  "date": "2026-10-17",
+  "platform": "Windows x64",
+  "cpp": {
+    "label": "cpp-native-yyjson-nmake-release-clean-j1",
+    "exit_code": 0,
+    "seconds": 116.485,
+    "peak_private_bytes": 400003072,
+    "peak_rss_bytes": 298876928,
+    "peak_processes": 9,
+    "sample_count": 796,
+    "sample_interval_seconds": 0.05,
+    "memory_read_failures": 0,
+    "process_names": [
+      "cl.exe",
+      "cmake.exe",
+      "cmd.exe",
+      "conhost.exe",
+      "cvtres.exe",
+      "lib.exe",
+      "link.exe",
+      "nmake.exe",
+      "powershell.exe",
+      "reg.exe",
+      "vswhere.exe"
+    ],
+    "private_peak_components": [
+      {
+        "name": "cmd.exe",
+        "private_bytes": 7860224,
+        "rss_bytes": 9883648
+      },
+      {
+        "name": "conhost.exe",
+        "private_bytes": 1363968,
+        "rss_bytes": 8421376
+      },
+      {
+        "name": "cmake.exe",
+        "private_bytes": 6017024,
+        "rss_bytes": 13385728
+      },
+      {
+        "name": "nmake.exe",
+        "private_bytes": 1474560,
+        "rss_bytes": 5378048
+      },
+      {
+        "name": "nmake.exe",
+        "private_bytes": 1761280,
+        "rss_bytes": 5648384
+      },
+      {
+        "name": "nmake.exe",
+        "private_bytes": 1482752,
+        "rss_bytes": 5361664
+      },
+      {
+        "name": "cmake.exe",
+        "private_bytes": 5607424,
+        "rss_bytes": 11870208
+      },
+      {
+        "name": "cl.exe",
+        "private_bytes": 374435840,
+        "rss_bytes": 238927872
+      }
+    ],
+    "scope": "All currently implemented native libraries and five test executables; yyjson source included"
+  },
+  "rust": {
+    "label": "rust-ipc-release-clean-j1",
+    "exit_code": 0,
+    "seconds": 58.516,
+    "peak_private_bytes": 498233344,
+    "peak_rss_bytes": 486944768,
+    "peak_processes": 5,
+    "sample_count": 617,
+    "sample_interval_seconds": 0.05,
+    "memory_read_failures": 0,
+    "process_names": [
+      "build-script-build.exe",
+      "cargo.exe",
+      "conhost.exe",
+      "link.exe",
+      "rustc.exe",
+      "rustup.exe"
+    ],
+    "scope": "synergos-ipc release library and dependencies, with missing tokio rt feature corrected"
+  },
+  "comparison": {
+    "private_reduction_percent": 19.71571617655522,
+    "rss_reduction_percent": 38.62200651060286
+  },
+  "limitations": [
+    "Targets have different functionality; this is not a full-application or language-only comparison.",
+    "Single successful clean-output build per reported configuration, dependencies already downloaded.",
+    "Sampling may miss short-lived child processes; summed RSS can double-count shared pages.",
+    "CMake configuration excluded; C++ wrapper includes developer-environment setup. Wall time is not a controlled speed comparison.",
+    "Build-driver/compiler processes included; monitoring process excluded."
+  ],
+  "source_sha256": {
+    "synergos-core/native/CMakeLists.txt": "2ab0d5b263df540b5d72d426b5cb29fc241608e68bc49be06378168d0f92366b",
+    "synergos-core/native/include/synergos/core/manifest_codec.hpp": "a6fff3e925c0972bf42c320625614ffe0ca5ee0e5c0f110610d1cbd53b23ea43",
+    "synergos-core/native/include/synergos/core/manifest_versions.hpp": "c7b11d1425b4bc7de7ed67e7add55801596e45cbbfa59d62a6f6bb769f2f8068",
+    "synergos-core/native/include/synergos/core/relative_path.hpp": "015d465dcb79c6f541ca777249f436954c386a44f59b29961a1e474cab17e935",
+    "synergos-core/native/include/synergos/core/version_state.hpp": "23b1389b65e75c3c5d5e023793d0229431bcb3f2a91b7abe49e8e45caae52774",
+    "synergos-core/native/manifest_codec.cpp": "1cc65ae08decc549764e9fd1e87f1e213d1920941ac8887b757d6274f1e56049",
+    "synergos-core/native/manifest_versions.cpp": "d52f08269c82db3f029e543649ed118e40c59cad2ddb0b6183734809a67f0ea1",
+    "synergos-core/native/relative_path.cpp": "6da7cfc9f87cafbd62bf3148b149bf9191bc898982975e262a8bb87a9f95d2aa",
+    "synergos-core/native/tests/manifest_codec_test.cpp": "9d76dc7c0b347bfa81a57ddadcc7687c6137e66db2c83bd241a81aa457d8c71f",
+    "synergos-core/native/tests/version_test.cpp": "4aff9f89b90e5e48bddf58d864b29a91881c412c704fca9314e5c7014cdfdce3",
+    "synergos-core/native/version_state.cpp": "a398ebd1200d9a91003dff4af46e94f0af4a18c36190b9c8eb72f1b101904706",
+    "synergos-custody/native/CMakeLists.txt": "f498031bfcc435c225cb1e6c3db58af00b6075963680b7e0b5203461716fc42f",
+    "synergos-custody/native/canonical.cpp": "79d0d8d878105e4cc5e6e5ccdf742e8147deab2ee3fad0b9af4f91fea332be14",
+    "synergos-custody/native/digest.hpp": "86248c741ce408b4328719b562594294c7b5c2d7c3a1518a85bcd5df3a7237de",
+    "synergos-custody/native/digest_openssl.cpp": "89ccb1e18390e3281e59e4853fde3de1aa900e37b63a53175fae2d121b120fef",
+    "synergos-custody/native/digest_windows.cpp": "1363b52d77168232923da6eadacd9ec2d62305b495ba17719b5b86087099f1d9",
+    "synergos-custody/native/durable_posix.cpp": "355afd7622aee465c8d68b566064c45ec82f50b784e30757abc1be45edd03dca",
+    "synergos-custody/native/durable_windows.cpp": "2da4407fe09f071dd840679780c6e81f44096d135cf4c01c8e83c9ede30e40d8",
+    "synergos-custody/native/include/synergos/custody/durable_file.hpp": "3f8f0e0f7b63b408c61c6c4d38bdf5fd8d59e5a1f17961523198af0614837e09",
+    "synergos-custody/native/include/synergos/custody/signature.hpp": "d7d658fae37ed5f80a5c4d718bc9de5d0401196a5a6bee8a2ff6717da4a6db2d",
+    "synergos-custody/native/partial_file.cpp": "b179a9d684330e132bb544040847655dc9bde9be213d922c21f8ac5621784ffd",
+    "synergos-custody/native/partial_file.hpp": "945e60fd91938c14cb4d99d554003d566ef4815a69a82d61cd09027f2462b048",
+    "synergos-custody/native/signature.cpp": "6c0e8c6a91dde8760b2cf3dea5d1064dd820b67304c135bb269d9fdc3bee4c12",
+    "synergos-custody/native/tests/durable_file_test.cpp": "32cc3d42acd77f802d3fc334ea0a33d558fa4c9ce9dde11a4b733d7ec1212547",
+    "synergos-custody/native/tests/signature_test.cpp": "d9524fec58eaec20af4322d6ac40167291dbd19c8673bb5ad9e184cfb5f75d9e",
+    "synergos-ipc/native/CMakeLists.txt": "3325ac4a2a555618958735e224180325dcf613d7793e28930cfd8a20a68a97fc",
+    "synergos-ipc/native/frame.cpp": "637374353e5842f2cdeab24cc9e7d6b836cee48902ddaaceb3751752ad46228f",
+    "synergos-ipc/native/include/synergos/ipc/frame.hpp": "b2e8ab3f6c17335c3f9409012771bee0441f5c5ecf597dd2fde592b0d85522ae",
+    "synergos-ipc/native/tests/frame_test.cpp": "b8b0c86625afb765f37d74c54d427fd995264952ffb3bbe4c5b088c2d0a9d538",
+    "CMakeLists.txt": "a2fcc70754d0371f3b1c53875705f1e04f16ebf6c3d38307f66907e280eff906",
+    "synergos-ipc/Cargo.toml": "5edb1bd4b129beaf3b702ca6853ce23f5b779a64c82912ed2ef2d9f2a70715de",
+    "scripts/measure-build-memory.py": "3025721b28cc32a9c94f9a2f799a33bbe95e6a20ca5be63f1cfc15e6f45ac49f"
+  }
+}

@@ -32,7 +32,7 @@ blake3 = "1"
 # 外部ストレージローテーション (spec: archive-rotation)
 # S3 backend: object_store は put/get/head/delete だけの薄い ObjectStore trait
 # (env / workload identity 認証に対応)。フル SDK の aws-sdk-s3 より依存が軽い。
-object_store = { version = "0.11", features = ["aws"] }
+object_store = { version = "0.14", features = ["aws"] }
 bytes = "1"
 # gdrive backend: service account JSON 鍵から JWT assertion (RS256) を組み立てる。
 jsonwebtoken = "9"

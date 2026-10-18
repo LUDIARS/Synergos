@@ -76,8 +76,39 @@ async fn project_root_returns_registered_path() {
         .await
         .unwrap();
     let root = pm.project_root("pB").expect("project registered");
-    assert_eq!(root, dir);
+    // ProjectManager は root を canonicalize して保持する。一方 temp_dir() 由来の
+    // `dir` は macOS では `/var` → `/private/var` の symlink を、Windows では
+    // 8.3 短縮名 (`RUNNER~1` 等) を含みうるため、生の `dir` とは一致しない。
+    // 期待値側も同じ正規化をかけたうえで、保持値そのものを厳密に比較する。
+    assert!(
+        root.is_absolute(),
+        "root must be absolute: {}",
+        root.display()
+    );
+    assert_eq!(root, expected_registered_root(&dir));
+    // 念のため両辺を canonicalize しても同一ディレクトリを指すことを確認する。
+    assert_eq!(
+        std::fs::canonicalize(&root).unwrap(),
+        std::fs::canonicalize(&dir).unwrap()
+    );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `ProjectManager::open_project` が保持する root の期待値。
+/// canonicalize 後、Windows では verbatim prefix (`\\?\` / `\\?\UNC\`) を外した
+/// 通常形式で公開される (project.rs の `normalize_canonical_root` と同じ契約)。
+fn expected_registered_root(dir: &std::path::Path) -> PathBuf {
+    let canonical = std::fs::canonicalize(dir).unwrap();
+    if cfg!(windows) {
+        let text = canonical.to_string_lossy();
+        if let Some(unc) = text.strip_prefix(r"\\?\UNC\") {
+            return PathBuf::from(format!(r"\\{unc}"));
+        }
+        if let Some(local) = text.strip_prefix(r"\\?\") {
+            return PathBuf::from(local);
+        }
+    }
+    canonical
 }
 
 // ── ConflictManager ─────────────────────────────────────────────────
