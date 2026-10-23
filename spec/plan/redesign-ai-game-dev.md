@@ -4,7 +4,7 @@
 - 対象: Synergos main @ d404f20
 - 関連テーマ: 本書は 3 テーマのうち ai-game-dev (AI 開発・ゲーム開発のワークフロー) の Synergos 側正本。版管理の対象モデル (Blob / Tree / Changeset / Ref) と、その複製・作業ツリー反映・履歴保持を持つ。同 repo の他テーマは `spec/plan/redesign-security.md` (脆弱性と侵害の歯止め。署名封筒・LCT・パス方針・保持ロック・desktop workspace の分割を持つ) と `spec/plan/redesign-transfer-efficiency.md` (転送速度と効率。内容 ID・wire・manifest v2・CDC / チャンク保管の判断を持つ)。相手 repo の同名文書は Curare リポジトリの `spec/plan/redesign-ai-game-dev.md` (ref の権威・データセット・権利・来歴・消去台帳を持つ)。repo をまたぐ相対リンクはホスティング側で切れるので書かない。契約 ID・機構 ID (AIGAME-Mxx)・目標 ID (G-A*)・受入試験の番号 1〜21・未決事項 Q-A* は両文書で同一 (提出前の照合は §5.3)。
 - 根拠資料: 本 repo の `docs/versioning-design.md`、`docs/operations-readiness.md`、`docs/hooks.md`、`docs/site-operations.md`、`docs/two-node-operations.md`、`docs/platforms.md`、`spec/feature/opaque-custody.md`、`spec/feature/native-contracts.md`、`spec/plan/cpp-migration.md`。Curare の `spec/plan/versioning-types.md`、`spec/feature/ux-definition.md`。解析成果は `spec/plan/redesign-analysis/` の `HANDOFF.md` (§6 契約変更と実装の非効率の区別、§7.1 オーナー決定)、読解マップ `maps/sy-*.md`、調査ノート `research/vcs-game-ai.md`・`research/ai-dev-data.md`・`research/transfer-efficiency.md`、検証済み発見 `findings/ai-game-verified.json` (kept[] 77 件のうち Synergos 関係 60 件。本書と同じ Revisor 変更で取り込む。security 文書 §5 P0 と同じ扱い)。外部資料は §8。
-- 判断の前提: 2026-10-23 のオーナー決定 6 点 (`spec/plan/redesign-analysis/HANDOFF.md` §7.1)。特に決定 6 により、本書の Synergos 実行時変更はすべて **C++ 移行の互換契約 / ネイティブ実装要件** として書き、現行 Rust 実装へは入れない。
+- 判断の前提: 2026-10-23 のオーナー決定 6 点 (`spec/plan/redesign-analysis/HANDOFF.md` §7.1)。特に決定 6 により、本書の Synergos 実行時変更はすべて **C++ 移行の互換契約 / ネイティブ実装要件** として書き、現行 Rust 実装へは入れない。2026-10-23 夕のオーナー決定 7〜9 (同 §7.2) を `spec/plan/redesign-analysis/design/authority-amendment.md` に従って反映した (プロジェクト会員とノード名簿の正本は Cernere、relay は C++ だけ、Curare は Synergos のハコ)。
 
 ## 0. 結論 (先に)
 
@@ -26,6 +26,7 @@
 - `docs/versioning-design.md:104`: 「履歴ノードは複数あってよい (全部が保持する = 冗長化)。相互の同期はしない (各自が見た版を持つ)。」
 - `docs/versioning-design.md:13`: 「自動マージはしない (バイナリはマージ不能)。退避・選択 UI とロック機構は Phase 3」。
 - `spec/feature/opaque-custody.md:5`: 「Synergosはopaque objectの転送と保管の実行を担当し、制作履歴や承認を作らない。」(2026-09-08 の Cu / Sy / Cr 境界)
+- 2026-10-23 夕の決定 8・9 で、この境界を次のように締める。Cernere は本人・組織・所属に加えて、**Synergos のプロジェクト会員 (誰がどのプロジェクトで read / publish / history か) とノード名簿 (どのノードが誰のもので、どこに到達できるか) の正本**である。Synergos は転送と同期の本体で、Curare が無くても動く。Curare はデザイナー向けの版・レビュー・承認を持ち、それが要る場面でだけ capability を出してバイトの移動を認可する。Curare はバイトを中継せず、会員資格を輸出・発行・判定しない。
 - Curare `spec/plan/versioning-types.md:3-4`: 「この文書は従来の Git 連携前提、および Synergos が制作履歴の意味を管理する案を置き換える。Git は製品利用の前提にしない。」
 - Curare `spec/feature/ux-definition.md:94`: 「既存の編集は勝手に上書きしない。」
 - `spec/plan/cpp-migration.md:41-43`: 「Versioning: preserve `.synergos/manifest.json`, local high-water marks, restore/checkout semantics, tags and protected history.」
@@ -42,6 +43,9 @@
 | 4 | Cernere 側の短寿命 capability 署名鍵、SSF/CAEP 失効、step-up は SPEC-CR-* として依頼済み | 依存として参照し、各暫定策を書く (§4.24)。Synergos / Curare には実装しない |
 | 5 | quick-xml 0.30 は依存経路自体が要るかから判断 | 製品として eframe の accesskit 経路は要らない。作業は SECURITY-M30 (D-13 の E): `synergos-gui` を `desktop/` workspace へ移し accesskit を外す。egui は C++ desktop-gui の受入まで parity の基準として残す (D-A19) |
 | 6 | HLO2・custody 強化・認証強化は Rust に入れず C++ 移行契約として再仕様化 | 本書の機構も同じ扱い。各機構に「契約変更 / 実装要件」の区分を付け (§4.30)、`cpp-migration.md` 改訂案を §4.27 に置く |
+| 7 | 外向きの DERP 型 relay は C++ 版でだけ作る。それまで拠点と外部環境は Tailscale (`synergos-node` は tailnet IP にだけ bind) | SPEC-SY-relay-auth / SPEC-SY-relay-v2 は C++ 移行の契約。現行 Rust には何も足さない (`design/authority-amendment.md` §3) |
+| 8 | プロジェクト会員とノード名簿の正本は Cernere。synergos-control は Cernere 署名の会員証・名簿を配布・キャッシュ・検証するだけ | 会員証 (membership LCT)・node card・ProjectRoster・RosterStatus・OfflineLease は Cernere が署名する。control は会員を決めず、その発行鍵を持たない。enrollment の承認は Cernere (step-up)。失効は Cernere から SSF/CAEP で流れる (SPEC-CR-membership-issuer、SPEC-CR-node-roster。Actio `actio:2a7af0fa`、`actio:fd0e4de8`) |
+| 9 | Curare はデザイナー向けの版管理で、Synergos のハコ | 転送・同期の本体は Synergos 単体。Curare が関わるのは版・レビュー・承認が要る場面だけ。Curare はバイトの経路でも会員資格の権威でもない |
 
 ### 1.2 ゴール (測定可能な到達条件)
 
@@ -68,7 +72,7 @@
 | ref の権威・ref log・changeset の受理・ロックの権威・view・データセット・権利と用途・来歴・消去台帳・証明の発行・S3 互換 gateway | Curare が所有する (2026-09-08 境界を維持) | Curare リポジトリの `spec/plan/redesign-ai-game-dev.md` |
 | peer wire・TXF2・複製 stream・内容 ID・manifest v2・CDC とチャンク保管・IPC v2 の framing | 転送効率テーマの契約 | `spec/plan/redesign-transfer-efficiency.md` |
 | 署名封筒・LCT・HLO2・会員資格・パス方針・置換旧バイト・保持ロック・sandbox・取込判定の展開ゲート・Cargo workspace の分割 | セキュリティテーマの契約 | `spec/plan/redesign-security.md` |
-| Cernere 側の主体・step-up・失効通知 | オーナー決定 4 | Cernere オーナー (Actio タスク起票済み) |
+| Cernere 側の主体・step-up・失効通知、Synergos のプロジェクト会員とノード名簿の発行・署名 (SPEC-CR-membership-issuer、SPEC-CR-node-roster: membership LCT・node card・ProjectRoster・RosterStatus・OfflineLease・claim code による enrollment の承認) | オーナー決定 4・8。Synergos は Cernere 署名の会員証と名簿を検証するだけで、会員・所有・到達性を決めない | Cernere オーナー (Actio タスク起票済み。会員と名簿は `actio:2a7af0fa`、`actio:fd0e4de8`) |
 | DCC / エンジンのアダプタ本体の置き場所 | repo を新設するか未決 | neco (Q-A4) |
 | 現行 Rust 実行時への機能追加 | オーナー決定 6 | neco |
 
@@ -154,11 +158,11 @@
 | AGD-OP-07 | 設計ギャップ | export は `dataDir()` だけを束ね (`scripts/site/export-data.mjs:10`)、`SYNERGOS_CUSTODY_ROOT` の移設を無視 (`scripts/site/run-control.mjs:16`)。停止の前提を強制しない (`docs/site-operations.md:19,24`)。既定のデータは checkout 内 (`.gitignore:26`) | 成功を報告しながら資産バイトを落とす。ワークステーションと履歴ノードは export 自体が無い | 高 / P0 | M20 (完全性の照合) + SECURITY-M28 (bundle v2) |
 | AGD-OP-08 | 設計ギャップ | 永続形式に版付きの移行経路が無い。`RegistrySnapshot` (`synergos-control/src/store/mod.rs:66-72`)、state (`synergos-core/src/version_state.rs:52`)、manifest (`synergos-core/src/manifest.rs:138`) | 長期運用のデータに新しい形式を足せない | 中 / P1 | SPEC-SY-format-skew + SPEC-SY-legacy-import |
 | AGD-OP-09 | 設計ギャップ | control の組織は slug とメールの別台帳 (`synergos-control/src/store/mod.rs:9-17`)。全組織が 1 つの保管ノードと鍵空間を共有 | ホスト型の提供が共有ディスクになり、外部スタジオが契約上受け入れない | 高 / P0 | M27: Curare の SPEC-CU-tenant-v1 を control と custody が消費 |
-| AGD-OP-10 | 設計ギャップ | Synergos 側に Cernere の ID が全く無い。参加は bearer の招待 (`docs/two-node-operations.md:20`) | 外注先の ID を連携・範囲限定・中央失効できない | 中 / P1 | Curare M16 + SECURITY-M17。Synergos は会員資格を SPEC-SY-membership-token で受ける |
+| AGD-OP-10 | 設計ギャップ | Synergos 側に Cernere の ID が全く無い。参加は bearer の招待 (`docs/two-node-operations.md:20`) | 外注先の ID を連携・範囲限定・中央失効できない | 中 / P1 | Curare M16 + SECURITY-M17。Synergos は Cernere が署名した会員資格 (SPEC-SY-membership-token、SPEC-CR-membership-issuer) を受けて検証するだけ |
 | AGD-OP-11 | 未実装機能 | metrics / トレースが無い。ログは tracing の stdout だけ (`synergos-core/src/main.rs:27-47`)。heartbeat は ID と版だけ (`synergos-core/src/control_heartbeat.rs:103-107`)。GUI の帯域表示は計測されていない (`synergos-core/src/ipc_server.rs:1448`) | 詰まった履歴ノード・満杯のディスク・遅い拠点回線が crunch まで見つからない | 中 / P1 | M28 の Synergos 側: changeset ID と W3C trace context を daemon まで通す |
 | AGD-OP-12 | 設計ギャップ | catalog は `autostart: false` / `restart_policy: "no"` (`excubitor.catalog.yaml:17-18`)。control の health は版を返さない (`synergos-control/src/api/mod.rs:100-105`) | 自己回復せず、走っている版が分からない | 中 / P1 | M28 + SECURITY-M32 |
 | AGD-OP-13 | 設計ギャップ | 既存ソケットを無条件に削除して bind (`synergos-core/src/ipc_server.rs:85-88`)。`projects.json` は非原子的に書く (`synergos-core/src/project.rs:327-331`)。読込失敗を `if let Ok` で握りつぶす (`synergos-core/src/daemon.rs:163`)。root は絶対パスで保存 (`synergos-core/src/project.rs:313-319`) | 2 つ目の daemon がソケットを奪う。状態を失い、招待し直して数十〜数百 GB を再取得する | 中 / P1 | M25: 単一インスタンス・原子的保存・前世代の保持 |
-| AGD-OP-14 | 設計ギャップ | 履歴ノードは catalog に無い (`excubitor.catalog.yaml:5-8`)。heartbeat に役割が無い (`synergos-control/src/api/heartbeat.rs:17-25`)。保持は既定で無制限 (`synergos-net/src/config.rs:288-299`)。回転タイマーは manifest の版だけを keep に渡す (`synergos-core/src/daemon.rs:677-705`)。タグは複製されない | 版の倉庫の存在・範囲・複製数を観測も保証もできない | 中 / P1 | M20 (archive 役の宣言) + M04 (keep-set) + M08 (クラス別保持) |
+| AGD-OP-14 | 設計ギャップ | 履歴ノードは catalog に無い (`excubitor.catalog.yaml:5-8`)。heartbeat に役割が無い (`synergos-control/src/api/heartbeat.rs:17-25`)。保持は既定で無制限 (`synergos-net/src/config.rs:288-299`)。回転タイマーは manifest の版だけを keep に渡す (`synergos-core/src/daemon.rs:677-705`)。タグは複製されない | 版の倉庫の存在・範囲・複製数を観測も保証もできない | 中 / P1 | M20 (Cernere 署名 card の archive 役) + M04 (keep-set) + M08 (クラス別保持) |
 | AGD-OP-15 | 未実装機能 | GUI が 3 つ (egui、Tauri、Dioxus 管理画面は workspace 外: `Cargo.toml:15-19`) | 運用者向けの一貫した画面が無い | 中 / P2 | M26 の Synergos 半分: egui は SECURITY-M30 の `desktop/` workspace で accesskit を外し、C++ desktop-gui の受入で撤去。運用画面は Curare 側に 1 つ |
 | AGD-OP-16 | 設計ギャップ | 配備が LUDIARS 内部基盤に固定 (`docs/site-operations.md:30` の共通 Cloudflare entry) | 無償の on-prem 版と有償のホスト版の区別が作れない | 中 / P2 | M27: 配備プロファイル (hosted / on-prem appliance / hybrid) |
 
@@ -232,6 +236,8 @@
 | **C. オブジェクトモデル (SPEC-SY-object-model) は Curare の ref 権威を必須にする (ホスト型か、M27 の on-prem appliance)。format 1 は旧形式の読取・変換経路として残し、A5 まで Rust daemon だけが書く** | 3 | 3 | 5 | 5 |
 
 **C を採用**。Curare の無い LAN だけのスタジオは新機能を失うので、neco の判断事項 (Q-A2)。
+
+**オーナー決定 9 との衝突 → 決定 10 (2026-10-23 neco) で解消。** 採用 C は Curare の無いプロジェクトが C++ で同期できなくなる。決定 9 は「転送・同期の本体は Synergos 単体」とするので、Curare の ref 権威は **Curare 紐付けプロジェクトの版・レビュー・承認** に限り、P2P だけのプロジェクトは Cernere の会員 (SPEC-CR-membership-issuer) が署名する publish 役割の Head (SPEC-SY-replication-stream の member-signed head、X-AG3 の代替) で同期する案とする (決定 10、決定済み)。オブジェクトモデル (SPEC-SY-object-model) と changeset は両方で共通で、`acceptor_sig` は Curare 紐付けのときだけ要る。
 
 ### 3.3 D-A04 競合モデル (DM-05, GW-01, GW-02, GW-14)
 
@@ -469,11 +475,12 @@ egui にしかない画面 (競合・設定・転送要求・取消) の扱い�
 - 区分: [契約変更] (Curare 正本の SPEC-CU-project-descriptor を消費。Synergos 側は `project_ref` の導出を変える)。対象発見: AGD-DM-14, AGD-OP-06 (識別子の部分)。フェーズ A3。
 - 目的: 自由文字列のプロジェクト ID (`synergos-core/src/project.rs:683-689`) を gossip topic・DHT キー・保管庫名に使うのをやめる。security が委ねた `project_ref` と Curare space の対応 (security Q8、transfer Q10、X-AG5) を確定する。
 - 仕組み: Curare 紐付けのプロジェクトは、Curare が署名した記述子からだけ開く。`project_ref = blake3("curare" ‖ org_uuid ‖ scope_uuid)` で、gossip topic と DHT キーはここから導く。P2P だけの旧プロジェクトは security の `blake3(org ‖ host_pubkey ‖ local_id)` のまま。自由文字列は表示専用。既存 ID の対応付けは運用者が 1 回だけ行う (SPEC-SY-legacy-import の `--map`)。ノード ID はセットアップ時に作り、catalog の env 既定値に置かない (Synergos `excubitor.catalog.yaml:30` の `SYNERGOS_CUSTODY_NODE_ID` と、Curare `excubitor.catalog.yaml:33` の `SYNERGOS_STORAGE_NODE_ID` の固定 UUID を廃止。配置のデータモデルは転送の SPEC-CU-storage-placement と M27)。
+- Cernere への登録 (オーナー決定 8): どの `project_ref` も、会員が 1 人でもできる前に Cernere の `synergos_projects` に登録する (SPEC-CR-membership-issuer)。Curare 紐付けのプロジェクトは、Curare が scope 作成時に作成者本人の権限で `project_ref` を Cernere へ登録する (改訂後の SPEC-CU-membership-export)。P2P だけのプロジェクトは所有者が Cernere に登録する。会員と役割 (read / publish / history) は Cernere が決め、記述子・Curare・synergos-control は会員を決めない。Synergos は記述子の `project_ref` と、Cernere 署名の membership LCT・ProjectRoster の `project_ref` が一致することだけを確かめる。
 - 記述子の `path_policy` (unicode・大小文字・長さ・予約名) は §4.7 のパス正規化に、`ref_log_verify_keys` と `verify_keys` は §4.4・§4.9・§4.12・§4.14 の署名検証に、`policy_blob` は §4.8 に渡す。
 - 検証鍵の出所 (X-AG13、Curare Q-CU-2 と同じ問い): ctx `ref-log` は記述子の `ref_log_verify_keys[{kid, pub}]`。ctx `lock-announce`・`attestation`・`purge-list` は記述子の追加欄 `verify_keys{<ctx>: [{kid, pub, not_after?}]}` (Curare 文書 §4.6 の提案と同じ形)。purge list は org 全体で 1 つなので、その鍵は org の 1 鍵 (Vault Transit `curare-purge-list`) で、権威は SPEC-CU-tenant-v1 の `verify_keys.purge-list`。Curare は同じ公開鍵を org の全プロジェクトの記述子に写す。記述子を持たないノード (custody・control 専用) は SPEC-CU-tenant-v1 の取得 (M27) で鍵を得る。
 - 鍵の切替: 各 ctx は現行 kid と直前の kid を同時に受け、直前の kid は `not_after` まで有効。未知の kid を見たら記述子を 1 回だけ取り直し、それでも無ければ拒否する。
-- 不変条件: 記述子の署名 (ctx `project-descriptor`) が検証できないプロジェクトは開かない。
-- 失敗時: `descriptor.bad_signature` / `descriptor.unknown_org` で open を拒否。未知の kid は `sig.unknown_kid{ctx, kid}`。
+- 不変条件: 記述子の署名 (ctx `project-descriptor`) が検証できないプロジェクトは開かない。Cernere に登録されていない `project_ref` には membership LCT が出ないので、そのプロジェクトのストリームは開けない。
+- 失敗時: `descriptor.bad_signature` / `descriptor.unknown_org` で open を拒否。未知の kid は `sig.unknown_kid{ctx, kid}`。Cernere 署名の会員証にその `project_ref` が無いときは security の `RESET 0x5303 forbidden` に従う。
 - 変更対象: `synergos-core/src/project.rs` 相当の C++ (`synergos-core/native/`)、gossip topic の導出 (`synergos-net` の C++ 移植先)。
 - 担保手段: ランタイム、ローカル検証ゲート (同名の 2 プロジェクトが別 topic になる試験 S14、鍵切替の試験 S17)。
 
@@ -644,7 +651,7 @@ egui にしかない画面 (競合・設定・転送要求・取消) の扱い�
 
 ### 4.13 AIGAME-M20 複製の勘定、履歴の役割、バックアップの完全性
 
-- 区分: [契約変更] (SPEC-SY-replica-accounting、W) + [運用] (役割の宣言、export の照合)。対象発見: AGD-AI-18, AGD-OP-07, AGD-OP-14。フェーズ A3。
+- 区分: [契約変更] (SPEC-SY-replica-accounting、W) + [運用] (archive 役の Cernere card への登録、export の照合)。対象発見: AGD-AI-18, AGD-OP-07, AGD-OP-14。フェーズ A3。
 - 目的: 相互同期しない履歴ノード (`docs/versioning-design.md:104-106`)、複製数を見ない GC (`synergos-core/src/history/gc.rs:89-96`)、常に 1 か所の `locations` (`synergos-custody/src/handlers.rs:124`)、資産バイトを落としうる export (`scripts/site/export-data.mjs:10`、`scripts/site/run-control.mjs:16`) を直す。
 - 契約 SPEC-SY-replica-accounting (正本: 本書):
 
@@ -652,7 +659,7 @@ egui にしかない画面 (競合・設定・転送要求・取消) の扱い�
 
 - 仕組み:
   - 証拠: 新しいメッセージ (`HaveVersion`) は作らず、security の RetentionAck と custody 受領証 v2 の `locations[]` を使う。
-  - 役割: archive 役は SPEC-SY-node-roles (転送) で control に宣言し、`{archive_lag, free_bytes}` を報告する (X-AG10)。heartbeat (`synergos-control/src/api/heartbeat.rs:17-25`) に役割が無い現状を置き換える。X-AG10 が受理されない場合は、役割と `{archive_lag, free_bytes}` を heartbeat の拡張だけで報告する (§4.22 M28、§7 Q-A16)。複製の証拠は RetentionAck と受領証なので、役割報告の経路が変わっても勘定は変わらない。
+  - 役割: archive 役は Cernere 署名の node card の `topo.roles` (転送の SPEC-SY-node-roles) に入り、enrollment か card の再発行で Cernere が承認する (SPEC-CR-node-roster。役割の変更は step-up)。control は card を配布するだけで、役割を決めない。`{archive_lag, free_bytes}` は測定値なので card に入れず、node 署名の heartbeat で control に報告する (X-AG10)。heartbeat (`synergos-control/src/api/heartbeat.rs:17-25`) に役割が無い現状を置き換える。X-AG10 が受理されない場合も、役割は card、`{archive_lag, free_bytes}` は heartbeat の拡張で報告する (§4.22 M28、§7 Q-A16)。heartbeat は名簿を変えない。複製の証拠は RetentionAck と受領証なので、役割報告の経路が変わっても勘定は変わらない。
   - scrub: archive 役は既定 30 日周期で BLAKE3 / Bao を再検証し、失敗した複製の ack を取り下げる。
   - バックアップ: サイト export は custody の実際の root (`SYNERGOS_CUSTODY_ROOT` を含む) を束ね、Curare の受領台帳と照合する。確定済み blob の欠落は失敗として報告する (成功にしない)。報告の形式は Curare 文書の `blob_availability` (C5 と共有)。bundle 形式は SECURITY-M28 (SPEC-CU-site-bundle-v2)。
 - 不変条件: 保護 ref から到達可能なオブジェクトは、有効な証拠が `min_copies` 未満のまま消さない (G-A15)。
@@ -674,7 +681,7 @@ egui にしかない画面 (競合・設定・転送要求・取消) の扱い�
 
 - 区分: [契約変更] (転送の SPEC-SY-node-roles への追補 X-AG10、SPEC-SY-object-get の利用)。対象発見: AGD-AI-08, AGD-AI-07。フェーズ A4。
 - 目的: 固定スナップショットを GPU クラスタが範囲読みで取れるようにする (AGD-AI-08)。Curare の S3 互換 gateway のバイトの供給元を Synergos の `edge` 役に置く。
-- 仕組み: Curare の S3 互換 gateway (SPEC-CU-snapshot-gateway) は、バイトを custody か Synergos の `edge` 役から Bao 検証済みの範囲として取る。edge は SPEC-SY-object-get (`GET /v2/objects/{blake3}` と `.bao?range=`) で配り、集合単位の LCT (`(project_ref, tree, purpose)` を名指す) を検査する (M17、§4.19)。edge は範囲を名指す capability (SPEC-SY-custody-capability-v2 の範囲 caveat) だけを受け、組織ごとの `maxObjectBytes` (SPEC-CU-tenant-v1 の org 設定。上限値そのものは転送効率の TG-06 と SPEC-SY-custody-transfer-v2 の `Upload-Limit` が持つ) を超えるオブジェクトを配らない。G-A10 の 60 秒失効は SPEC-SY-revocation-bundle。チャンク層に入れるかは §3.10 の方針 rule。5 GB の単発 PUT 上限・1800 秒の custody 上限 (`synergos-custody/src/handlers.rs:236`)・resume は転送効率文書の SPEC-SY-custody-transfer-v2 とチャンク層が解く。
+- 仕組み: Curare の S3 互換 gateway (SPEC-CU-snapshot-gateway) は、バイトを custody か Synergos の `edge` 役から Bao 検証済みの範囲として取る。edge は SPEC-SY-object-get (`GET /v2/objects/{blake3}` と `.bao?range=`) で配り、集合単位の LCT (`(project_ref, tree, purpose)` を名指す) を検査する (M17、§4.19)。edge は範囲を名指す capability (SPEC-SY-custody-capability-v2 の範囲 caveat) だけを受け、組織ごとの `maxObjectBytes` (SPEC-CU-tenant-v1 の org 設定。上限値そのものは転送効率の TG-06 と SPEC-SY-custody-transfer-v2 の `Upload-Limit` が持つ) を超えるオブジェクトを配らない。G-A10 の 60 秒失効は SPEC-SY-revocation-bundle。チャンク層に入れるかは §3.10 の方針 rule。5 GB の単発 PUT 上限・1800 秒の custody 上限 (`synergos-custody/src/handlers.rs:236`)・resume は転送効率文書の SPEC-SY-custody-transfer-v2 とチャンク層が解く。`edge` 役を持てるのは Cernere 署名の node card の `topo.roles` に `edge` があるノードだけで、役割の付与は Cernere が enrollment か card 再発行 (step-up) で承認する (SPEC-CR-node-roster)。control と Curare は edge ノードを選んで案内するが、役割を与えない。
 - 不変条件: edge は目的と tree を名指さない capability で学習用データを配らない。範囲を名指さない capability で範囲応答を返さない。`clean` でないエントリを配らない (§4.20)。
 - 失敗時: capability 不足は 403、範囲の検証失敗は配信を止めて `integrity.violation`、`maxObjectBytes` 超過は 413。
 - 変更対象: edge 役の C++ (`synergos-core/native/` の edge モード。転送効率文書の T4 と同時)、`synergos-custody/native/` (範囲 caveat の検査)。
@@ -739,8 +746,8 @@ egui にしかない画面 (競合・設定・転送要求・取消) の扱い�
 
 - 区分: [契約変更] (C++ の配信経路の規則。LCT の形式は security の SPEC-SY-lct-v1)。対象発見: AGD-AI-16。フェーズ A3 (履歴)、A4 (edge)。
 - 目的: 履歴ノードが接続中の任意の peer に任意の版を返す挙動 (`synergos-core/src/exchange/mod.rs:959-990`、`docs/versioning-design.md:101`) をやめ、ライセンス・同意で範囲が限られたデータセットを Curare の方針の外へ出さない。
-- 仕組み: 履歴と edge は、Curare が gated とした tree (SPEC-CU-rights-purpose。用途の判定は Curare) のエントリを、`(project_ref, tree, purpose)` を名指す LCT (security D-18 の集合単位 LCT) を示した要求にだけ配る。gated かどうかは署名済み RefUpdate の ref 種別 (`dataset_snapshot`) と記述子の方針から決まり、Synergos は用途を解釈しない。会員資格そのものは SECURITY-M03 (SPEC-SY-membership-token)。現行の「接続中の任意の peer に任意の版」は移植しない。
-- 不変条件: gated な tree のバイトは、その tree と用途を名指す有効な LCT 無しには 1 バイトも出ない。権利の変更による失効は SPEC-SY-revocation-bundle で 60 秒以内 (G-A10)。
+- 仕組み: 履歴と edge は、Curare が gated とした tree (SPEC-CU-rights-purpose。用途の判定は Curare) のエントリを、`(project_ref, tree, purpose)` を名指す LCT (security D-18 の集合単位 LCT) を示した要求にだけ配る。gated かどうかは署名済み RefUpdate の ref 種別 (`dataset_snapshot`) と記述子の方針から決まり、Synergos は用途を解釈しない。会員資格そのものは SECURITY-M03 (SPEC-SY-membership-token) で、block 0 を Cernere の membership kid が署名した LCT だけを受ける (SPEC-CR-membership-issuer)。synergos-control が作った・広げた・署名し直した会員証は拒否する。用途を名指す集合単位 LCT は会員資格の内側をさらに絞るだけで、会員資格の代わりにならない。現行の「接続中の任意の peer に任意の版」は移植しない。
+- 不変条件: gated な tree のバイトは、その tree と用途を名指す有効な LCT 無しには 1 バイトも出ない。権利の変更による失効は SPEC-SY-revocation-bundle で 60 秒以内 (G-A10)。会員の除去による失効は bundle に埋め込まれた Cernere 署名の `RosterStatus` で届く。
 - 失敗時: LCT 不足は 403 (`serve.capability_required{tree, purpose}`)、失効済みは 403 (`serve.revoked`)。
 - 変更対象: 履歴の配信経路 (`synergos-core/src/exchange/mod.rs` 相当の C++)、edge 役 (§4.15)。
 - 担保手段: ランタイム (LCT の検査)、ローカル検証ゲート (§6.2 S11)。
@@ -775,12 +782,12 @@ egui にしかない画面 (競合・設定・転送要求・取消) の扱い�
 
 - 区分: [実装要件] (トレース、heartbeat、health) + [運用] (catalog の自己回復)。対象発見: AGD-OP-11, AGD-OP-12, AGD-OP-08。フェーズ A3。
 - 目的: 詰まった履歴ノード・満杯のディスク・遅い拠点回線を crunch の前に見つけ、走っている版を外から分かるようにする。
-- 仕組み: OpenTelemetry のトレースに changeset ID と W3C trace context を載せ、Curare → custody → daemon まで通す。相関フィールドは security の SPEC-CU-security-event。heartbeat に役割・`archive_lag`・`free_bytes`・ref 複製の鮮度・`min_fleet_version` の算出に使う版を足す。health と readiness を分け、health は版を返す (SECURITY-M32)。catalog の `autostart` / `restart_policy` は Excubitor の catalog 側で直す (`excubitor.catalog.yaml:17-18`。値の判断は Curare Q-CU-5 と合わせる)。GUI の帯域表示は計測値だけを出す。AGD-OP-08 の版付き移行経路は SPEC-SY-format-skew と SPEC-SY-legacy-import が持つ。
+- 仕組み: OpenTelemetry のトレースに changeset ID と W3C trace context を載せ、Curare → custody → daemon まで通す。相関フィールドは security の SPEC-CU-security-event。heartbeat に `archive_lag`・`free_bytes`・ref 複製の鮮度・`min_fleet_version` の算出に使う版を足す (役割は Cernere 署名の node card から取り、heartbeat は生存と directory の材料を報告するだけで名簿を変えない。security の SPEC-SY-node-enrollment)。health と readiness を分け、health は版を返す (SECURITY-M32)。catalog の `autostart` / `restart_policy` は Excubitor の catalog 側で直す (`excubitor.catalog.yaml:17-18`。値の判断は Curare Q-CU-5 と合わせる)。GUI の帯域表示は計測値だけを出す。AGD-OP-08 の版付き移行経路は SPEC-SY-format-skew と SPEC-SY-legacy-import が持つ。
 - 不変条件: health が版を返さない build はリリースしない。計測していない値を GUI に出さない。
 - 失敗時: トレースの送出先が落ちても処理は止めない (送出は捨てる)。heartbeat が `free_bytes` の下限を下回ったら archive 役の受付を止めて警報。
 - 変更対象: `synergos-core/src/main.rs`・`control_heartbeat.rs` 相当の C++、`synergos-control/native/` (health と heartbeat の受付)、`excubitor.catalog.yaml`。
 - 担保手段: ローカル検証ゲート (health の版の試験: health の応答に build の版が含まれ heartbeat の版と一致すること)、ランタイム。
-- AGD-OP-10 は Synergos 側に Cernere ID を持ち込まない。会員資格は control が Cernere 所属と SPEC-CU-membership-export から作る (security D-19) ので、本書の追加作業は無い。AGD-AI-19 は Curare の M29 (ペルソナとフロー) が持つ。Synergos は §6 のシナリオを Augur に登録する。
+- AGD-OP-10 は Synergos 側に Cernere ID を持ち込まない。会員資格は Cernere が発行し、control は配布・検証だけを行う (security D-19、オーナー決定 8) ので、本書の追加作業は無い。AGD-AI-19 は Curare の M29 (ペルソナとフロー) が持つ。Synergos は §6 のシナリオを Augur に登録する。
 
 ### 4.23 参照する他正本の契約
 
@@ -789,6 +796,8 @@ Curare が正本の契約のうち、Synergos が消費するものは定義を 
 - SPEC-CU-project-descriptor:
 
   > A Curare-signed descriptor (ctx `project-descriptor`) `{scope_uuid, org_uuid, project_ref, display_name, path_policy{unicode: NFC, case, max_segment_utf16: 255, max_path_utf16: 240, forbid_windows_reserved}, policy_blob, ref_log_verify_keys[{kid, pub}], dedup_scope: project|org}`. Synergos opens a Curare-bound project only from a descriptor. The gossip topic and DHT key are derived from `project_ref`. **For Curare-bound projects, `project_ref = blake3("curare" ‖ org_uuid ‖ scope_uuid)`.** This fills the binding that security's SPEC-CU-membership-export delegates to this doc. Security's `blake3(org ‖ host_pubkey ‖ local_id)` stays for P2P-only legacy projects. Free-form names are display-only.
+
+  注 (オーナー決定 8): 引用中の SPEC-CU-membership-export は、改訂後は会員資格の権威ではなく取り次ぎだけの契約である。Synergos のプロジェクト会員の正本は Cernere (SPEC-CR-membership-issuer)。Curare は会員を輸出・発行・判定しない。Curare 紐付けの scope では、作成者の権限で `project_ref` を Cernere に登録し、Curare の UI での会員変更は操作者本人として Cernere へ取り次ぐだけ (SPEC-CU-membership-export の改訂後の定義)。記述子が固定するのは `project_ref` の導出だけで、会員は Cernere の ProjectRoster と membership LCT から取る。
 
 - SPEC-CU-ref-authority (Synergos は `ref_log` を複製し、CAS を commit 点として呼ぶ):
 
@@ -832,7 +841,8 @@ Curare が正本の契約のうち、Synergos が消費するものは定義を 
 |---|---|---|
 | SPEC-SY-signed-envelope | `spec/plan/redesign-security.md` | changeset・RefUpdate・LockAnnounce・purge list・記述子・証明の署名。ctx の追加は X-AG7 |
 | SPEC-SY-lct-v1, SPEC-SY-custody-capability-v2 | 同上 | edge の範囲配信 (範囲 caveat)、LFS の action、gated tree の配信 |
-| SPEC-SY-hlo2-session-binding, SPEC-SY-membership-token | 同上 | ref-sync・LockAnnounce・墓標を運ぶ peer セッション。`project_ref` による会員資格 |
+| SPEC-SY-hlo2-session-binding, SPEC-SY-membership-token | 同上 | ref-sync・LockAnnounce・墓標を運ぶ peer セッション。`project_ref` による会員資格は Cernere 署名の membership LCT (block 0 は Cernere の membership kid、ctx `membership`) だけで、synergos-control は配布・キャッシュ・検証だけを行い発行しない |
+| SPEC-SY-node-card, SPEC-SY-directory, SPEC-SY-node-enrollment | 同上 (directory は転送効率) | archive / edge 役 (§4.13・§4.15) は Cernere 署名の node card の `topo.roles`。control の directory は Cernere 署名の card と ProjectRoster を選んで配るだけで、名簿にないノードの card は捨てる |
 | SPEC-SY-ipc-capability | 同上 | commit-ipc (`project:<ref>:publish`) と local broker (`client_kind=plugin`) |
 | SPEC-SY-path-policy | 同上 | §4.7 の正規化。記述子の `path_policy` を重ねる |
 | SPEC-SY-pull-only-receive, SPEC-SY-displaced-preimage | 同上 | §4.6 の受信安全 |
@@ -859,23 +869,27 @@ Curare が正本の契約のうち、Synergos が消費するものは定義を 
 |---|---|---|---|
 | X-AG1 | SPEC-SY-manifest-v2 (転送) | manifest v2 はノードローカルの実体化索引で、コミットせず権威でなく SPEC-SY-object-model から再構築できる。エントリに `entry_id, class, policy_rule_id` を足す。git にコミットするのは別ファイルの SPEC-SY-workspace-pointer (`.synergos/head.json`)。「readers accept v1 and v2」は `manifest.json` に適用する | manifest v2 は転送の定義どおり git にコミットされる。ポインタは別ファイルなので番号は衝突しない。SPEC-SY-workspace-pointer は採らず、git の索引の衝突 (AGD-GW-14) は残る (Q-A12) |
 | X-AG3 | SPEC-SY-replication-stream (転送) | Curare 紐付けプロジェクトの HEAD フレームは Curare 署名の `RefUpdate` を運ぶ。メンバー署名の head は P2P だけの旧プロジェクトと未受理の shelf / draft にだけ有効 | 追いつき (G-A6) は SPEC-SY-ref-sync の poll だけで行う (Q-A15) |
-| X-AG5 | SPEC-CU-membership-export (セキュリティ) | Curare 紐付けプロジェクトの `project_ref` 導出は SPEC-CU-project-descriptor が固定する | — (security Q8 が本書に委ねている) |
+| X-AG5 | SPEC-CR-membership-issuer (Cernere への依頼。正本はセキュリティ §4.34) | Curare 紐付けプロジェクトの `project_ref` 導出は SPEC-CU-project-descriptor が固定し、その `project_ref` で Cernere に登録する | — (security Q8 が本書に委ねている) |
 | X-AG7 | SPEC-SY-signed-envelope の ctx 登録 (セキュリティ) | `changeset, ref-log, lock-announce, purge-list, project-descriptor, attestation` を追加。ref-log と attestation の鍵は受領証の鍵と共有しない専用の Vault Transit 鍵 | — |
 | X-AG9 | SPEC-SY-sandbox-profile (セキュリティ) | 利用者に merge driver、プレビュー / turntable / diff の描画、export / embedding のジョブを足す | — |
-| X-AG10 | SPEC-SY-node-roles (転送) | `edge` 役は gateway の範囲を配ってよい。`archive` 役は replica-accounting のために `{archive_lag, free_bytes}` を報告する | archive 役の報告は heartbeat の拡張だけで行う (§4.22)。edge の gateway 供給は A4 まで custody だけ (Q-A16) |
+| X-AG10 | SPEC-SY-node-roles (転送) | `edge` 役は gateway の範囲を配ってよい。`archive` 役は replica-accounting のために `{archive_lag, free_bytes}` を報告する。役割は Cernere 署名の card の `topo.roles` で、測定値は card に入れず node 署名の heartbeat で送る | `{archive_lag, free_bytes}` は heartbeat の拡張だけで報告する (§4.22。役割は card のまま)。edge の gateway 供給は A4 まで custody だけ (Q-A16) |
 | X-AG11 | TRANSFER-M30 (転送) | TRANSFER-M30 を T4 から T2 (= A3 の flag day) へ前倒しし、本書 SPEC-SY-worktree-apply の同期モードの意味の下に置く | A3〜T4 の間は取得が全量のまま。作業ツリーの正しさは変わらない (§4.6、Q-A17) |
 | X-AG12 | SPEC-CU-ref-authority の ref-log endpoint (Curare) と SPEC-CU-ingest-verdict (セキュリティ) | ref-log のページが `verdicts[{blob, scope, state, seq}]` を運ぶ。署名は ctx `ref-log` | archive・edge は `release` / `dataset_snapshot` から到達可能なエントリだけを扱う (§4.20、Q-A18) |
 | X-AG13 | SPEC-CU-project-descriptor と SPEC-CU-tenant-v1 (Curare) | 記述子に `verify_keys{<ctx>: [{kid, pub, not_after?}]}` (lock-announce・attestation・purge-list)。purge-list の鍵の権威は tenant record の `verify_keys.purge-list` | Curare Q-CU-2 と同じ問い。代替は無い (検証鍵の出所が無いと M09・M19・M21 が検証できない) |
 
 X-AG2 (SPEC-CU-changeset-v2)・X-AG4 (SPEC-CU-collection-version)・X-AG6 (SPEC-CU-capability-ledger) は Curare 側の契約、X-AG8 (SPEC-CR-service-principal) は Cernere への依頼 (security Q7、オーナー決定 4) への追補で、いずれも Curare 文書が扱う。
 
-### 4.24 Cernere への依存 (SPEC-CR-*、オーナー決定 4。Synergos / Curare には実装しない)
+### 4.24 Cernere への依存 (SPEC-CR-*、オーナー決定 4・8。Synergos / Curare には実装しない)
+
+会員と名簿の 2 契約 (SPEC-CR-membership-issuer、SPEC-CR-node-roster) は Actio `actio:2a7af0fa` と `actio:fd0e4de8` で依頼済み (どちらのタスクがどの契約を持つかの対応は security Q-SY-9)。定義の全文は security 文書 §4.34。
 
 | 契約 ID | 本書での使い方 | 暫定策 (Cernere が出すまで) |
 |---|---|---|
-| SPEC-CR-capability-signing-keys | edge の範囲配信・LFS action の capability の発行鍵の根 | Vault に pin した発行鍵 (security と同じ) |
-| SPEC-CR-ssf-caep-transmitter | 主体の失効、エージェント token の停止経路 | 60 秒の会員資格 poll (既知の穴として記録) |
-| SPEC-CR-step-up-assertion | ロックの強制解除、消去、権利の上書き | SPEC-CU-destructive-op による 2 名承認 |
+| SPEC-CR-membership-issuer (新設、オーナー決定 8) | プロジェクト会員と membership LCT・ProjectRoster・OfflineLease の唯一の発行元。§4.3 の `project_ref` 登録先、§4.19 の会員資格、X-AG5 の登録先 | なし (Synergos に暫定策を置かない)。security P3 の会員資格部分と P4 は Cernere を待つ。それまで拠点は現行 Rust 実行時を M34 + Tailscale で動かす。Synergos のどの部品も会員・名簿の鍵を持たない |
+| SPEC-CR-node-roster (新設、オーナー決定 8) | node card の唯一の署名者。archive / edge 役 (§4.13・§4.15) の承認、claim code による enrollment、RosterStatus による失効 | なし (同上) |
+| SPEC-CR-capability-signing-keys | edge の範囲配信・LFS action の capability の発行鍵の根。delegation-record の purpose から `membership` を外し、custody-delegation・受領証・失効 (deny-only) だけにする。`membership` と `roster` の kid は JWKS に別に載る | custody 系だけ Vault に pin した発行鍵 (security D-02 の C)。会員資格の Vault pin 暫定は撤回 |
+| SPEC-CR-ssf-caep-transmitter | 主体の失効、エージェント token の停止経路。イベント `project-membership-changed`・`node-revoked`・`roster-changed` を足す | 30 秒の revocation bundle poll (Cernere 署名の RosterStatus を含む。既知の穴として記録) |
+| SPEC-CR-step-up-assertion | ロックの強制解除、消去、権利の上書き。claim code の発行、役割・範囲の card 再発行、publish / history の付与、OfflineLease にも使う | SPEC-CU-destructive-op による 2 名承認 (会員・名簿の操作には暫定策なし) |
 | SPEC-CR-service-principal (追加提案、security Q7) | エージェント / サービス主体の changeset の `author_principal`。`kind=agent` と `operator_user_id`、タスクごとの発行を足す (X-AG8) | mTLS のサービス ID + Curare が発行するタスクごとのエージェント鍵 (≤ 1 時間) |
 | SPEC-CR-guest-identity (追加提案、任意) | 外注先の guest 主体 | Curare のマジックリンク主体 |
 
@@ -907,7 +921,7 @@ X-AG2 (SPEC-CU-changeset-v2)・X-AG4 (SPEC-CU-collection-version)・X-AG6 (SPEC-
 | mesh-core (`mesh-core.domain.json`) | M01 (`object-model`)、M02 (ポインタ、旧形式取込み)、M04 (`ref-replica`)、M05 (commit)、M06 (`worktree`)、M07、M08、M09 (lock cache)、M10、M13、M17 (履歴の配信制限)、M18 (履歴の門)、M21、M23 (LFS agent)、M25 | 説明文「メッシュの中核。ノードの状態と経路、リアルタイム同期の土台」に「版のオブジェクトモデルと作業ツリー反映」を足す。3 つのモジュール `object-model`・`ref-replica`・`worktree` を `synergos-core/native/` の下に置く (新ドメインは作らない) |
 | opaque-custody (`opaque-custody.domain.json`) | M19 (墓標、custody 側)、M20 (複製の勘定、受領証の `locations[]`)、M27 (tenant の消費) | 説明文の「版・提出・保持許可はCuへ委ねる」は維持 |
 | network-transport (`network-transport.domain.json`) | M05 / M23 の IPC コマンド、M22 と M17 の edge 配信 (転送効率の正本) | 本書の新契約は IPC コマンドの追加だけ |
-| control-plane (`control-plane.domain.json`) | M20 (役割の宣言)、M27 (テナントの消費、catalog の固定 ID の廃止)、M28 (heartbeat、health) | |
+| control-plane (`control-plane.domain.json`) | M20 (Cernere 署名 card の archive 役の配布と `{archive_lag, free_bytes}` の受付)、M27 (テナントの消費、catalog の固定 ID の廃止)、M28 (heartbeat、health) | |
 | desktop-gui (`desktop-gui.domain.json`) | M26 の Synergos 半分 (`desktop/` workspace の egui、C++ desktop-gui の要件) | 分割の作業は SECURITY-M30 |
 | admin-ui (`admin-ui.domain.json`) | M26 (拡張しない。運用画面は Curare 側) | |
 | ars-plugin (`ars-plugin.domain.json`) | M23 (local broker の client) | |
@@ -961,7 +975,7 @@ SPEC-SY-native-metadata (`native-contracts.md:15-24`) の共通の改訂文 (転
 |---|---|---|---|
 | synergos-net (QUIC、gossip、DHT、bitswap、transfer、identity、catalog、chain、content) | network-transport | M03 (topic の導出)、M06 の HEAD 受信 (転送の replication stream)、M09 の gossip、NR-AG-6 (鍵保管)。`RootCatalog`・`ChainBlock`・`ChunkDag` は移植しない (M01) | なし (`server/` workspace へ移るだけ、SECURITY-M30) |
 | synergos-core (daemon、exchange、manifest、history、hooks、checkout、conflict、ipc_server、project) | mesh-core | M01、M02 (ポインタ、取込み、NR-AG-1〜4)、M04、M05、M06、M07、M08、M09 (cache)、M10、M13、M17 (履歴の配信制限)、M18 (履歴の門)、M19 (履歴)、M20 (履歴)、M21、M22 (edge モード)、M23 (LFS agent)、M25 (NR-AG-5〜10)、M28 (トレース、health) | なし (`server/` へ移るだけ) |
-| synergos-control | control-plane | M20 (役割と `{archive_lag, free_bytes}`)、M27 (SPEC-CU-tenant-v1 の消費、slug 台帳の置換)、M28 (heartbeat、health に版) | なし (`server/` へ移るだけ) |
+| synergos-control | control-plane | M20 (`{archive_lag, free_bytes}` の受付と、Cernere 署名 card の archive 役の配布。役割は決めない)、M27 (SPEC-CU-tenant-v1 の消費、slug 台帳の置換)、M28 (heartbeat、health に版) | なし (`server/` へ移るだけ) |
 | synergos-custody | opaque-custody | M01 (`b3:` 鍵、保管名は envelope-encryption)、M18 (`clean` だけを archive)、M19 (墓標)、M20 (`locations[]` を証拠に)、M22 (範囲 caveat)、M27 (tenant の消費) | なし (`server/` へ移るだけ) |
 | synergos-relay | network-transport | なし (転送効率とセキュリティの正本) | なし (`server/` へ移るだけ) |
 | synergos-ipc | network-transport | M05 (`Commit` 系、`CommitRejected`)、M06 (`Status` の拡張)、M10 (`project configure`、`shelf apply`)、M23 (broker の endpoint)、M25 (`ConfigDescribe` / `ConfigApply`) | なし (`server/` へ移り、`desktop/` からは path 依存) |
@@ -996,7 +1010,7 @@ SPEC-SY-native-metadata (`native-contracts.md:15-24`) の共通の改訂文 (転
 |---|---|---|---|---|---|
 | **A0** (今すぐ。文書・vector・ゲート) | 本書・Curare 文書・`findings/ai-game-verified.json` を Revisor で取り込む。§5.3 の文書間整合を先に済ませる。`cpp-migration.md` / `native-contracts.md` / `docs/versioning-design.md` の改訂 (§4.27, §4.28) は Q-A1 の回答後に別の Revisor 変更で出す。object-model の vector (M01) と vector のフック。SECURITY-M30 の workspace 分割 (M26 の Synergos 半分。security P0 の変更) | `spec/`、`spec/vectors/object-model/`、Cargo workspace (security の変更) | オーナー決定 1, 2, 5, 6 | vector の自己試験 (TS と Rust リーダー。C++ は A3 で参加)、AT-SY-SEC-33 (§6 試験 21)、§5.3 の ID 照合 | 文書の revert。workspace 分割は 1 commit で戻す (SECURITY-M30) |
 | A1 / A2 (Curare の土台と面) | Curare 文書が持つ。Synergos 側の作業なし。Curare の ref log・CAS・記述子・方針・ロック・view・消去台帳 (dry-run)・取込判定の状態がここで入る | (Curare) | A0、security P2、transfer T1 | Curare 文書の検証 | Curare 文書のロールバック |
-| **A3** (Synergos C++ のオブジェクトモデル) | object model の codec、ref-sync (`verdicts` を含む)、commit-ipc、worktree-apply (同期モードの意味)、ポインタと view、shelf、lock-announce、replica-accounting、取込判定の門 (履歴)、墓標の消費、受信時の照合、配信制限 (履歴)、旧形式取込みツール、format skew、マシンモード・設定・単一インスタンス、local broker、LFS transfer agent | `synergos-core/native/` (mesh-core)、`synergos-ipc/native/`、`synergos-custody/native/`、`synergos-control/native/` | A0 の vector。`cpp-migration.md` 手順 3b は **vector が通るまで保留**。security P3 / P4 (HLO2、会員資格、IPC capability)。transfer T2 (内容 ID、ipc-v2、TXF2、replication stream。X-AG11 が受理されれば TRANSFER-M30 も)。Curare A1 / A2 | C++ vector (G-A19)、Excubitor 経由の複数ノード試験 (試験 2・3・4・7・17・18、S1〜S17)、3 OS のパスコーパス (G-A18)、format 1 取込みの parity、インストール試験 (G-A21) | C++ の受入ゲートを通るまで、組織ごとに Rust の format 1 daemon を配備可能なまま残す (`cpp-migration.md:71`)。peer の flag day は security P4・transfer T2 と同じ 1 回 |
+| **A3** (Synergos C++ のオブジェクトモデル) | object model の codec、ref-sync (`verdicts` を含む)、commit-ipc、worktree-apply (同期モードの意味)、ポインタと view、shelf、lock-announce、replica-accounting、取込判定の門 (履歴)、墓標の消費、受信時の照合、配信制限 (履歴)、旧形式取込みツール、format skew、マシンモード・設定・単一インスタンス、local broker、LFS transfer agent | `synergos-core/native/` (mesh-core)、`synergos-ipc/native/`、`synergos-custody/native/`、`synergos-control/native/` | A0 の vector。`cpp-migration.md` 手順 3b は **vector が通るまで保留**。security P3 / P4 (HLO2、会員資格、IPC capability。会員資格と enrollment の部分と P4 は Cernere の SPEC-CR-membership-issuer / SPEC-CR-node-roster を待つ)。transfer T2 (内容 ID、ipc-v2、TXF2、replication stream。X-AG11 が受理されれば TRANSFER-M30 も)。Curare A1 / A2 | C++ vector (G-A19)、Excubitor 経由の複数ノード試験 (試験 2・3・4・7・17・18、S1〜S17)、3 OS のパスコーパス (G-A18)、format 1 取込みの parity、インストール試験 (G-A21) | C++ の受入ゲートを通るまで、組織ごとに Rust の format 1 daemon を配備可能なまま残す (`cpp-migration.md:71`)。peer の flag day は security P4・transfer T2 と同じ 1 回 |
 | **A4** (ML 向けの読み出し面、Synergos 側) | edge 役の範囲配信 (gateway の供給元、配信制限と取込判定の門、範囲 caveat、`maxObjectBytes`)、方針 rule が `chunk=true` のパスのチャンク層の利用、archive 役の証明照合 | Sy の edge / archive 役 (C++) | A3、Curare A2 (gateway、証明)、transfer T4 / T5 (配置、チャンク保管、TRANSFER-M30)、security P5 (envelope 暗号) | Curare 文書の試験 19 の Synergos 部分、試験 17 の汚染試験、S11・S15 の edge 部分、G-A16 の転送ベンチゲート | `edge` 役を設定で無効化、`project.chunking = off` (転送効率) |
 | **A5** (エコシステムと退役) | Unity / Unreal の adapter、次に DCC パネル (broker 上)、UE Virtual Assets backend、運用画面の 1 本化 (Curare 側)、配布リング、C++ desktop-gui の受入後の egui 撤去、format 1 書込の退役 | 両 repo + adapter の repo (Q-A4)、`desktop/` workspace | A3、A4、SPEC-CR-guest-identity (任意)、C++ desktop-gui の受入ゲート | プラグインの smoke 試験、`min_fleet_version` が新形式に達したことを確認してから書込を退役、desktop-gui の受入試験 | adapter は独立。format 1 の読取は無期限に残す。egui は撤去前の commit に戻せば build できる |
 
@@ -1082,7 +1096,7 @@ Q-A1〜Q-A11 は Curare 文書と共有する番号。Q-A12 以降は本書が�
 | # | 問い | 判断者 | 本書が置いた既定 |
 |---|---|---|---|
 | Q-A1 | D-A01 の受理: Curare の ref log を履歴の権威にし、git の索引を任意のポインタにする。`docs/versioning-design.md:10,28,191,205-209,346` と `cpp-migration.md:39-48` (共通改訂表、§4.27) を変える。Synergos が tree を解釈すること (2026-09-08 の精緻化) を認める | neco | 変更提案として記載。`cpp-migration.md` の改訂は回答を待って別に出す。回答までネイティブの versioning / history の移植 (手順 3b) は保留 |
-| Q-A2 | D-A02: Curare の無い Synergos (LAN だけのスタジオ) を旧形式の猶予期間後に退役させるか、on-prem appliance のプロファイルだけで提供するか | neco | オブジェクトモデルは Curare 必須。format 1 は読取を無期限に残す |
+| Q-A2 | (決定 10 で解消) Curare の無い Synergos プロジェクトは退役させず、Cernere が publish 役割と認めた会員の署名した head で同期する。残る論点は旧形式の猶予期間の長さだけ | neco |
 | Q-A4 | DCC / エンジン adapter の置き場所: Synergos の `clients/` か、LUDIARS の新 repo (プロジェクトコードが要る) | neco | 未決。broker の契約だけを本書で固定する |
 | Q-A6 | 証明の透明性ログ: 自前の Rekor か、SPEC-CU-security-event 内の署名 checkpoint 連鎖か | セキュリティ担当 | Curare 文書で扱う。Synergos は tree の再計算照合だけを行う |
 | Q-A7 | compliance モードの保持ロック下の消去と、生きたオブジェクトとチャンクを共有するオブジェクトの消去: per-object DEK の crypto-shred か `retain_until` まで待つか。共有チャンクはどちらでも残す | セキュリティ担当 + neco | 共有チャンクは残す。compliance ロック下は crypto-shred |
@@ -1091,7 +1105,7 @@ Q-A1〜Q-A11 は Curare 文書と共有する番号。Q-A12 以降は本書が�
 | Q-A13 | `ref_sync.max_staleness_s` (300 秒) と `ref_sync.poll_interval_s` (60 秒) の既定値、および `min_copies` の既定 2 | neco / プロダクトオーナー | 提案値 |
 | Q-A14 | egui にしかない競合・設定・転送要求・取消の画面を、egui に残して C++ desktop-gui の要件にするか、今 Tauri へ移すか (§3.9 の比較) | プロダクトオーナー | egui に残し、C++ desktop-gui の要件に書く (A)。security Q3 で egui の利用者がいない、かつ Tauri が暫定面と確かめられたら B を再検討 |
 | Q-A15 | X-AG3 の受理: Curare 紐付けプロジェクトの HEAD フレームに Curare 署名の RefUpdate を載せるか | 転送効率文書の担当 / neco | 受理する前提。受理されない場合、追いつき (G-A6) は SPEC-SY-ref-sync の poll (60 秒) だけで行う |
-| Q-A16 | X-AG10 の受理: `edge` 役が gateway の範囲を配り、`archive` 役が `{archive_lag, free_bytes}` を node-roles で報告するか | 転送効率文書の担当 / neco | 受理する前提。受理されない場合、M20 の役割報告は heartbeat の拡張だけで行い、gateway の供給元は A4 まで custody だけ |
+| Q-A16 | X-AG10 の受理: `edge` 役が gateway の範囲を配り、`archive` 役が `{archive_lag, free_bytes}` を報告するか (役割そのものは Cernere 署名の node card の `topo.roles`、測定値は node 署名の heartbeat) | 転送効率文書の担当 / neco | 受理する前提。受理されない場合、M20 の `{archive_lag, free_bytes}` は heartbeat の拡張だけで報告し (役割は card のまま)、gateway の供給元は A4 まで custody だけ |
 | Q-A17 | X-AG11 の受理: TRANSFER-M30 を T4 から T2 (A3 の flag day) へ前倒しするか | 転送効率文書の担当 / neco | 前倒しを提案。受理されない場合、A3〜T4 の間は Manual / Selective でも取得は全量 (帯域の非効率だけ) |
 | Q-A18 | X-AG12 の受理: ref-log のページに取込判定 `verdicts[]` を載せるか | セキュリティ担当 + Curare 文書の担当 | 受理する前提。受理されない場合、archive・edge は `release` / `dataset_snapshot` から到達可能なエントリだけを扱う |
 | Q-CU-2 (Curare) | 記述子の `verify_keys` を入れるか (本書 X-AG13 と同じ問い。purge-list の鍵の権威を tenant record に置く案を本書が足す) | セキュリティ担当 | 入れる。purge-list は org の 1 鍵で、権威は SPEC-CU-tenant-v1 |

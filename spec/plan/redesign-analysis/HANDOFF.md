@@ -201,3 +201,12 @@
 - 残作業報告 (人間向け要約): https://claude.ai/code/artifact/6a009053-a2b9-4b11-b86c-569762171160
 - GitHub: LUDIARS/Synergos PR #71 (CI 復旧、main 取り込み済み)、#72 (解析、main 取り込み済み)、LUDIARS/Curare PR #12 (解析)
 - 組織ルール: AIFormat の RULE.md / HARNESS.md / FORMAT_SPEC.md / RULE_SRE.md / RULE_DATA_SCHEMA.md
+
+### 7.2 追加判断 (2026-10-23 夕、判断者 neco)
+
+| # | 決定 | 作業への反映 |
+|---|---|---|
+| 7 | **外向きのセキュアな中継経路 (DERP 型 relay、両端が outbound で 443 に接続) は C++ 版で作る** | SPEC-SY-relay-auth / SPEC-SY-relay-v2 は C++ 移行の契約として実装する。現行 Rust には入れない。それまで拠点⇔外部環境は Tailscale (synergos-node を tailnet IP にだけ bind) でつなぐ |
+| 8 | **名簿と会員は Cernere が担保する** | プロジェクト会員 (誰がどのプロジェクトで read/publish/history か) とノード名簿 (どのノードが誰のものか・どこにいるか) の正本は Cernere。synergos-control は Cernere が署名した会員証・名簿を配布・キャッシュ・検証するだけで、独自に会員を決めない。membership LCT の発行鍵と名簿の署名鍵は SPEC-CR-* 契約として Cernere に置く |
+| 9 | **Curare はデザイナー向けの版管理で Synergos のハコ** | 転送・同期の本体は Synergos 単体。Curare 経由は版・承認が要る場面だけ |
+| 10 | **Curare を使わないプロジェクトの正式な最新版は、Cernere が publish 役割と認めた会員の署名で決める** | D-A02 (AI・ゲーム開発 設計書) の再判断。Curare 紐付けプロジェクトは版・レビュー・承認を Curare の ref 権威が担い、P2P だけのプロジェクトは Cernere 会員 (SPEC-CR-membership-issuer) が署名した head (SPEC-SY-replication-stream の member-signed head) で同期する。オブジェクトモデルと changeset は共通で、`acceptor_sig` は Curare 紐付けのときだけ要る |

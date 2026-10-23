@@ -9,7 +9,7 @@
 ## 0. 結論 (先に)
 
 - **足りないもの**: Synergos は内容を 1 ファイルずつ、1 バイトにつき何度も読み、宣言されていないトポロジの上で運ぶ。同一性は manifest の CRC32 + size で、転送のたびに計算する BLAKE3 は捨てている (TRN-DD-05)。peer の wire は版なし・要求されない全体 push で、quinn 既定窓のため 100 ms RTT で 1 stream 約 100 Mbps が上限 (TRN-WP-01)。再開・範囲・送信元選択が無く、保持者 N で N 部が届く (TRN-WP-04, TRN-WP-19)。受信側のディスク I/O は実体の約 6 倍 (TRN-WP-07)。変更は 1 hop で止まり、中継のデータ経路も rendezvous も無い (TRN-TP-01, TRN-TP-03, TRN-TP-14)。custody は単発 PUT・Range なし・verify のたびに全再読込で、100 GB のチェックポイントはどの経路も通れない (TRN-DD-19)。
-- **作り直すもの**: (1) BLAKE3-256 を正準の内容同一性にし、Bao outboard で範囲検証する。読込はバイトごとに 1 回、書込も 1 回に揃える (reflink の無い NTFS では作業コピーの書込 1 回を足し、利用者が編集するファイルにハードリンクは張らない。M01, M02)。(2) 受信側主導・範囲指定・再開可能・複数送信元の pull (TXF2) と、署名 Head + HaveSet による状態ベースの複製に置き換える (M07, M09)。(3) control が署名 directory を配り、拠点 seed・DERP 型 relay・edge を 1 バイナリの役割として動かす (M10〜M13, M17)。(4) custody を再開可能 upload・Range GET・受領証 1 回生成に変える (M14)。(5) CDC は **独立モジュール `synergos-chunkstore`** として常時稼働の役割 (seed / archive / custody / edge) にだけ入れ、メンバーは chunker を持たずに range plan で恩恵を受ける (M27, M28)。
+- **作り直すもの**: (1) BLAKE3-256 を正準の内容同一性にし、Bao outboard で範囲検証する。読込はバイトごとに 1 回、書込も 1 回に揃える (reflink の無い NTFS では作業コピーの書込 1 回を足し、利用者が編集するファイルにハードリンクは張らない。M01, M02)。(2) 受信側主導・範囲指定・再開可能・複数送信元の pull (TXF2) と、署名 Head + HaveSet による状態ベースの複製に置き換える (M07, M09)。(3) control が Cernere 署名の node card と ProjectRoster を束ねた directory を配り (control は署名せず、会員もノードも決めない。オーナー決定 8)、拠点 seed・DERP 型 relay (C++ 版だけ。それまでは Tailscale、オーナー決定 7)・edge を 1 バイナリの役割として動かす (M10〜M13, M17)。(4) custody を再開可能 upload・Range GET・受領証 1 回生成に変える (M14)。(5) CDC は **独立モジュール `synergos-chunkstore`** として常時稼働の役割 (seed / archive / custody / edge) にだけ入れ、メンバーは chunker を持たずに range plan で恩恵を受ける (M27, M28)。
 - **着地点**: すべて `cpp-migration.md` の "Compatibility contracts" 改訂と `native-contracts.md` の新 `[id:]` 節として書く (§4.31, §4.32)。Rust には計測ハーネスと設定上の暫定運用だけを入れる (M31, M33)。
 - **順序**: T0 契約・ベースライン計測 → T1 Curare 側フロー (Curare 文書) → T2 C++ ネイティブ中核 (security P3/P4 と同じ組織単位の flag day。flag day 後も 30 日の巻き戻し期間を置く、§5.3) → T3 トポロジ → T4 配置と edge → T5 チャンク層。
 - **現状のまま運用した場合の最悪シナリオ**: 100 GB のチェックポイントは custody の 1800 秒上限・verify の 60 秒上限・S3 単発 PUT 5 GB のどれかで止まり、版にならない (TRN-DD-19, TRN-DD-10)。招待で作った星形では、アーティスト 1 人の 500 MB PSD 保存が他メンバーへ届かないか、N 部の全量で届く (TRN-TP-01, TRN-WP-19)。
@@ -30,6 +30,8 @@
 
 境界 (2026-09-08 決定、`spec/feature/opaque-custody.md:3-5`) は維持する。Curare が版・提出・許可・配置方針を持ち、Synergos は不透明な実体を運んで耐久受領証を出し、Cernere が本人・組織を持つ。本書の配置 (placement) も方針は Curare、実行は Synergos と分ける。
 
+2026-10-23 夕の決定 8・9 で、この境界を次のように締める。Cernere は本人・組織・所属に加えて、**Synergos のプロジェクト会員 (誰がどのプロジェクトで read / publish / history か) とノード名簿 (どのノードが誰のもので、どこに到達できるか) の正本**である。Synergos は転送と同期の本体で、Curare が無くても動く。Curare はデザイナー向けの版・レビュー・承認を持ち、それが要る場面でだけ capability を出してバイトの移動を認可する。Curare はバイトを中継せず、会員資格を輸出・発行・判定しない。
+
 ユーザー要求は、AI 開発・ゲーム開発の課題解決、セキュリティ、転送速度と効率の 3 条件を同時に満たすことである。本書は転送速度と効率を扱い、セキュリティ文書の上限 E1〜E6 (認可の追加往復 0、取得の Curare 呼出 ⌈N/1000⌉、暗号化の負荷 ≤0.1 %、暗号化の有無で重複排除率が同じ など) と失効 60 秒の目標 (security G1) を破らない。
 
 オーナー決定 (2026-10-23) のうち本書を拘束するもの:
@@ -41,6 +43,9 @@
 | 4 | Cernere 側の機能は SPEC-CR-* として依頼済み | 署名鍵・失効通知を依存として参照し、Synergos には実装しない (§4.27) |
 | 5 | quick-xml 0.30 は「依存自体が要るか」から判断 | 転送機能は `synergos-gui` 経路に依存しない事実を示し、security D-13 / SECURITY-M30 (P0 で `desktop/` workspace へ移し `accesskit` feature を外す) を支持 (§3.18) |
 | 6 | HLO2・custody 強化・認証強化は C++ 移行契約として再仕様化 | 各機構に「互換契約の変更 / ネイティブ実装要件 / 運用」の区分を付ける (§4.28。区別の定義は `spec/plan/redesign-analysis/HANDOFF.md` §6) |
+| 7 | 外向きの DERP 型 relay は C++ 版でだけ作る。それまで拠点と外部環境は Tailscale (`synergos-node` は tailnet IP にだけ bind) | SPEC-SY-relay-auth / SPEC-SY-relay-v2 は C++ 移行の契約。現行 Rust には何も足さない (`design/authority-amendment.md` §3) |
+| 8 | プロジェクト会員とノード名簿の正本は Cernere。synergos-control は Cernere 署名の会員証・名簿を配布・キャッシュ・検証するだけ | 会員証 (membership LCT)・node card・ProjectRoster・RosterStatus・OfflineLease は Cernere が署名する。control は会員を決めず、その発行鍵を持たない。enrollment の承認は Cernere (step-up)。失効は Cernere から SSF/CAEP で流れる (SPEC-CR-membership-issuer、SPEC-CR-node-roster。Actio `actio:2a7af0fa`、`actio:fd0e4de8`) |
+| 9 | Curare はデザイナー向けの版管理で、Synergos のハコ | 転送・同期の本体は Synergos 単体。Curare が関わるのは版・レビュー・承認が要る場面だけ。Curare はバイトの経路でも会員資格の権威でもない |
 
 ### 1.2 ゴール (測定可能な到達条件)
 
@@ -59,7 +64,7 @@
 | TG-07 | **500 MB PSD の再転送率** | 全体転送プロジェクト: 設計上 100 % だが**拠点あたり 1 回** (TG-08)。チャンク有効プロジェクト: レイヤの ≤25 % を触る保存 1 回で、seed↔custody とメンバーの range plan 取得の再送 ≤ **35 %** (暫定・推定。公開された PSD の比率が無い)。セキュリティ由来の増加は ≤1 ポイント (security E5) | 100 % | TRN-DD-01, TRN-WP-12 |
 | TG-08 | publisher の送出量 | 拠点 seed がある場合、メンバー数によらず拠点あたり ≤ **1.2×**。保持者 3 で各受信者の流入 ≤ **1.05×** | N 部 | TRN-TP-02, TRN-WP-19 |
 | TG-09 | 伝播 | publish が全オンラインメンバーに **60 秒 p95** 以内で見える (星形を含む全トポロジ)。フレーム 1 個損失で最悪 **90 秒**。再参加ノードは照合 1 回で追い付く | 1 hop で停止 | TRN-TP-01, TRN-WP-02, TRN-WP-18 |
-| TG-10 | 中継 | RelayOnly の組の **100 %** にデータ経路。中継 throughput ≥ relay ホストの回線速度の **80 %**。relay 停止から **10 秒**以内に別 relay へ移る | データ経路なし | TRN-TP-03, TRN-WP-16 |
+| TG-10 | 中継 | RelayOnly の組の **100 %** にデータ経路。中継 throughput ≥ relay ホストの回線速度の **80 %**。relay 停止から **10 秒**以内に別 relay へ移る (C++ relay でだけ測る。Rust には relay の経路を作らない、オーナー決定 7) | データ経路なし | TRN-TP-03, TRN-WP-16 |
 | TG-11 | 再接続の嵐 | seed 1 台が **500** クライアントを **10 秒**以内に受け入れる | accept が直列 | TRN-TP-15 |
 | TG-12 | daemon の準備完了 | 10 GB / 20 万ファイルのプロジェクトで ≤ **5 秒**。`status` は変更のないファイルを **0** 回読む | 数分〜1 時間 | TRN-WP-14, TRN-DD-21, TRN-E2-15 |
 | TG-13 | Synergos メタデータ | 受信バッチあたりの書込が O(変更行数)。10^5 ファイルの checkout のメタデータ書込 ≤ 最終 manifest サイズの **2×** | O(n²) | TRN-E2-13, TRN-WP-13, TRN-DD-16 |
@@ -74,6 +79,7 @@ Curare 側の制御経路のゴール CG-01〜CG-05 (保存の往復 ≤2+⌈N/1
 | 範囲 | 扱い | 判断者 |
 |---|---|---|
 | 資格・署名・失効・暗号化の方式そのもの | セキュリティ文書 (`spec/plan/redesign-security.md`) が正本。本書は参照のみ | セキュリティ担当 |
+| プロジェクト会員とノード名簿の決定・署名 (会員証 = membership LCT、node card、ProjectRoster、RosterStatus、OfflineLease、enrollment の承認) | Cernere が正本で唯一の発行者 (オーナー決定 8、SPEC-CR-membership-issuer、SPEC-CR-node-roster)。synergos-control と本書の機構は検証・配布・キャッシュだけを行い、会員・所有・到達性を決めず、その発行鍵を持たない (§4.27) | Cernere 担当 (依頼は Actio `actio:2a7af0fa`、`actio:fd0e4de8`) |
 | VFS による遅延展開 (ProjFS / NFS loopback / FUSE) | ai-game 文書 (`spec/plan/redesign-ai-game-dev.md`) が持つ。本書は SPEC-SY-object-get を土台として提供するだけ | neco |
 | Curare の API・テーブル・トランザクション | Curare 側: spec/plan/redesign-transfer-efficiency.md | neco |
 | 現行 Rust 実行時の機能追加・不具合修正 | オーナー決定 6。P0 級の 3 件 (TRN-WP-05, TRN-WP-18, 偽の `Ok(Relay)`) の扱いは Q4 | neco |
@@ -101,7 +107,7 @@ Curare 側の制御経路のゴール CG-01〜CG-05 (保存の往復 ≤2+⌈N/1
 | TRN-TP-09 | 設計ギャップ | 履歴ノードは既定無効 (`synergos-net/src/config.rs:288-292`)、広告も発見もされない (`synergos-core/src/daemon.rs:380-386`)、応答は push 1 本扱い (`exchange/mod.rs:959-971`) | 常時稼働の供給元が無く、publisher の電源断で取得不能 | 中 | M13 seed / archive、M10 |
 | TRN-TP-10 | 設計ギャップ | DHT の announce はローカル表だけ (`synergos-net/src/dht/node.rs:293-296`)、`find_peer` もローカルだけ (`dht/node.rs:121-123`)、presence は使わない (`synergos-core/src/presence/mod.rs:219-227`) | 発見に寄与しないのに、接続中の全ピアへ DHT1 ハンドラが露出 | 中 | M10 directory。DHT1 は移植しない |
 | TRN-TP-11 | 非効率 | mesh が graft されず全接続へフォールバック (`synergos-net/src/gossip/node.rs:171-173`、daemon 側の全接続フォールバックと (message, peer) ごとの Control stream は `synergos-core/src/daemon.rs:870-885`)。publish ごとに全ピアが catalog を取得 (`synergos-core/src/daemon.rs:1009-1027`、`synergos-core/src/catalog_sync.rs:175-178`) | gossip 量が N×M (mesh で N²×M)。大きなツリーの publish で制御トラフィックが膨らむ | 中 | M09 1 publish バッチ 1 Head、M10 プロジェクト単位のピア集合 |
-| TRN-TP-12 | 設計ギャップ | 再接続 URL はメモリだけ (`synergos-core/src/presence/mod.rs:132`)、projects に永続しない (`synergos-core/src/project.rs:231-239`)、再接続は 1 ピア 10 秒の逐次 (`synergos-core/src/peer_link.rs:24-26`) | 招待で参加したノードは daemon 再起動後に戻れない | 中 | M10 署名 card の永続キャッシュ、M09 接続時の照合 |
+| TRN-TP-12 | 設計ギャップ | 再接続 URL はメモリだけ (`synergos-core/src/presence/mod.rs:132`)、projects に永続しない (`synergos-core/src/project.rs:231-239`)、再接続は 1 ピア 10 秒の逐次 (`synergos-core/src/peer_link.rs:24-26`) | 招待で参加したノードは daemon 再起動後に戻れない | 中 | M10 Cernere 署名 card の永続キャッシュ、M09 接続時の照合 |
 | TRN-TP-13 | 未実装機能 | RTT はハンドシェイク時に固定 (`synergos-net/src/quic/mod.rs:274,455`)、帯域推定は書かれない (`quic/mod.rs:421-430`, `:504-506`) | 送信元選択と窓調整の入力が存在しない | 中 | M08 計測と送信元スコア |
 | TRN-TP-14 | 設計ギャップ | heartbeat 応答の本文を読まない (`synergos-core/src/control_heartbeat.rs:116-121`)。node 向けの directory が無い (`synergos-control/src/api/mod.rs:43-90`)。データ面は TOML と招待で構成 (`synergos-core/src/daemon.rs:445-448`) | control の知識がデータ面の構成に反映されない | 中 | M10 SPEC-SY-directory |
 | TRN-TP-15 | 非効率 | accept と Hello の 5 秒待ちが 1 本ずつ (`synergos-net/src/quic/mod.rs:445-465`, `synergos-net/src/quic/hello.rs:31`)。accept した接続は 1 本ずつ spawn に渡る (`synergos-core/src/daemon.rs:750-753`)。再接続は固定 15 秒・jitter なし (`synergos-core/src/peer_link.rs:24`、`RECONNECT_INTERVAL = Duration::from_secs(15)`) | ハブ再起動後、300 席の再接続が直列に並ぶ | 中 | M08 (security NR-1 と同じ改修) |
@@ -187,8 +193,8 @@ Curare だけに属する 14 件 (TRN-E2-01, -03, -04, -06〜-12, -17, TRN-TP-08
 | データセット、1000 万の小ファイル | 登録不能 (500 / 1000 の上限) | 1 GB の WebDataset 型 shard を版の単位にし、collection 版と shard 内の Bao 範囲読み | shard あたりの費用だけ | M19, M07, M21 |
 | チェックポイント 10〜100 GB | custody 1800 秒上限、verify の再ハッシュ 50〜500 秒に対し timeout 60 秒、S3 単発 PUT ≤5 GB、stream 約 100 Mbps | 再開可能 part ≥ max(10 MiB, size/10 000)、受領証 1 回、送信元 k≤4 の Bao 分割範囲、チャンク層で系列の重複排除 + BG4-LZ4 | 100 GB を ≤20 分・≥800 Mbps (推定)。チャンクプロジェクトの系列重複排除 25〜54 % (調査: ZipLLM 54.1 %) | M08, M14, M22, M27 |
 | 300 席の拠点が 2 GB のレベルを取得 | 1 origin から 300 × WAN か N 回 push | 拠点 seed へ WAN 1 回、その後 seed とピアから LAN で展開 | 拠点あたり WAN 2 GB | M09, M10, M13 |
-| CGNAT 越しの在宅アーティスト | 経路なし | hole punch、だめなら home relay。拠点 seed が 1 回だけ拾う | relay 経由 1 回 | M11, M12 |
-| 外部ベンダーやクラウド GPU エージェントが 50〜100 GB を取得 | 到達不能 (tailnet のみ) か userspace DERP | HQ 外の egress edge、fetch session、範囲指定で再開可能 | edge ごとに origin から 1 回の充填 | M16, M17, M21 |
+| CGNAT 越しの在宅アーティスト | 経路なし | hole punch、だめなら home relay。拠点 seed が 1 回だけ拾う。暫定 (C++ relay まで): Tailscale で到達させる。`synergos-node` の QUIC は tailnet IP にだけ bind し、`0.0.0.0` や mesh 外のアドレスに bind しない。外部環境 (Codex クラウドなど) は tag 付き・ephemeral の Tailscale ノードとして参加し、到達範囲は Tailscale ACL で決める (ACL の変更は拠点の運用判断で、`docs/site-operations.md` に記録する)。 | relay 経由 1 回 | M11, M12 |
+| 外部ベンダーやクラウド GPU エージェントが 50〜100 GB を取得 | 到達不能 (tailnet のみ) か userspace DERP | HQ 外の egress edge、fetch session、範囲指定で再開可能。暫定 (C++ relay まで): Tailscale で到達させる。`synergos-node` の QUIC は tailnet IP にだけ bind し、`0.0.0.0` や mesh 外のアドレスに bind しない。外部環境 (Codex クラウドなど) は tag 付き・ephemeral の Tailscale ノードとして参加し、到達範囲は Tailscale ACL で決める (ACL の変更は拠点の運用判断で、`docs/site-operations.md` に記録する)。 | edge ごとに origin から 1 回の充填 | M16, M17, M21 |
 
 メタデータの付随量: 100 GB の Bao outboard は約 400 MB、チャンク表は約 160 万 × 48 B で約 77 MB。500 MB の PSD は 64 KiB 目標で約 7 600 チャンク。BLAKE3 は 1 コアで数 GB/s、FastCDC は約 1.5 GB/s なので、NVMe 上の単一パスはディスクが律速する。
 
@@ -310,21 +316,23 @@ Curare だけに属する 14 件 (TRN-E2-01, -03, -04, -06〜-12, -17, TRN-TP-08
 | B. overlay だけ (Tailscale / Cloudflare Mesh をデータ面に) | 4 | 4 | 2 (折返し、展開なし) | 2 |
 | C. CDN 中心 (Cloudflare 経由の署名 URL) | 4 | 3 | 3 (本文サイズ上限、P2P と LAN なし) | 2 |
 | D. フレームワーク採用 (iroh / libp2p) | 2 | 3 | 4 | 2 (Rust に縛られ C++ 移植と衝突) |
-| **E. directory で協調する拠点 seed + 受信側主導の swarm + DERP 型 relay + 拠点 / egress edge** | 3 | 2 | 5 | 5 |
+| **E. directory (Cernere 署名の node card と ProjectRoster を control が配る) で協調する拠点 seed + 受信側主導の swarm + DERP 型 relay (C++ 版だけ) + 拠点 / egress edge** | 3 | 2 | 5 | 5 |
 
-**採用: E。** M09〜M17 がこれを構成する。
+**採用: E。** M09〜M17 がこれを構成する。どのノードがどのプロジェクトの会員で、どの役割と宣言到達性を持つかは Cernere が決めて署名し (オーナー決定 8)、control はそれを配るだけで構成を決めない。relay は C++ 版でだけ配備し、それまでの NAT 越えは Tailscale が担う (オーナー決定 7)。
 
 ### 3.8 D-T08 発見
 
 | 案 | AI 学習量 | 作業コスト | 解決度 | 主目的との一致度 |
 |---|---|---|---|---|
 | A. Kademlia を署名レコード付きで動かす | 2 | 2 | 3 | 2 (会員情報の露出、SEC-AZ-05) |
-| **B. control が配るプロジェクト単位の署名 directory (キャッシュ ≤24 時間) と同一拠点の mDNS フォールバック。C++ 移植では DHT1 を削除 (SPEC-SY-directory)** | 4 | 3 | 5 | 5 |
+| **B. control が配るプロジェクト単位の directory (Cernere 署名の ProjectRoster と node card、node 署名の Presence を束ねる。control は署名しない。キャッシュ ≤24 時間) と同一拠点の mDNS フォールバック。C++ 移植では DHT1 を削除 (SPEC-SY-directory)** | 4 | 3 | 5 | 5 |
 | C. overlay (Tailscale) を発見に使う | 5 | 4 | 2 (データ面が 1 つの VPN に結び付く) | 2 |
 
-**採用: B。** security Q4 (公開 DHT を持たない) と一致する。
+**採用: B。** security Q4 (公開 DHT を持たない) と一致する (security D-23)。発見は Cernere 署名の card を control が配る directory で行い、各要素は単独で検証できるので、control は選ぶ・並べる・省くことはできても、ノード・会員・endpoint を足せない (オーナー決定 8)。
 
 ### 3.9 D-T09 中継と NAT 越え
+
+- **着地 (オーナー決定 7、2026-10-23 夕)。** 外向きのセキュアな中継 (DERP 型 relay: 両端が 443 へ outbound で接続し、relay は end-to-end 暗号化された QUIC を中継するだけ) は C++ 版でだけ作る。SPEC-SY-relay-auth と SPEC-SY-relay-v2 は C++ 移行の契約で、現行 Rust には何も足さない (`synergos-relay` の Rust 実装は改修も配備もしない)。C++ relay が受入ゲートを通るまで、拠点と外部環境 (Codex クラウドなど) は Tailscale でつなぎ、`synergos-node` は tailnet IP にだけ bind する (Synergos `docs/site-operations.md`)。
 
 | 案 | AI 学習量 | 作業コスト | 解決度 | 主目的との一致度 |
 |---|---|---|---|---|
@@ -602,26 +610,26 @@ Curare だけに属する 14 件 (TRN-E2-01, -03, -04, -06〜-12, -17, TRN-TP-08
 - 変更対象: `synergos-net/native/` (SYNC stream)、`synergos-core/native/` (wanted-set)。置き換え対象: `synergos-net/src/gossip/` (FileWant / FileOffer の経路)、`synergos-core/src/catalog_sync.rs`、`synergos-core/src/exchange/mod.rs:1343-1408`、`synergos-net/src/content/bitswap.rs`。
 - 担保手段: ランタイム強制 + ローカル検証ゲート (星形伝播試験 §6.2 試験 6、HaveSet 符号化の相互運用試験 31)。
 
-### 4.10 TRANSFER-M10 ノードの役割と署名 directory、DHT の削除
+### 4.10 TRANSFER-M10 ノードの役割と directory (Cernere 署名の card と名簿)、DHT の削除
 
-- 区分: 互換契約の変更 (SPEC-SY-node-roles、SPEC-SY-directory。どちらも A)。対象発見: TRN-TP-09, TRN-TP-10, TRN-TP-12, TRN-TP-14, TRN-TP-17。フェーズ T3。
-- 目的: 役割・到達性・relay を control の署名 directory で配り、データ面の構成を control の知識で決める。daemon 再起動後も招待で参加したノードが戻れるようにする (TRN-TP-09, TRN-TP-12, TRN-TP-14, TRN-TP-17)。
+- 区分: 互換契約の変更 (SPEC-SY-node-roles、SPEC-SY-directory。どちらも A)。対象発見: TRN-TP-09, TRN-TP-10, TRN-TP-12, TRN-TP-14, TRN-TP-17。フェーズ T3 (SPEC-CR-membership-issuer と SPEC-CR-node-roster の稼働が前提、§4.27)。
+- 目的: Cernere が署名した役割・宣言到達性 (node card) と会員 (ProjectRoster)、ノードが署名した計測到達性 (Presence) を control が directory として配り、データ面の構成をその検証済みの要素で決める。どのノードが誰のもので、どのプロジェクトの会員かを control は決めない (オーナー決定 8)。daemon 再起動後も招待で参加したノードが戻れるようにする (TRN-TP-09, TRN-TP-12, TRN-TP-14, TRN-TP-17)。
 
-> **SPEC-SY-node-roles** (Sy daemon → Sy control, Sy daemons): The `topo` member inside the signed SPEC-SY-node-card payload: `{roles ⊆ {member, seed, archive, relay, edge, custody-transfer, chunk-store}, site_id, candidates[{type: host | srflx | mapped | relay, addr, prio, exp}], relays[{url, region}], capacity{egress_mbps, cache_bytes}, caps}`. Config `[node] modes = [...]`, `site_id`. Start-up validation rejects forbidden co-residence (custody-admin or control-admin with any Internet-facing mode), per SPEC-SY-custody-topology. Reachability (`candidates`) is measured, never guessed from a global IPv6 address, an answering UPnP gateway or a `cloudflared` binary on PATH.
+> **SPEC-SY-node-roles** (Cernere-signed card → Sy control, Sy daemons): The `topo` member inside the Cernere-signed SPEC-SY-node-card payload: `{roles ⊆ {member, seed, archive, relay, edge, custody-transfer, chunk-store}, site_id, relays[{url, region}], capacity{egress_mbps, cache_bytes}, caps}`, approved at enrollment or card re-issue (SPEC-CR-node-roster). Measured reachability `candidates[{type: host | srflx | mapped | relay, addr, prio, exp}]` is carried in the node-signed `Presence` of SPEC-SY-node-card, never in the card. Config `[node] modes = [...]`, `site_id`; a node whose configured modes are not a subset of its card's `roles` refuses to start. Start-up validation rejects forbidden co-residence (custody-admin or control-admin with any Internet-facing mode), per SPEC-SY-custody-topology. Reachability (`candidates`) is measured, never guessed from a global IPv6 address, an answering UPnP gateway or a `cloudflared` binary on PATH. The `relay` role is served only by the C++ relay (SPEC-SY-relay-v2).
 
-> **SPEC-SY-directory** (Sy control-node → Sy daemons, relays, edges): `GET /v1/nodes/self/directory?project=<ref>&etag=` authenticated by a membership LCT returns a signed `{project_ref, issued_at, exp (≤ 24 h), seeds[card], relays[{card, ticket, exp}], edges[card], members_sample[card ≤ 32, chosen by site and RTT], site_map{site_id: [cidr]}, revocation_seq}`. Refresh every 5 min; the signed heartbeat response carries `{directory_etag, revocation_seq, relay_ticket?}`. Membership is derived from the control registry (security D-19, SPEC-CU-membership-export). Nodes persist the signed cards next to `projects.json`, dial seeds and relays first (8 in parallel, exponential backoff with full jitter capped at 5 min, immediate retry on network change), and fall back to an mDNS beacon `{peer_id, card_hash}` on the same site. After `exp` a node may only keep already-authenticated sessions. DHT1 is not ported.
+> **SPEC-SY-directory** (Sy control-node → Sy daemons, relays, edges): `GET /v1/nodes/self/directory?project=<ref>&etag=` authenticated by a membership LCT returns `{project_ref, roster (the Cernere-signed ProjectRoster of SPEC-CR-membership-issuer), seeds[card], relays[card], edges[card], members_sample[card ≤ 32, chosen by site and RTT], presences[], site_map{site_id: [cidr]} (taken from the cards), revocation_seq, roster_epoch, exp}`, where every card is Cernere-signed (SPEC-SY-node-card) and every presence is node-signed. Control does not sign the directory: it selects, caches, orders and may omit entries, but it cannot add a node, a member or an endpoint, because each element verifies on its own; a node drops any card absent from the ProjectRoster's `nodes[]`. `exp` = the smallest `exp` of the roster and the listed cards, at most 24 h. Refresh every 5 min; the signed heartbeat response carries `{directory_etag, revocation_seq, roster_epoch}`. Membership is derived only from the Cernere ProjectRoster and membership LCTs (SPEC-CR-membership-issuer). Nodes persist the cards next to `projects.json`, dial seeds and relays first (8 in parallel, exponential backoff with full jitter capped at 5 min, immediate retry on network change), and fall back to an mDNS beacon `{peer_id, card_hash}` on the same site. After `exp` a node may only keep already-authenticated sessions. DHT1 is not ported.
 
-- 仕組み: control が rendezvous になる。heartbeat の応答を読み (TRN-TP-14)、directory は seed を先頭に並べる。gossip の fan-out はプロジェクトごとに上限 (mesh 次数 6、seed は常に mesh に入る)。
-- 不変条件: directory は署名付きで `exp` ≤24 時間。期限後は認証済みのセッションだけを保つ。会員情報はプロジェクトの会員にしか見えない。
-- 失敗時: control が落ちても、永続化した署名 card で seed と relay に再接続できる。同一拠点は mDNS で見つけ合う。
-- 変更対象: `synergos-control/native/` (新設、directory endpoint)、`synergos-core/native/` (card キャッシュ、再接続)。置き換え対象: `synergos-core/src/control_heartbeat.rs:116-121`、`synergos-core/src/presence/`、`synergos-core/src/peer_link.rs`、`synergos-net/src/dht/` (移植しない)、`synergos-net/src/promotion.rs`。
-- 担保手段: ランタイム強制 + ローカル検証ゲート (directory 期限切れ試験、再起動後の再接続試験)。
+- 仕組み: control が rendezvous になる。ただし control は Cernere 署名の card・ProjectRoster と node 署名の Presence を選び・キャッシュし・並べるだけで、directory に署名せず、ノード・会員・endpoint を足せない。heartbeat の応答を読み (TRN-TP-14)、directory は seed を先頭に並べる。enrollment と会員証の更新は heartbeat 経由で control が Cernere へそのまま中継する (security SPEC-SY-node-enrollment、SPEC-SY-membership-token)。役割・project scope・宣言 endpoint の変更は Cernere での card 再発行で、control では変えられない。gossip の fan-out はプロジェクトごとに上限 (mesh 次数 6、seed は常に mesh に入る)。
+- 不変条件: directory の各要素は Cernere (card、ProjectRoster) か node (Presence) の署名で単独に検証でき、`exp` は roster と card の最小値で ≤24 時間。ProjectRoster の `nodes[]` に無い card と、Cernere 署名でない card・roster は捨てる。control は会員・所有・到達性を決めず、会員証・名簿の発行鍵を持たない。期限後は認証済みのセッションだけを保つ。会員情報はプロジェクトの会員にしか見えない。
+- 失敗時: control が落ちても、永続化した Cernere 署名 card で seed と relay に再接続できる。同一拠点は mDNS で見つけ合う。Cernere が落ちた場合は、手元の card と roster の `exp` (≤24 時間) まで新規接続を続けられ、その後は認証済みのセッションだけを保つ (Cernere が署名した OfflineLease があれば、その拠点では security SPEC-SY-revocation-bundle の範囲で延びる)。
+- 変更対象: `synergos-control/native/` (新設、directory endpoint、Cernere への enrollment・会員証更新の中継、card・roster のキャッシュ。発行鍵は持たない)、`synergos-core/native/` (card・roster の検証とキャッシュ、Presence の署名、再接続)。置き換え対象: `synergos-core/src/control_heartbeat.rs:116-121`、`synergos-core/src/presence/`、`synergos-core/src/peer_link.rs`、`synergos-net/src/dht/` (移植しない)、`synergos-net/src/promotion.rs`。
+- 担保手段: ランタイム強制 + ローカル検証ゲート (directory 期限切れ試験と roster 外・非 Cernere 署名の card の破棄試験 §6.2 試験 15、再起動後の再接続試験)。
 
 ### 4.11 TRANSFER-M11 経路確立と NAT 越え
 
 - 区分: ネイティブ実装要件 (+ SPEC-SY-node-roles の `candidates` を通じた契約)。対象発見: TRN-TP-04, TRN-TP-05, TRN-WP-16。フェーズ T3。
 - 目的: 到達性を推測ではなく計測し、同一拠点の組は LAN で直結する。
-- 仕組み: 候補は QUIC の socket 上で集める。STUN の magic cookie (0x2112A442) で demux して binding 要求に答える。PCP / NAT-PMP / UPnP の対応付けを作って更新する。接続は 3 秒の予算内の happy-eyeballs: 同一拠点の LAN host 候補 → IPv6 → IPv4 → server-reflexive + `CALL_ME_MAYBE` の同時 open → relay。昇格はネットワーク変化時と 10 分ごとに再評価する。Cloudflare Tunnel は HTTP の制御と card の配布だけを運び、データは運ばない。overlay は任意の下層にする。
+- 仕組み: 候補は QUIC の socket 上で集める。STUN の magic cookie (0x2112A442) で demux して binding 要求に答える。PCP / NAT-PMP / UPnP の対応付けを作って更新する。接続は 3 秒の予算内の happy-eyeballs: 同一拠点の LAN host 候補 → IPv6 → IPv4 → server-reflexive + `CALL_ME_MAYBE` の同時 open → relay。昇格はネットワーク変化時と 10 分ごとに再評価する。Cloudflare Tunnel は HTTP の制御と card の配布だけを運び、データは運ばない。overlay は任意の下層にする。C++ relay までは Tailscale が唯一の NAT 越え経路で、`synergos-node` は tailnet IP にだけ bind する (オーナー決定 7)。計測した候補は node 署名の Presence で広告し、Cernere 署名の card には入れない (SPEC-SY-node-card)。
 - 不変条件: 候補には有効期限があり、計測されたものだけを広告する。
 - 失敗時: すべて失敗したら home relay (M12)。状態表示は実際の経路を示す (偽の成功を返さない)。
 - 変更対象: `synergos-net/native/` (候補収集、STUN demux、ポート対応付け)。置き換え対象: `synergos-net/src/promotion.rs:88-205`、`synergos-net/src/conduit/`、`synergos-net/src/tunnel/`。
@@ -629,12 +637,15 @@ Curare だけに属する 14 件 (TRN-E2-01, -03, -04, -06〜-12, -17, TRN-TP-08
 
 ### 4.12 TRANSFER-M12 relay v2
 
+- **着地 (オーナー決定 7、2026-10-23 夕)。** 外向きのセキュアな中継 (DERP 型 relay: 両端が 443 へ outbound で接続し、relay は end-to-end 暗号化された QUIC を中継するだけ) は C++ 版でだけ作る。SPEC-SY-relay-auth と SPEC-SY-relay-v2 は C++ 移行の契約で、現行 Rust には何も足さない (`synergos-relay` の Rust 実装は改修も配備もしない)。C++ relay が受入ゲートを通るまで、拠点と外部環境 (Codex クラウドなど) は Tailscale でつなぎ、`synergos-node` は tailnet IP にだけ bind する (Synergos `docs/site-operations.md`)。
 - 区分: 互換契約の変更 (SPEC-SY-relay-v2、W)。対象発見: TRN-TP-03, TRN-WP-16。フェーズ T3。
 - 目的: RelayOnly の組の 100 % にデータ経路を作り、偽の中継成功を無くす (TG-10。TRN-TP-03, TRN-WP-16)。
 
 > **SPEC-SY-relay-v2** (Sy relay ↔ Sy daemons): Transport framing for relayed sessions. Primary listener QUIC on UDP 443; fallback WSS on TCP 443 (HTTP/2 CONNECT where a proxy requires it). Frames are `{dst_peer_id[32], datagram}` within a room joined per SPEC-SY-relay-auth; no broadcast. The relay is content-blind: it forwards end-to-end QUIC ciphertext of SPEC-SY-hlo2-session-binding. The same socket answers STUN binding requests (magic cookie 0x2112A442) with the observed address, and signals `CALL_ME_MAYBE{candidates}` for simultaneous open. Under backpressure the relay drops datagrams (QUIC congestion control recovers); it never queues unboundedly. Per-client byte meter and idle timeout. The Rust WS room broadcaster is retired.
 
-- 仕組み: peer の home relay は directory の中で RTT 最小の relay (自拠点を優先)。参加の認証は security SPEC-SY-relay-auth (追補 X1 で UDP 443 の QUIC も対象にする)。
+本契約は C++ でだけ実装する (オーナー決定 7)。`native-contracts.md` の `[id:]` 節として移し、Rust 実行時には入れない。暫定の到達経路は Tailscale (tailnet IP への bind) で、relay の代替ではなく、C++ relay が無い間の唯一の経路である。
+
+- 仕組み: peer の home relay は directory の中で RTT 最小の relay (自拠点を優先)。relay の候補は Cernere 署名の card で `relay` 役割を持つノードだけで、control は relay を足せない。参加の認証は security SPEC-SY-relay-auth (追補 X1 で UDP 443 の QUIC も対象にする)。
 - 不変条件: relay は内容を見ない。放送しない。キューを無制限に溜めない。
 - 失敗時: relay が止まったら 10 秒以内に directory の次の relay へ移る (TG-10)。
 - 変更対象: `synergos-relay/native/` (新設)。置き換え対象: `synergos-relay/src/server.rs` (room 放送、`:80-87`)、`synergos-net/src/relay/`。
@@ -816,7 +827,8 @@ Curare だけに属する 14 件 (TRN-E2-01, -03, -04, -06〜-12, -17, TRN-TP-08
 - 仕組み: Rust に入れるのは計測ハーネスと設定だけ。SECURITY-M34 (設定だけの暫定補償) と同じ扱い。運用上の緩和を運用文書に記録する。
   - TRN-WP-05: 遅い回線越しの大きなファイルの restore を避ける。pin の期間は定数 `PINNED_FETCH_TTL_MS` (`synergos-core/src/exchange/mod.rs:26`、5 分) で、設定では変えられない。
   - TRN-WP-18: 止まった checkout を再試行する前に daemon を再起動して gossip キャッシュ (メモリ上) を消す。
-  - TRN-TP-05: overlay が許す範囲で bootstrap 一覧に LAN アドレスを優先して書く。
+  - TRN-TP-05: overlay は Tailscale。bootstrap 一覧は tailnet IP を書き、同一拠点では LAN アドレスを先に書く。
+  - 暫定 (C++ relay まで): Tailscale で到達させる。`synergos-node` の QUIC は tailnet IP にだけ bind し、`0.0.0.0` や mesh 外のアドレスに bind しない。外部環境 (Codex クラウドなど) は tag 付き・ephemeral の Tailscale ノードとして参加し、到達範囲は Tailscale ACL で決める (ACL の変更は拠点の運用判断で、`docs/site-operations.md` に記録する)。
   - WP-05・WP-18・偽の `Ok(Relay)` のコード修正は neco の回答 (Q4) を待つ。
 - 不変条件: Rust 実行時のソース (`synergos-*/src/`) を変えない。変えてよいのは試験専用の計測ハーネス (`synergos-core/tests/` の ignored テスト) と設定値だけ。
 - 失敗時: 緩和で防げない事象 (遅い回線での大きな restore の失敗、止まった checkout) は運用文書の手順で再試行し、発生を記録して Q4 の判断材料にする。Q4 で修正が許された場合も、その修正だけを別の Revisor 提出にする。
@@ -848,10 +860,11 @@ security 正本の ID は再定義しない (`spec/plan/redesign-security.md`)�
 | ID | 転送での使い方 |
 |---|---|
 | SPEC-SY-hlo2-session-binding | SPEC-SY-peer-wire・-txf2・-replication-stream が走る `synergos/2` セッション。組織ごとの flag day は 1 回 |
-| SPEC-SY-membership-token | 新しい stream 種別 (TXF2, SYNC, PLAN, RLY) を本文の前で通す (追補 X4) |
-| SPEC-SY-node-card | SPEC-SY-node-roles を `topo` として載せる (追補 X2) |
-| SPEC-SY-relay-auth | SPEC-SY-relay-v2 の参加認証 (追補 X1) |
-| SPEC-SY-revocation-bundle | directory と転送は `revocation_seq` に反応し、配信中の処理を ≤60 秒で中止 |
+| SPEC-SY-membership-token | 会員証 (Cernere 署名の membership LCT。control は発行も再署名もしない)。新しい stream 種別 (TXF2, SYNC, PLAN, RLY) を本文の前で通す (追補 X4) |
+| SPEC-SY-node-card | node card (Cernere 署名) に SPEC-SY-node-roles を `topo` として載せる (追補 X2)。計測した到達性 (`candidates`) は node 署名の `Presence` で運び、card には入れない |
+| SPEC-SY-node-enrollment | enrollment の承認は Cernere (Cernere 署名の card を返す)。control は本文をそのまま中継するだけ。heartbeat は directory の鮮度と会員証の更新要求を運び、名簿を変えない |
+| SPEC-SY-relay-auth | SPEC-SY-relay-v2 の参加認証 (追補 X1)。C++ でだけ実装する (オーナー決定 7) |
+| SPEC-SY-revocation-bundle | `roster_status` (Cernere 署名の RosterStatus) と control の deny-only 部分の 2 部構成。directory と転送は `revocation_seq` と `roster_epoch` に反応し、配信中の処理を ≤60 秒で中止 |
 | SPEC-SY-custody-capability-v2 | upload・object GET・fetch session のページを認可 (追補 X3) |
 | SPEC-SY-custody-receipt-v2 | SPEC-SY-custody-transfer-v2 が 1 回生成。`locations[]` と `durability` は複製で更新 |
 | SPEC-SY-custody-topology | D-T10 の mode 同居を制約 |
@@ -873,17 +886,23 @@ security 正本の ID は再定義しない (`spec/plan/redesign-security.md`)�
 | X4 | SPEC-SY-membership-token | TXFR, BSW1, GSP1, DHT, FileWant, history serve を列挙 | TXF2, SYNC, PLAN, RLY を追加。C++ 移植で削除される DHT, BSW1, FileWant を外す | 新しい stream 種別を本文の前で検査する |
 | X5 | SPEC-SY-chunk-access | 「Synergos (conditional) … 転送文書が独立チャンク保管を選んだ場合だけ存在」 | 無条件にする (D-T03 で案 B を採用) | — |
 
+X2 の card は 2026-10-23 夕の決定 8 で Cernere 署名 (SPEC-CR-node-roster) になり、計測した到達性 `candidates` は card から node 署名の `Presence` へ移った (`design/authority-amendment.md` §1.5、§1.6)。`topo` を card の署名 payload に 1 つだけ持つ点は変わらない。
+
 security 文書の §4.0.2 の X5 行は受入前の記述として「条件付き」を残している。同文書の §4.24 (SECURITY-M27) と native-contracts の対応表に「条件付き」の文言が残る版があれば外し、X5 を両文書で無条件にそろえるよう security 文書の担当へ依頼する。チャンク保管の API 側の不足 (ctx の capability、`content.served`) は Q19 で扱う。
 
 ### 4.27 Cernere への依存 (SPEC-CR-*、オーナー決定 4。Synergos には実装しない)
 
 オーナー決定 4 は依頼の経緯を記録することを求める (`spec/plan/redesign-analysis/HANDOFF.md` §7.1 の 4)。3 件はまとめて Cernere へ Actio タスクとして依頼済みである。Actio のタスク id は未確認 (HANDOFF §7.1 に番号の記録が無い)。依頼の決定日は 2026-10-23 で、起票日は未確認 (同じ理由)。本書の提出前に Actio でタスク id と起票日を引き、下表の「依頼の記録」列に書き入れる。
 
+2026-10-23 夕のオーナー決定 8 で、Cernere への依頼に SPEC-CR-membership-issuer と SPEC-CR-node-roster の 2 件が加わった (正本は security 文書 §4.34。依頼は Actio `actio:fd0e4de8` が運ぶ。鍵の公開・SSF/CAEP・step-up は `actio:2a7af0fa`)。本書はこの 2 件を定義せず、id と要約だけを持つ。両者に共通する規則: Cernere は `purpose: membership` と `purpose: roster` の専用 Ed25519 kid を JWKS に公開し (利用者 JWT の鍵とは分ける)、Synergos の golden vector の適合ケースを固定 commit で回し、変更ごとに SSF の `project-membership-changed`・`node-revoked`・`roster-changed` を出す。署名オブジェクトにメールアドレスを入れない。
+
 | ID | 状態 | 依頼の記録 (根拠の発見) | 転送での使い方 | 提供前の暫定 |
 |---|---|---|---|---|
-| SPEC-CR-capability-signing-keys | Actio タスクとして依頼済み | タスク id 未確認。根拠 SEC-AZ-17 (失効が伝播しない), SEC-CR-12 (受領証・capability の独自署名), SEC-BR-04 (全組織共通の静的 admin token) | custody・edge・seed が検証する capability の発行鍵の根 | Vault に固定した発行鍵 (Excubitor Vault) |
-| SPEC-CR-ssf-caep-transmitter | Actio タスクとして依頼済み | タスク id 未確認。根拠 SEC-AZ-17, SEC-BR-12 (失効の伝播と kill switch が無い) | 配信中の転送を ≤60 秒で止める失効入力 | 60 秒の会員資格ポーリング (既知の欠落として記録) |
-| SPEC-CR-step-up-assertion | Actio タスクとして依頼済み | タスク id 未確認。根拠 SEC-DR-17, SEC-BR-16 (破壊操作に歯止めが無い) | 転送は直接使わない。最後の耐久写しを退避する placement 変更で参照 | 2 人承認 (Curare 側文書 §4.1 の最後の `durable` 退避と同じ。Curare 側文書 §4.16 と一致) |
+| SPEC-CR-capability-signing-keys | Actio タスクとして依頼済み | タスク id 未確認。根拠 SEC-AZ-17 (失効が伝播しない), SEC-CR-12 (受領証・capability の独自署名), SEC-BR-04 (全組織共通の静的 admin token) | custody・edge・seed が検証する capability の発行鍵の根。委任記録の用途から `membership` を外し、custody-delegation・receipt・revocation (deny-only) だけを残す。`membership` と `roster` の kid も JWKS に載る | Vault に固定した発行鍵 (Excubitor Vault)。custody 用の鍵だけで、会員・名簿の鍵は Vault 固定にしない (security D-02 の縮小) |
+| SPEC-CR-ssf-caep-transmitter | Actio タスクとして依頼済み | タスク id 未確認。根拠 SEC-AZ-17, SEC-BR-12 (失効の伝播と kill switch が無い) | 配信中の転送を ≤60 秒で止める失効入力。`project-membership-changed`・`node-revoked`・`roster-changed` を加え、`roster-changed` で PEP と directory が再取得する | 60 秒の会員資格ポーリング (既知の欠落として記録) |
+| SPEC-CR-step-up-assertion | Actio タスクとして依頼済み | タスク id 未確認。根拠 SEC-DR-17, SEC-BR-16 (破壊操作に歯止めが無い) | 転送は直接使わない。最後の耐久写しを退避する placement 変更で参照。claim code の発行、役割・project scope の card 再発行、publish / history の付与、OfflineLease でも要る (Cernere 側で使う) | 2 人承認 (Curare 側文書 §4.1 の最後の `durable` 退避と同じ。Curare 側文書 §4.16 と一致) |
+| SPEC-CR-membership-issuer | Actio タスクとして依頼済み (オーナー決定 8) | `actio:fd0e4de8` (SPEC-CR-membership-issuer と SPEC-CR-node-roster。鍵の公開・SSF/CAEP・step-up は `actio:2a7af0fa`)。決定 8: プロジェクト会員の正本は Cernere | Cernere 署名の会員証 (membership LCT) と ProjectRoster。directory の `roster` と、TXF2・SYNC・PLAN・RLY の本文前の検査の根拠。OfflineLease (ctx `project-roster`) で拠点の切断中も許可を延ばす | なし (Synergos に暫定を置かない)。T3 と security P3 の会員・enrollment 部分・P4 は Cernere を待つ。それまで拠点は現行 Rust を SECURITY-M34 (本書 M33) の設定で Tailscale 越しに運用する。どの Synergos 部品も会員・名簿の鍵を持たない |
+| SPEC-CR-node-roster | Actio タスクとして依頼済み (オーナー決定 8) | `actio:fd0e4de8` (SPEC-CR-membership-issuer と SPEC-CR-node-roster。鍵の公開・SSF/CAEP・step-up は `actio:2a7af0fa`)。決定 8: ノード名簿の正本は Cernere | Cernere 署名の node card (役割 `topo`・project scope・宣言 endpoint) と RosterStatus。seed・relay・edge の候補は card の役割からだけ選ぶ。失効は RosterStatus から 10 秒以内に見え、PEP の 30 秒 poll と合わせて G1 (≤60 秒) を満たす | なし (同上) |
 
 ### 4.28 契約の変更と実装の非効率の区別 (`spec/plan/redesign-analysis/HANDOFF.md` §6)
 
@@ -903,7 +922,10 @@ security 文書の §4.0.2 の X5 行は受入前の記述として「条件付�
 | ローカル object + `.bao` | 内容 | Sy ノード | `.synergos/objects` | 要 | 保管時の封筒暗号 (security)、ファイル権限 0600 |
 | `index.db`, `state.db` | 派生 / live | Sy daemon | `.synergos/` (コミットしない) | 完全性 | SQLite WAL、fsync、manifest + objects から再構築可能 |
 | 受信の `.part` + bitmap、custody upload の `.part` + hasher 状態 | 一時 | 受信者 / custody | ノードのディスク | 要 | capability に束縛、`Upload-Limit` の max-age 後に GC |
-| Head、directory、node card | 署名文書 | publisher / control | メモリ + ディスクキャッシュ | 完全性 | security の署名封筒、単調 `seq`、`exp` ≤24 時間 |
+| Head | 署名文書 | publisher | メモリ + ディスクキャッシュ | 完全性 | security の署名封筒、単調 `seq` |
+| node card、ProjectRoster、RosterStatus、OfflineLease | 署名文書 | Cernere (SPEC-CR-node-roster、SPEC-CR-membership-issuer)。control とノードは配布・キャッシュするだけ | Cernere (正本)。control と各ノードのメモリ + ディスクキャッシュ (`projects.json` の隣) | 完全性 | Cernere の `membership` / `roster` kid の署名 (ctx `node-card`・`project-roster`・`roster-status`)、`roster_epoch` の単調性、card と roster は `exp` ≤24 時間・RosterStatus は 300 秒 |
+| Presence | 署名文書 | 各ノード (card が名指す node 鍵) | メモリ + directory のキャッシュ | 完全性 | ctx `presence` の署名、`card_hash` の一致、`exp` ≤10 分 |
+| directory | 束ねたキャッシュ (未署名) | control (選択・順序だけ。中身の権威は上の 2 行) | control のメモリ、ノードのディスクキャッシュ | 完全性 | 要素ごとの署名検証、roster の `nodes[]` に無い card の破棄、`exp` = roster と card の最小 (≤24 時間) |
 | チャンク pack、チャンク表 | 内容 + 索引 | chunk-store モジュール | seed / archive / custody / edge のボリューム、S3 | 要 | SPEC-SY-chunk-access、HMAC id、範囲ごとの DEK |
 | `docs/performance.md` の予算とベースライン | 設定 / 計測 | Sy | repo | 不要 | Revisor 経由の変更だけ |
 | custody の受領証の保管 (`GET /v2/receipts/{key}` の背後。複製が更新する `locations[]`・`durability` を含む) | 署名文書 | custody | custody の volume | 完全性 | security の SPEC-SY-custody-receipt-v2 の署名。確定後は追記だけ |
@@ -923,7 +945,7 @@ security 文書の §4.0.2 の X5 行は受入前の記述として「条件付�
 | network-transport | M06, M07, M08, M09, M11, M12、M26 の IPC codec (`network-transport.domain.json` は `synergos-ipc/`・`synergos-net/`・`synergos-relay/` を持つ。`cpp-migration.md:24` も net・relay・IPC を network-transport に置く) |
 | mesh-core | M02, M03, M04, M05, M13, M30、M26 の job 管理 (`synergos-core/native/`) |
 | opaque-custody | M14, M15, M16 (複製ワーカーと、複製の指示を受ける custody-admin の endpoint), M17 |
-| control-plane | M10 (directory)。M16 の複製の起点は Curare から custody-admin への呼出で、synergos-control 側に trigger は無い |
+| control-plane | M10 (directory の配布・キャッシュと、Cernere への enrollment・会員証更新の中継。会員と名簿は決めない)。M16 の複製の起点は Curare から custody-admin への呼出で、synergos-control 側に trigger は無い |
 | desktop-gui | D-T22 経由でのみ参照 (`synergos-gui` の `desktop/` workspace への移動と、C++ desktop-gui 受入後の退役は SECURITY-M30) |
 | admin-ui | 変更なし (directory と配置の表示は後続) |
 | ars-plugin | 変更なし (IPC v2 の利用者として `client_kind: plugin`) |
@@ -945,7 +967,7 @@ security 文書の §4.0.2 の X5 行は受入前の記述として「条件付�
 | `:41-43` 「Versioning: preserve `.synergos/manifest.json`, local high-water marks, …」 | 先頭に「manifest format 2 per SPEC-SY-manifest-v2; readers accept formats 1 and 2」を加える。「local high-water marks」は保つ (置き場は `.synergos/state.db`、単調で node-local の意味は同じ。§3.20 変更提案 8) |
 | `:44-47` 「Custody: SPEC-SY-opaque-custody, SPEC-SY-custody-durability, SPEC-SY-custody-acquisition remain normative. Preserve canonical receipt bytes, HMAC, …」 | セキュリティ側の受領証・capability の改訂に並べて「byte path per SPEC-SY-custody-transfer-v2 (resumable upload, Range GET via SPEC-SY-object-get, receipt produced once, O(1) verify), batch admission per SPEC-SY-custody-batch-admission, replication per SPEC-SY-custody-replication」を加える。SPEC-SY-custody-durability は改訂後の文面 (§4.32、§3.20 変更提案 6) を normative とする |
 | `:48` 「Existing CLI, native GUI, admin UI and Ars adapter remain acceptance surfaces.」 | 本書からは変えない。受入面の「native GUI」を C++ desktop-gui に改める変更提案は security 文書が持ち、本書はそれに従う |
-| (新規) Topology | 「Topology: SPEC-SY-node-roles inside SPEC-SY-node-card, SPEC-SY-directory, SPEC-SY-relay-v2. One binary; roles are per-process modes.」 |
+| (新規) Topology | 「Topology: SPEC-SY-node-roles inside the Cernere-signed SPEC-SY-node-card (SPEC-CR-node-roster), SPEC-SY-directory (distributed by control, never signed by it), SPEC-SY-relay-v2 (C++ only). One binary; roles are per-process modes.」。注記: card・ProjectRoster・RosterStatus の署名者は Cernere だけで、C++ の synergos-control は会員・名簿の発行鍵を持たない (オーナー決定 8)。relay は C++ 版でだけ配備し、それまでの到達は Tailscale (オーナー決定 7) |
 | (新規) Chunk store | 「Chunk store: SPEC-SY-chunk-store and SPEC-SY-range-plan; linked only by seed, archive, custody (out-of-process) and edge; SPEC-SY-format-policy.」 |
 | `:35-37` IPC | 「result streaming and jobs per SPEC-SY-ipc-v2」を加える |
 | (新規) Native implementation requirements | §4.28 の 5 項目と、利用者が編集するファイルへのハードリンク禁止 (§4.2) |
@@ -966,8 +988,8 @@ security 文書の §4.0.2 の X5 行は受入前の記述として「条件付�
 | `[id: SPEC-SY-peer-wire]` | W | 全 magic と版、`0x5304` |
 | `[id: SPEC-SY-txf2]` | W | 全 frame の vector、Bao 範囲検証、再開 |
 | `[id: SPEC-SY-replication-stream]` | W | Head 署名、HaveSet の IBLT / bloom |
-| `[id: SPEC-SY-node-roles]` | A | 禁止された同居で起動失敗 |
-| `[id: SPEC-SY-directory]` | A | 署名、`exp`、etag |
+| `[id: SPEC-SY-node-roles]` | A | 禁止された同居で起動失敗。card の `roles` を超える modes で起動失敗 |
+| `[id: SPEC-SY-directory]` | A | 要素ごとの Cernere / node 署名の検証、roster 外の card の破棄、`exp`、etag |
 | `[id: SPEC-SY-relay-v2]` | W | frame、STUN demux、背圧で破棄 |
 | `[id: SPEC-SY-custody-transfer-v2]` | W | offset `409`、hasher 状態の再開、受領証 1 回 |
 | `[id: SPEC-SY-object-get]` | W | `206`、`If-Range`、`.bao` スライス |
@@ -989,9 +1011,9 @@ security 文書の §4.0.2 の X5 行は受入前の記述として「条件付�
 |---|---|---|---|---|
 | synergos-net (QUIC、gossip、DHT、bitswap、transfer、conduit、promotion、relay client) | network-transport | M06, M07, M08, M09, M11, M12 (client), M28 (frame) | `quic/mod.rs`、`transfer/mod.rs`、`gossip/`、`dht/` (移植しない)、`content/` (移植しない)、`conduit/` (移植しない)、`promotion.rs` | なし |
 | synergos-core (daemon、exchange、manifest、history、checkout、ipc_server) | mesh-core | M01, M02, M03, M04, M05, M07 (受信状態), M09 (wanted-set), M10 (card キャッシュ), M13, M26 (job), M28 (適用), M29 (hook), M30 | `exchange/mod.rs`、`manifest.rs`、`project.rs`、`history/`、`checkout.rs`、`restore.rs`、`worktree_status.rs`、`catalog_sync.rs` | 試験専用の計測ハーネス (M31) と運用文書 (M33) だけ |
-| synergos-control | control-plane | M10 (directory endpoint、heartbeat 応答) | `api/mod.rs` (node 向け API が無い) | なし |
+| synergos-control | control-plane | M10 (directory endpoint、heartbeat 応答、Cernere への enrollment・会員証更新の中継。会員・名簿の発行鍵は持たない) | `api/mod.rs` (node 向け API が無い) | なし |
 | synergos-custody | opaque-custody | M01 (digest)、M14 (upload resource・range GET・receipt store・v1 キー索引)、M15、M16 (複製)、M17 (edge mode) | `handlers.rs`、`store.rs`、`signature.rs` (`object_key` の `sha256(opaqueObjectId)` は v1 キー索引として残る) | なし |
-| synergos-relay | network-transport | M12 | `server.rs` (room 放送) | なし。T3 まで非配備 (SECURITY-M34 と同じ) |
+| synergos-relay | network-transport | M12 (C++ だけ) | `server.rs` (room 放送) | なし。Rust の relay は改修も配備もしない (オーナー決定 7、SECURITY-M34)。C++ relay が受入ゲートを通るまで到達は Tailscale |
 | synergos-ipc | network-transport | M26 (codec。job 管理は synergos-core 側で mesh-core) | `command.rs`、`response.rs` (`transport.rs` の 1 MiB フレームは維持) | なし |
 | synergos-chunkstore (新設) | chunk-store (新設案) | M27, M28 (計算), M29 (表の利用) | DESIGN §15.1 の chunker / DAG (superseded) | — |
 | synergos-gui (egui) | desktop-gui | なし (C++ desktop-gui に置き換わる) | — | P0 で `desktop/` workspace へ移し、eframe の `accesskit` feature を外して quick-xml 0.30 の経路を消す。egui 本体の退役は C++ desktop-gui の受入後 (security D-13 / SECURITY-M30)。`cpp-migration.md:48` の受入面の変更提案は security 文書が持つ。転送機能の損失なし (§3.18) |
@@ -1011,8 +1033,8 @@ security 文書の §4.0.2 の X5 行は受入前の記述として「条件付�
 |---|---|---|---|---|---|
 | **T0** 契約・ベースライン・即効策 | 本書と Curare 文書。§4 の全 W / A 契約の本文。content identity・manifest v2・peer-wire frame の golden vector。計測ハーネス (M31) で Rust v1 のベースライン記録 (試験専用)。catalog の split origins 記述と `SYNERGOS_CUSTODY_CLIENT_ORIGINS` の拠点別設定 (M16)。Rust の運用文書 (M33)。M32 の改訂案はここで起草し、neco が Q1 / Q2 に答えた後にセキュリティの改訂と一緒に提出 | `spec/`、`docs/performance.md`、`spec/vectors/`、`synergos-core/tests/` (bench)、`excubitor.catalog.yaml` | なし (security P0 と並行) | vector の自己試験、ベースライン記録、admin / transfer の origin を分けたブラウザーと CLI の upload / download と CORS の統合試験 (§6.2 試験 7) | 文書の revert、設定の revert |
 | **T1** Curare のフロー | Curare 文書の M18〜M25、M29 の報告モード。Synergos は v1 facade での custody 受付 (サーバ側 1 件ずつ) を提供するだけで、コード変更なし | (Curare) | T0、security P1 (LCT codec)・P2 (台帳・セッション検証) | Curare 側の CG ケース | Curare のフラグ |
-| **T2** C++ ネイティブ中核 | M01, M02, M03, M04, M05, M06, M07, M08, M14, M15, M26 を C++ 移植に入れる (cpp-migration 手順 3〜4)。custody 部分は security P3 と、peer 部分は security P4 と、**組織ごとに 1 回の `synergos/2` flag day** で切り替える。custody v2 の有効化と同時に catalog の `SYNERGOS_CUSTODY_MAX_OBJECT_BYTES` を 1 TiB に上げる (M14)。Synergos の pre-publish hook (M29) は報告モードで入る | `synergos-net/native/`、`synergos-core/native/`、`synergos-custody/native/`、`synergos-ipc/native/` | T0 の契約、security P3 (custody の資格)・P4 (HLO2、会員資格) | TG-01〜TG-06、TG-12〜TG-14 の計測。Rust ベースラインとの比較。100 GB custody upload / 再開。Bao 破損グループ試験。flag day 後の巻き戻し試験 (§6.2 試験 29) | flag day 前: その組織はゲートを通るまで Rust 実行時に留まる (security P4 のフォールバック)。flag day 後: §5.3 の巻き戻し手順 (巻き戻し期間の間だけ)。`custody.v1_compat` で Curare 向けの v1 PUT と v1 キー索引を保つ |
-| **T3** トポロジ | M09, M10, M11, M12, M13。拠点 seed を Excubitor catalog で配備 | `synergos-net/native/`、`synergos-control/native/`、`synergos-relay/native/`、`synergos-core/native/` | T2、security の SPEC-SY-membership-token と -revocation-bundle が稼働 | TG-08〜TG-11。星形伝播 (ハブ 1 + スポーク 3)。network namespace の NAT 行列。relay 停止から ≤10 秒の移行。directory 期限切れ | 役割をプロセスごとに設定で無効化 |
+| **T2** C++ ネイティブ中核 | M01, M02, M03, M04, M05, M06, M07, M08, M14, M15, M26 を C++ 移植に入れる (cpp-migration 手順 3〜4)。custody 部分は security P3 と、peer 部分は security P4 と、**組織ごとに 1 回の `synergos/2` flag day** で切り替える。custody v2 の有効化と同時に catalog の `SYNERGOS_CUSTODY_MAX_OBJECT_BYTES` を 1 TiB に上げる (M14)。Synergos の pre-publish hook (M29) は報告モードで入る | `synergos-net/native/`、`synergos-core/native/`、`synergos-custody/native/`、`synergos-ipc/native/` | T0 の契約、security P3 (custody の資格)・P4 (HLO2、会員資格。P3 の会員・enrollment 部分と P4 は Cernere の SPEC-CR-membership-issuer / SPEC-CR-node-roster を待つ、オーナー決定 8) | TG-01〜TG-06、TG-12〜TG-14 の計測。Rust ベースラインとの比較。100 GB custody upload / 再開。Bao 破損グループ試験。flag day 後の巻き戻し試験 (§6.2 試験 29) | flag day 前: その組織はゲートを通るまで Rust 実行時に留まる (security P4 のフォールバック)。flag day 後: §5.3 の巻き戻し手順 (巻き戻し期間の間だけ)。`custody.v1_compat` で Curare 向けの v1 PUT と v1 キー索引を保つ |
+| **T3** トポロジ | M09, M10, M11, M12, M13。拠点 seed を Excubitor catalog で配備 | `synergos-net/native/`、`synergos-control/native/`、`synergos-relay/native/`、`synergos-core/native/` | T2、security の SPEC-SY-membership-token と -revocation-bundle が稼働。Cernere の SPEC-CR-membership-issuer と SPEC-CR-node-roster が稼働 (オーナー決定 8。Synergos 側の暫定は置かず、それまで拠点は現行 Rust を M33 / SECURITY-M34 の設定で Tailscale 越しに運用)。C++ relay だけ (オーナー決定 7) | TG-08〜TG-11。星形伝播 (ハブ 1 + スポーク 3)。network namespace の NAT 行列。relay 停止から ≤10 秒の移行。directory 期限切れ。roster 外・非 Cernere 署名の card の破棄 | 役割をプロセスごとに設定で無効化 |
 | **T4** 配置と edge | M16 の custody 複製、M17 の拠点 / egress edge、M30 の `sync_mode` | `synergos-custody/native/`、`synergos-core/native/` | T3、SPEC-CR-capability-signing-keys (暫定は Vault 固定鍵)、egress edge は neco の Q3 | egress edge からの 100 GB clone の kill / resume。ベンダーの magic link 経路。rf 2 未満で確定が止まる。失効で edge の範囲応答が ≤60 秒で止まる | Curare が origin の location に戻す。edge を無効化 |
 | **T5** チャンク層 | M27 (`measure` から)、M28、M29 の強制 (チャンクプロジェクトだけ) | `synergos-chunkstore/`、seed / archive / custody / edge への結合 | T4、neco の Q1、security の SPEC-SY-chunk-access と封筒暗号 (security P5)、スタジオの計測コーパス (Q6) | chunker vector。retention lock 下の GC mark / sweep の性質試験。コーパスでの TG-07。暗号化の有無で重複排除率が同じ (security E5) | `project.chunking = off`。`export` で全体を再構築。全体の TXF2 は常にある |
 
@@ -1097,7 +1119,7 @@ flag day の前は「その組織を Rust 実行時に留める」で足りる�
 | 12 | 形式 hook | チャンクプロジェクトの deflate FBX は preset を示すメッセージで拒否。報告モードでは数えるだけ | TRN-DD-17 / M29 |
 | 13 | ディスク計数 | TG-04a / TG-04b の値を `/proc/self/io` か ETW で満たす。reflink の無い FS でもハードリンクが作られない (作業ツリーのファイルの link count が 1) | TRN-WP-07 / M02 |
 | 14 | 禁止された同居 | custody-admin と relay を同じプロセスで起動すると起動失敗 | D-T10 / M10 |
-| 15 | directory の期限切れ | `exp` 後は新規セッションを張らず、既存の認証済みセッションだけ保つ | TRN-TP-14 / M10 |
+| 15 | directory の期限切れと改ざん | `exp` 後は新規セッションを張らず、既存の認証済みセッションだけ保つ。ProjectRoster の `nodes[]` に無い card、Cernere 署名でない card・roster、card と `card_hash` が合わない Presence を directory に混ぜると、ノードはそれを捨てて接続しない (security AT-SY-SEC-41 と照合) | TRN-TP-14 / M10 |
 | 16 | format 2 と Rust | flag day 前の組織で format 2 の manifest を書く操作がゲートで拒否される | TRN-DD-05 / M03 |
 | 17 | チャンク GC | retention lock 下の mark / sweep の性質試験で、lock された版のチャンクが消えない | TRN-DD-07 / M27 |
 | 18 | publish 後の in-place 編集 | publish の後に作業ファイルを in-place で書き換える (DCC ツールの上書き保存を模擬)。object の BLAKE3 が変わらず、旧版の restore が元のバイトを返す | `docs/versioning-design.md:156-157` / M02 |
@@ -1133,7 +1155,7 @@ Q 番号は Curare 側文書と共通に振る。Q1〜Q10 は両文書で同じ�
 | Q4 | オーナー決定 6 を転送とトポロジの全プロトコル機能へ広げるか (D-T19)。別に、P0 級のデータ損失 2 件 (TRN-WP-05, TRN-WP-18) と偽の `Ok(Relay)` 状態に、C++ 切替前の最小限の Rust 修正を許すか | neco | Rust に新機能なし。3 件は運用文書だけ |
 | Q5 | 重複排除範囲: 既定はプロジェクト、組織単位は組織ごとの opt-in (security Q6 と共通) | neco | プロジェクトのみ |
 | Q6 | スタジオの実 depot 計測コーパス (PSD / FBX / uasset / EXR / チェックポイント系列) と、夜間 100 GB 計測の実行場所 | 運用担当 | 未確認 (コーパスの提供元が決まっていない)。T5 の `on` は入手まで不可 |
-| Q7 | 拠点 seed と relay のホスティング: オフィスごとに seed + relay 1 台、地域ごとにインターネット relay 1 台を Excubitor で運用するか | 運用担当 | 提案のまま |
+| Q7 | 拠点 seed と relay のホスティング: オフィスごとに seed + relay 1 台、地域ごとにインターネット relay 1 台を Excubitor で運用するか | 運用担当 | 提案のまま。relay は C++ 版でだけ配備する (オーナー決定 7)。それまでは Tailscale |
 | Q8 | 追補 X1〜X5 (§4.26) をセキュリティの契約に取り込むか | セキュリティ担当 | **解決済み**: security §4.0.2 で受入済み。残る「条件付き」の文言の整理を security 文書の担当へ依頼 (§4.26) |
 | Q9 | T0 ベースライン後の TG-02 (損失あり WAN) の目標値と、BBR を既定にする切替 | neco | 暫定 300 Mbps、既定 Cubic |
 | Q10 | collection 登録で使う `project_ref` ↔ Curare space の対応 (共通識別子) | neco (ai-game 文書) | 参照のみ (security Q8) |
