@@ -6,6 +6,15 @@
   "membership": [
     {
       "pathPattern": "(^|/)synergos-control/(?:.*/)?[^/]+$"
+    },
+    {
+      "pathPattern": "(^|/)scripts/site/(?:.*/)?[^/]+\\.mjs$"
+    },
+    {
+      "pathPattern": "(^|/)excubitor\\.(catalog\\.yaml|bootstrap\\.json)$"
     }
+  ],
+  "specRefs": [
+    "docs/site-operations.md"
   ]
 }

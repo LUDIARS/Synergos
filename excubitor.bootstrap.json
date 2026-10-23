@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "service": "synergos-control",
+  "setup": "scripts/site/setup.mjs",
+  "data": {
+    "export": "scripts/site/export-data.mjs",
+    "import": "scripts/site/import-data.mjs"
+  }
+}

@@ -21,3 +21,6 @@ synergos-control-store.*.tmp
 /synergos-admin-ui/target
 /synergos-admin-ui/dist
 /synergos-admin-ui/.dioxus
+
+# Excubitor site 運用のデータ (レジストリ・custody 保管物・生成した control.toml)
+/data/site/

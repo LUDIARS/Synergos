@@ -1,0 +1,37 @@
+# Excubitor catalog 断片 — このリポジトリが所有するサービス定義 (Excubitor/catalog/FRAGMENTS.md)。
+# 手順と前提は docs/site-operations.md。
+services:
+  - code: synergos-control
+    name: Synergos Control (mesh registry + opaque custody)
+    tier: saas
+    project_code: synergos
+    component: backend
+    repo: LUDIARS/Synergos
+    port: 4250
+    runtime: node
+    # bootstrap は cwd = 本体 checkout の最上位を要求する。
+    cwd: ${ARS_ROOT}/Synergos
+    # run-control.mjs が Vault の値から control.toml を生成し、release ビルドの synergos-control を起動する。
+    command: node scripts/site/run-control.mjs
+    allow_hot_reload: false
+    autostart: false
+    restart_policy: "no"
+    health:
+      type: http
+      url: http://localhost:4250/v1/custody/health
+      interval_sec: 30
+      grace_period_sec: 15
+    provides:
+      SYNERGOS_STORAGE_URL: http://${host}:${port}
+    env:
+      SYNERGOS_CONTROL_BIND: 127.0.0.1:4250
+      SYNERGOS_CUSTODY_ENABLED: "1"
+      SYNERGOS_CUSTODY_PUBLIC_URL: http://localhost:4250
+      SYNERGOS_CUSTODY_NODE_ID: 6a4f2d3e-8c1b-4f7a-9e2d-5b3c1a7f0e94
+      # 10 GiB。Curare の単発 PUT 上限と合わせる。
+      SYNERGOS_CUSTODY_MAX_OBJECT_BYTES: "10737418240"
+      SYNERGOS_CUSTODY_CLIENT_ORIGINS: http://localhost:6810,http://127.0.0.1:6810
+      RUST_LOG: info,synergos_custody=info
+    # Secret env は Excubitor Vault の binding から注入する (値をここに書かない):
+    #   CF_ACCOUNT_ID / CF_API_TOKEN (共通の Cloudflare 資格情報)
+    #   SYNERGOS_CONTROL_ADMIN_TOKEN / SYNERGOS_CUSTODY_TOKEN / SYNERGOS_CUSTODY_RECEIPT_SECRET (各 32 byte 以上)
