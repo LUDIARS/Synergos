@@ -18,3 +18,7 @@ export function dataDir(env = process.env) {
 export function controlBinary(platform = process.platform) {
   return path.join(repoRoot, 'target', 'release', platform === 'win32' ? 'synergos-control.exe' : 'synergos-control');
 }
+
+export function coreBinary(platform = process.platform) {
+  return path.join(repoRoot, 'target', 'release', platform === 'win32' ? 'synergos-core.exe' : 'synergos-core');
+}

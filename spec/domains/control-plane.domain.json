@@ -11,6 +11,9 @@
       "pathPattern": "(^|/)scripts/site/(?:.*/)?[^/]+\\.mjs$"
     },
     {
+      "pathPattern": "(^|/)scripts/codex-cloud/[^/]+\\.sh$"
+    },
+    {
       "pathPattern": "(^|/)excubitor\\.(catalog\\.yaml|bootstrap\\.json)$"
     }
   ],

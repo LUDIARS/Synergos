@@ -35,3 +35,29 @@ services:
     # Secret env は Excubitor Vault の binding から注入する (値をここに書かない):
     #   CF_ACCOUNT_ID / CF_API_TOKEN (共通の Cloudflare 資格情報)
     #   SYNERGOS_CONTROL_ADMIN_TOKEN / SYNERGOS_CUSTODY_TOKEN / SYNERGOS_CUSTODY_RECEIPT_SECRET (各 32 byte 以上)
+
+  - code: synergos-node
+    name: Synergos Node (P2P daemon on the site tailnet)
+    tier: saas
+    project_code: synergos
+    component: backend
+    repo: LUDIARS/Synergos
+    runtime: node
+    cwd: ${ARS_ROOT}/Synergos
+    # run-node.mjs が synergos-net.toml を生成し、release ビルドの synergos-core daemon を起動する。
+    # 待ち受けは SYNERGOS_NODE_BIND_IP (拠点ごとの tailnet アドレス) だけ。全面待ち受けは起動を拒否する。
+    command: node scripts/site/run-node.mjs
+    allow_hot_reload: false
+    autostart: false
+    restart_policy: "no"
+    health:
+      # 待ち受けアドレスが拠点ごとに違うため、HTTP ではなくプロセスの生存で見る。
+      type: process
+      interval_sec: 30
+      grace_period_sec: 15
+    env:
+      SYNERGOS_NODE_PEER_INFO_PORT: "7780"
+      SYNERGOS_NODE_QUIC_PORT: "4433"
+      RUST_LOG: info,synergos_core=info,synergos_net=info
+    # 拠点固有の値は Excubitor Vault の binding から注入する (catalog は全拠点共通なので書かない):
+    #   SYNERGOS_NODE_BIND_IP (この拠点の tailnet IPv4/IPv6)
