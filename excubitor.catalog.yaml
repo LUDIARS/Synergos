@@ -18,7 +18,7 @@ services:
     restart_policy: "no"
     health:
       type: http
-      url: http://localhost:4250/v1/custody/health
+      url: http://localhost:4250/v1/health
       interval_sec: 30
       grace_period_sec: 15
     provides:
