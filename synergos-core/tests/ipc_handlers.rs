@@ -769,10 +769,12 @@ async fn post_receive_spawn_hook_includes_version_and_peer() {
 /// タイムアウトを超過したフックは kill され、`pre-publish` なら publish が中止される。
 #[tokio::test]
 async fn pre_publish_hook_timeout_kills_process_and_aborts_publish() {
+    // フックは 30 秒眠る。1 秒の timeout で打ち切られることを、15 秒未満で戻ることで確かめる。
+    // 差を大きく取るのは、審査機の高負荷で taskkill の起動が数秒遅れても誤判定しないため。
     let sleep_cmd = if cfg!(windows) {
-        "ping -n 5 127.0.0.1 >NUL".to_string()
+        "ping -n 31 127.0.0.1 >NUL".to_string()
     } else {
-        "sleep 5".to_string()
+        "sleep 30".to_string()
     };
     let ctx = make_ctx_with_hooks(HooksConfig {
         allow_project_hooks: false,
@@ -819,7 +821,7 @@ async fn pre_publish_hook_timeout_kills_process_and_aborts_publish() {
         other => panic!("expected Error from timed-out publish, got {other:?}"),
     }
     assert!(
-        elapsed < std::time::Duration::from_secs(4),
+        elapsed < std::time::Duration::from_secs(15),
         "hook must be killed at the 1s timeout, not run to completion (elapsed={elapsed:?})"
     );
     assert!(ctx.project_manager.manifest_entries("hist").is_empty());

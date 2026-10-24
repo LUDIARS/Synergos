@@ -51,8 +51,19 @@ pub enum ServerMessage {
     Event(IpcEvent),
 }
 
-/// IPC ソケットパスを取得（プラットフォーム依存）
+/// 接続先を上書きする環境変数。同じ PC で複数のデーモン (拠点ノードと desktop) や
+/// 試験を動かすときに、既定の 1 つの接続先を取り合わないようにする。
+pub const IPC_PATH_ENV: &str = "SYNERGOS_IPC_PATH";
+
+/// IPC ソケットパスを取得（`SYNERGOS_IPC_PATH` が空でなければそれ、無ければプラットフォーム依存の既定）
 pub fn socket_path() -> PathBuf {
+    match std::env::var(IPC_PATH_ENV) {
+        Ok(path) if !path.trim().is_empty() => PathBuf::from(path),
+        _ => default_socket_path(),
+    }
+}
+
+fn default_socket_path() -> PathBuf {
     #[cfg(target_os = "linux")]
     {
         let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string());
@@ -265,6 +276,32 @@ mod tests {
         let r3: Sample = IpcTransport::read_message(&mut b).await.unwrap();
 
         assert_eq!((m1, m2, m3), (r1, r2, r3));
+    }
+
+    /// T-IPC-08: SYNERGOS_IPC_PATH が空でなければ既定より優先、空なら既定に戻る
+    #[serial_test::serial]
+    #[test]
+    fn socket_path_env_override() {
+        let original = std::env::var(IPC_PATH_ENV).ok();
+        let custom = if cfg!(windows) { r"\\.\pipe\synergos-test-override" } else { "/tmp/synergos-test-override.sock" };
+
+        // SAFETY: serial_test で直列化されているため他テストと競合しない
+        unsafe {
+            std::env::set_var(IPC_PATH_ENV, custom);
+        }
+        assert_eq!(socket_path(), PathBuf::from(custom));
+
+        unsafe {
+            std::env::set_var(IPC_PATH_ENV, "  ");
+        }
+        assert_eq!(socket_path(), default_socket_path());
+
+        unsafe {
+            match original {
+                Some(v) => std::env::set_var(IPC_PATH_ENV, v),
+                None => std::env::remove_var(IPC_PATH_ENV),
+            }
+        }
     }
 
     /// T-IPC-07: socket_path_linux_uses_xdg_runtime_dir — XDG_RUNTIME_DIR を反映

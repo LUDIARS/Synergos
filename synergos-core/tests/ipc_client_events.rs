@@ -116,6 +116,17 @@ async fn response_and_event_multiplex_cleanly_on_single_stream() {
 #[tokio::test]
 async fn is_daemon_running_false_when_no_daemon() {
     // サーバーを立てていない状態で is_daemon_running は false を返す。
+    // 既定の接続先は同じ PC の常駐デーモン (拠点ノード等) が使っていることがあるので、
+    // 誰も使わない接続先へ向ける。このファイルで socket_path() を読むのはこの試験だけ。
+    let unused = if cfg!(windows) {
+        format!(r"\\.\pipe\synergos-test-absent-{}", std::process::id())
+    } else {
+        std::env::temp_dir()
+            .join(format!("synergos-test-absent-{}.sock", std::process::id()))
+            .to_string_lossy()
+            .into_owned()
+    };
+    std::env::set_var(synergos_ipc::transport::IPC_PATH_ENV, &unused);
     let running = synergos_ipc::IpcClient::is_daemon_running().await;
     assert!(!running, "no daemon bound — must return false");
 }

@@ -9,6 +9,9 @@
 //! プラットフォーム:
 //! - Unix (Linux / macOS): Unix Domain Socket
 //! - Windows: Named Pipe (`\\.\pipe\synergos`)
+//!
+//! 環境変数 `SYNERGOS_IPC_PATH` を設定すると、デーモン・クライアントとも既定の代わりにその接続先を使う
+//! (`transport::socket_path`)。
 
 use crate::command::IpcCommand;
 use crate::event::IpcEvent;

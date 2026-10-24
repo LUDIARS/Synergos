@@ -13,7 +13,26 @@ use synergos_ipc::response::{
     ConflictInfoDto, DaemonStatus, NetworkStatusInfo, PeerInfo, TransferInfo,
 };
 
+/// `CoreConnection::new()` は作った時点でデーモンへ接続しに行く。同じ PC で常駐デーモン (拠点ノード等) が
+/// 既定の接続先を使っていると「接続済み」になり、試験で書いた cache がデーモンの内容で描かれてしまう。
+/// この試験バイナリでは誰も使わない接続先へ向ける (全試験で同じ値なので並行に呼ばれても結果は変わらない)。
+fn isolate_from_running_daemon() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let unused = if cfg!(windows) {
+            format!(r"\\.\pipe\synergos-gui-test-absent-{}", std::process::id())
+        } else {
+            std::env::temp_dir()
+                .join(format!("synergos-gui-test-absent-{}.sock", std::process::id()))
+                .to_string_lossy()
+                .into_owned()
+        };
+        std::env::set_var(synergos_ipc::transport::IPC_PATH_ENV, unused);
+    });
+}
+
 fn seeded_connection(populate: impl FnOnce(&mut ConnectionCache)) -> CoreConnection {
+    isolate_from_running_daemon();
     let conn = CoreConnection::new();
     {
         let mut cache = conn.cache.lock().unwrap();
