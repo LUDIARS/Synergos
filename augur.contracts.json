@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "contractsDir": "scripts/site/tests/contracts",
+  "runtimeFile": "scripts/site/tests/contracts/contract-runtime.mjs",
+  "importFrom": "./contracts/contract-runtime.mjs",
+  "contracts": [
+    {
+      "id": "C-1",
+      "criterion": "C-1 verifyWildcardRejection(addresses): 未指定アドレスの IPv4・IPv6・IPv4 写像の別表記を既存エラーで拒否する",
+      "symbol": "verifyWildcardRejection",
+      "file": "scripts/site/tests/node-config.test.mjs",
+      "module": "scripts/site/tests/contracts/wildcard-rejection.contract.mjs",
+      "mode": "observe",
+      "sample": 1
+    },
+    {
+      "id": "C-2",
+      "criterion": "C-2 verifyValidAddresses(addresses): 有効な IPv4・IPv6・IPv4 写像アドレスと既定ポートを保持する",
+      "symbol": "verifyValidAddresses",
+      "file": "scripts/site/tests/node-config.test.mjs",
+      "module": "scripts/site/tests/contracts/valid-addresses.contract.mjs",
+      "mode": "observe",
+      "sample": 1
+    }
+  ]
+}

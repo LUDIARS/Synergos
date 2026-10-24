@@ -1,0 +1,6 @@
+{
+  "service": "synergos-node-config-tests",
+  "include": ["scripts/site/tests/node-config.test.mjs"],
+  "rules": { "contract-wrap": true },
+  "importFrom": "./contracts/contract-runtime.mjs"
+}

@@ -3,7 +3,9 @@
 // (/peer-info は無認証なので、届く範囲をネットワーク層で絞る前提: docs/two-node-operations.md)。
 import net from 'node:net';
 
-const WILDCARDS = new Set(['0.0.0.0', '::']);
+const WILDCARDS = new net.BlockList();
+WILDCARDS.addAddress('0.0.0.0', 'ipv4');
+WILDCARDS.addAddress('::', 'ipv6');
 // Tailscale の MTU は 1280。QUIC の UDP ペイロードがそれを超えないよう抑える。
 const TAILNET_UDP_PAYLOAD = 1200;
 
@@ -18,7 +20,7 @@ export function nodeSettings(env = process.env) {
   const ip = env.SYNERGOS_NODE_BIND_IP;
   if (!ip) throw new Error('SYNERGOS_NODE_BIND_IP is not set (the tailnet address this node listens on)');
   if (!net.isIP(ip)) throw new Error('SYNERGOS_NODE_BIND_IP must be a literal IP address');
-  if (WILDCARDS.has(ip)) throw new Error('SYNERGOS_NODE_BIND_IP must not be a wildcard address');
+  if (WILDCARDS.check(ip, net.isIPv6(ip) ? 'ipv6' : 'ipv4')) throw new Error('SYNERGOS_NODE_BIND_IP must not be a wildcard address');
   return {
     ip,
     peerInfoPort: port(env, 'SYNERGOS_NODE_PEER_INFO_PORT', 7780),

@@ -1,0 +1,19 @@
+Augur plan — bug_fix
+Summary: Lead with "Regression test reproducing: Reject alternate unspecified bind IP spellings while preserving valid IPv4/IPv6 and existing errors; only node-config unit tests" (high), then investigate before changing code. 1 test suggestion, 2 fix steps.
+
+Tests
+  [high]     Regression test reproducing: Reject alternate unspecified bind IP spellings while preserving valid IPv4/IPv6 and existing errors; only node-config unit tests   (regression, 0.55)
+             -> Given the conditions described in the objective, when the buggy path runs, then the expected behavior must hold.
+             evidence: ev-001
+
+Fix policy: investigate_first
+  1. Reproduce the bug first  [ev-001]
+  2. Convert the reproduction into a regression test, then fix narrowly  (after fix-001)  [ev-001]
+  rollback: Revert the fix commit; keep the regression test as documentation of the expected behavior.
+
+Risks
+  [medium] A narrow fix may mask a broader defect class; check neighboring code paths for the same pattern.
+
+Evidence
+  ev-001  objective         Caller requested bug fix: Reject alternate unspecified bind IP spellings while preserving valid IPv4/IPv6 and existing errors; only node-config unit tests
+  ev-002  project_metadata  Project context: domain other.
