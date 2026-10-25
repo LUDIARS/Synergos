@@ -1,0 +1,893 @@
+{
+  "version": 1,
+  "contracts": [
+    {
+      "id": "SPEC-CR-capability-signing-keys",
+      "owner_repo": "Cernere",
+      "status": "external",
+      "owner_doc": null,
+      "owner_section": null,
+      "definition_sha256": null
+    },
+    {
+      "id": "SPEC-CR-guest-identity",
+      "owner_repo": "Cernere",
+      "status": "external",
+      "owner_doc": null,
+      "owner_section": null,
+      "definition_sha256": null
+    },
+    {
+      "id": "SPEC-CR-membership-issuer",
+      "owner_repo": "Cernere",
+      "status": "external",
+      "owner_doc": null,
+      "owner_section": null,
+      "definition_sha256": null
+    },
+    {
+      "id": "SPEC-CR-node-roster",
+      "owner_repo": "Cernere",
+      "status": "external",
+      "owner_doc": null,
+      "owner_section": null,
+      "definition_sha256": null
+    },
+    {
+      "id": "SPEC-CR-service-principal",
+      "owner_repo": "Cernere",
+      "status": "external",
+      "owner_doc": null,
+      "owner_section": null,
+      "definition_sha256": null
+    },
+    {
+      "id": "SPEC-CR-ssf-caep-transmitter",
+      "owner_repo": "Cernere",
+      "status": "external",
+      "owner_doc": null,
+      "owner_section": null,
+      "definition_sha256": null
+    },
+    {
+      "id": "SPEC-CR-step-up-assertion",
+      "owner_repo": "Cernere",
+      "status": "external",
+      "owner_doc": null,
+      "owner_section": null,
+      "definition_sha256": null
+    },
+    {
+      "id": "SPEC-CU-abuse-policy",
+      "owner_repo": "Curare",
+      "status": "external",
+      "owner_doc": null,
+      "owner_section": null,
+      "definition_sha256": null
+    },
+    {
+      "id": "SPEC-CU-api-budget",
+      "owner_repo": "Curare",
+      "status": "external",
+      "owner_doc": null,
+      "owner_section": null,
+      "definition_sha256": null
+    },
+    {
+      "id": "SPEC-CU-authority-model",
+      "owner_repo": "Curare",
+      "status": "external",
+      "owner_doc": null,
+      "owner_section": null,
+      "definition_sha256": null
+    },
+    {
+      "id": "SPEC-CU-capability-ledger",
+      "owner_repo": "Curare",
+      "status": "external",
+      "owner_doc": null,
+      "owner_section": null,
+      "definition_sha256": null
+    },
+    {
+      "id": "SPEC-CU-changeset-v2",
+      "owner_repo": "Curare",
+      "status": "external",
+      "owner_doc": null,
+      "owner_section": null,
+      "definition_sha256": null
+    },
+    {
+      "id": "SPEC-CU-collection-version",
+      "owner_repo": "Curare",
+      "status": "external",
+      "owner_doc": null,
+      "owner_section": null,
+      "definition_sha256": null
+    },
+    {
+      "id": "SPEC-CU-dataset-snapshot",
+      "owner_repo": "Curare",
+      "status": "external",
+      "owner_doc": null,
+      "owner_section": null,
+      "definition_sha256": null
+    },
+    {
+      "id": "SPEC-CU-dcc-commands",
+      "owner_repo": "Curare",
+      "status": "external",
+      "owner_doc": null,
+      "owner_section": null,
+      "definition_sha256": null
+    },
+    {
+      "id": "SPEC-CU-derived-cache",
+      "owner_repo": "Curare",
+      "status": "external",
+      "owner_doc": null,
+      "owner_section": null,
+      "definition_sha256": null
+    },
+    {
+      "id": "SPEC-CU-destructive-op",
+      "owner_repo": "Curare",
+      "status": "external",
+      "owner_doc": null,
+      "owner_section": null,
+      "definition_sha256": null
+    },
+    {
+      "id": "SPEC-CU-egress-policy",
+      "owner_repo": "Curare",
+      "status": "external",
+      "owner_doc": null,
+      "owner_section": null,
+      "definition_sha256": null
+    },
+    {
+      "id": "SPEC-CU-erasure-ledger",
+      "owner_repo": "Curare",
+      "status": "external",
+      "owner_doc": null,
+      "owner_section": null,
+      "definition_sha256": null
+    },
+    {
+      "id": "SPEC-CU-fetch-session",
+      "owner_repo": "Curare",
+      "status": "external",
+      "owner_doc": null,
+      "owner_section": null,
+      "definition_sha256": null
+    },
+    {
+      "id": "SPEC-CU-import-origin",
+      "owner_repo": "Curare",
+      "status": "external",
+      "owner_doc": null,
+      "owner_section": null,
+      "definition_sha256": null
+    },
+    {
+      "id": "SPEC-CU-ingest-verdict",
+      "owner_repo": "Curare",
+      "status": "external",
+      "owner_doc": null,
+      "owner_section": null,
+      "definition_sha256": null
+    },
+    {
+      "id": "SPEC-CU-lfs-compat",
+      "owner_repo": "Curare",
+      "status": "external",
+      "owner_doc": null,
+      "owner_section": null,
+      "definition_sha256": null
+    },
+    {
+      "id": "SPEC-CU-lock-service",
+      "owner_repo": "Curare",
+      "status": "external",
+      "owner_doc": null,
+      "owner_section": null,
+      "definition_sha256": null
+    },
+    {
+      "id": "SPEC-CU-magic-link-v2",
+      "owner_repo": "Curare",
+      "status": "external",
+      "owner_doc": null,
+      "owner_section": null,
+      "definition_sha256": null
+    },
+    {
+      "id": "SPEC-CU-membership-export",
+      "owner_repo": "Curare",
+      "status": "external",
+      "owner_doc": null,
+      "owner_section": null,
+      "definition_sha256": null
+    },
+    {
+      "id": "SPEC-CU-object-registry",
+      "owner_repo": "Curare",
+      "status": "external",
+      "owner_doc": null,
+      "owner_section": null,
+      "definition_sha256": null
+    },
+    {
+      "id": "SPEC-CU-path-conflict",
+      "owner_repo": "Curare",
+      "status": "external",
+      "owner_doc": null,
+      "owner_section": null,
+      "definition_sha256": null
+    },
+    {
+      "id": "SPEC-CU-principal-model",
+      "owner_repo": "Curare",
+      "status": "external",
+      "owner_doc": null,
+      "owner_section": null,
+      "definition_sha256": null
+    },
+    {
+      "id": "SPEC-CU-project-descriptor",
+      "owner_repo": "Curare",
+      "status": "external",
+      "owner_doc": null,
+      "owner_section": null,
+      "definition_sha256": null
+    },
+    {
+      "id": "SPEC-CU-project-policy",
+      "owner_repo": "Curare",
+      "status": "external",
+      "owner_doc": null,
+      "owner_section": null,
+      "definition_sha256": null
+    },
+    {
+      "id": "SPEC-CU-provenance-run",
+      "owner_repo": "Curare",
+      "status": "external",
+      "owner_doc": null,
+      "owner_section": null,
+      "definition_sha256": null
+    },
+    {
+      "id": "SPEC-CU-quota-reservation",
+      "owner_repo": "Curare",
+      "status": "external",
+      "owner_doc": null,
+      "owner_section": null,
+      "definition_sha256": null
+    },
+    {
+      "id": "SPEC-CU-ref-authority",
+      "owner_repo": "Curare",
+      "status": "external",
+      "owner_doc": null,
+      "owner_section": null,
+      "definition_sha256": null
+    },
+    {
+      "id": "SPEC-CU-review-range",
+      "owner_repo": "Curare",
+      "status": "external",
+      "owner_doc": null,
+      "owner_section": null,
+      "definition_sha256": null
+    },
+    {
+      "id": "SPEC-CU-rights-purpose",
+      "owner_repo": "Curare",
+      "status": "external",
+      "owner_doc": null,
+      "owner_section": null,
+      "definition_sha256": null
+    },
+    {
+      "id": "SPEC-CU-secrets-manifest",
+      "owner_repo": "Curare",
+      "status": "external",
+      "owner_doc": null,
+      "owner_section": null,
+      "definition_sha256": null
+    },
+    {
+      "id": "SPEC-CU-security-event",
+      "owner_repo": "Curare",
+      "status": "external",
+      "owner_doc": null,
+      "owner_section": null,
+      "definition_sha256": null
+    },
+    {
+      "id": "SPEC-CU-site-bundle-v2",
+      "owner_repo": "Curare",
+      "status": "external",
+      "owner_doc": null,
+      "owner_section": null,
+      "definition_sha256": null
+    },
+    {
+      "id": "SPEC-CU-snapshot-attestation",
+      "owner_repo": "Curare",
+      "status": "external",
+      "owner_doc": null,
+      "owner_section": null,
+      "definition_sha256": null
+    },
+    {
+      "id": "SPEC-CU-snapshot-gateway",
+      "owner_repo": "Curare",
+      "status": "external",
+      "owner_doc": null,
+      "owner_section": null,
+      "definition_sha256": null
+    },
+    {
+      "id": "SPEC-CU-ssf-receiver",
+      "owner_repo": "Curare",
+      "status": "external",
+      "owner_doc": null,
+      "owner_section": null,
+      "definition_sha256": null
+    },
+    {
+      "id": "SPEC-CU-storage-placement",
+      "owner_repo": "Curare",
+      "status": "external",
+      "owner_doc": null,
+      "owner_section": null,
+      "definition_sha256": null
+    },
+    {
+      "id": "SPEC-CU-tenant-v1",
+      "owner_repo": "Curare",
+      "status": "external",
+      "owner_doc": null,
+      "owner_section": null,
+      "definition_sha256": null
+    },
+    {
+      "id": "SPEC-CU-view-spec",
+      "owner_repo": "Curare",
+      "status": "external",
+      "owner_doc": null,
+      "owner_section": null,
+      "definition_sha256": null
+    },
+    {
+      "id": "SPEC-SY-chunk-access",
+      "owner_repo": "Synergos",
+      "status": "defined",
+      "owner_doc": "spec/plan/redesign-security.md",
+      "owner_section": "4.24 SECURITY-M27 封筒暗号、テナント分離、チャンク保管の境界",
+      "definition_sha256": "8eb2bfe8460182f5a4d13cf22dcd008b11bf6d0bc80967acc0e0f0a00f0f7475"
+    },
+    {
+      "id": "SPEC-SY-chunk-store",
+      "owner_repo": "Synergos",
+      "status": "planned",
+      "owner_doc": null,
+      "owner_section": null,
+      "definition_sha256": null
+    },
+    {
+      "id": "SPEC-SY-commit-ipc",
+      "owner_repo": "Synergos",
+      "status": "defined",
+      "owner_doc": "spec/plan/redesign-ai-game-dev.md",
+      "owner_section": "4.5 AIGAME-M05 changeset の commit (Synergos 側: commit-ipc)",
+      "definition_sha256": "7992fc006a5912a0af80d5c6e8ece73b14594835adc412ceca3e9d6cf1d9f7b9"
+    },
+    {
+      "id": "SPEC-SY-content-identity",
+      "owner_repo": "Synergos",
+      "status": "planned",
+      "owner_doc": null,
+      "owner_section": null,
+      "definition_sha256": null
+    },
+    {
+      "id": "SPEC-SY-control-admin-auth",
+      "owner_repo": "Synergos",
+      "status": "defined",
+      "owner_doc": "spec/plan/redesign-security.md",
+      "owner_section": "4.10 SECURITY-M10 control の管理者認証、サービス主体、Cloudflare の範囲",
+      "definition_sha256": "7db45f7327e6c7205738efed1ae7c0f2c58efc6700055b37be9f57c6f8f7bd5f"
+    },
+    {
+      "id": "SPEC-SY-custody-acquisition",
+      "owner_repo": "Synergos",
+      "status": "defined",
+      "owner_doc": "spec/feature/opaque-custody.md",
+      "owner_section": "[id: SPEC-SY-custody-acquisition] 取得・中断・回収",
+      "definition_sha256": "f10bfa0f3bf8abb3c17e66223e306639d862c8ded1e81dc5732cf189dcae1aa4"
+    },
+    {
+      "id": "SPEC-SY-custody-batch-admission",
+      "owner_repo": "Synergos",
+      "status": "planned",
+      "owner_doc": null,
+      "owner_section": null,
+      "definition_sha256": null
+    },
+    {
+      "id": "SPEC-SY-custody-capability-v2",
+      "owner_repo": "Synergos",
+      "status": "defined",
+      "owner_doc": "spec/plan/redesign-security.md",
+      "owner_section": "4.9 SECURITY-M09 custody 資格 v2 (サービス認証、delegation、capability、受領証)",
+      "definition_sha256": "db0166e0aeac0b749145f304137856946878c570f75ddd9063c0b3261815a208"
+    },
+    {
+      "id": "SPEC-SY-custody-durability",
+      "owner_repo": "Synergos",
+      "status": "defined",
+      "owner_doc": "spec/feature/opaque-custody.md",
+      "owner_section": "[id: SPEC-SY-custody-durability] 耐久性と寿命",
+      "definition_sha256": "8f94359e8c5208dc7948ed68c6d5d89fdb3b124428b80216ebfc679646e4499b"
+    },
+    {
+      "id": "SPEC-SY-custody-journal",
+      "owner_repo": "Synergos",
+      "status": "defined",
+      "owner_doc": "spec/plan/redesign-security.md",
+      "owner_section": "4.22 SECURITY-M25 セキュリティイベント、custody ジャーナル (Synergos 側)",
+      "definition_sha256": "c0213780c720aef8d379a2fb81a67bbd343d8b9ac78dd04b4d4889613b15e3b3"
+    },
+    {
+      "id": "SPEC-SY-custody-lifecycle",
+      "owner_repo": "Synergos",
+      "status": "defined",
+      "owner_doc": "spec/plan/redesign-security.md",
+      "owner_section": "4.16 SECURITY-M16 破壊操作ブレーキ (Synergos 側) と custody のライフサイクル",
+      "definition_sha256": "553068438b9a34c6b7d1cc518e3821b82d3526ff5af68edc5ae536bbe4ae8bb1"
+    },
+    {
+      "id": "SPEC-SY-custody-receipt-v2",
+      "owner_repo": "Synergos",
+      "status": "defined",
+      "owner_doc": "spec/plan/redesign-security.md",
+      "owner_section": "4.9 SECURITY-M09 custody 資格 v2 (サービス認証、delegation、capability、受領証)",
+      "definition_sha256": "d0652bfc257d4bd7f39343aa4bb9fc026059ccaf50ff6ff7b34cb627817165bd"
+    },
+    {
+      "id": "SPEC-SY-custody-replication",
+      "owner_repo": "Synergos",
+      "status": "planned",
+      "owner_doc": null,
+      "owner_section": null,
+      "definition_sha256": null
+    },
+    {
+      "id": "SPEC-SY-custody-service-auth",
+      "owner_repo": "Synergos",
+      "status": "defined",
+      "owner_doc": "spec/plan/redesign-security.md",
+      "owner_section": "4.9 SECURITY-M09 custody 資格 v2 (サービス認証、delegation、capability、受領証)",
+      "definition_sha256": "abb2f6a49ff9535d5d3b2c1f8da90e3f8b74f75633aaa4cdfe47ade3af40e7ce"
+    },
+    {
+      "id": "SPEC-SY-custody-topology",
+      "owner_repo": "Synergos",
+      "status": "defined",
+      "owner_doc": "spec/plan/redesign-security.md",
+      "owner_section": "4.8 SECURITY-M08 custody と control の配置分離、プロセス内 TLS [変更提案]",
+      "definition_sha256": "e5bc729447cc8978e7f156580a4488c740f1418604f622a45c326f82ee9a3abc"
+    },
+    {
+      "id": "SPEC-SY-custody-transfer-v2",
+      "owner_repo": "Synergos",
+      "status": "planned",
+      "owner_doc": null,
+      "owner_section": null,
+      "definition_sha256": null
+    },
+    {
+      "id": "SPEC-SY-decode-bounds",
+      "owner_repo": "Synergos",
+      "status": "defined",
+      "owner_doc": "spec/plan/redesign-security.md",
+      "owner_section": "4.20 SECURITY-M23 信頼できない decoder の境界と fuzz 登録",
+      "definition_sha256": "f9b17ff3bb73f9223e848e4e7cc344fad8151452682c0f40fdf9d9aa24f42f51"
+    },
+    {
+      "id": "SPEC-SY-dedup-domain",
+      "owner_repo": "Synergos",
+      "status": "planned",
+      "owner_doc": null,
+      "owner_section": null,
+      "definition_sha256": null
+    },
+    {
+      "id": "SPEC-SY-directory",
+      "owner_repo": "Synergos",
+      "status": "planned",
+      "owner_doc": null,
+      "owner_section": null,
+      "definition_sha256": null
+    },
+    {
+      "id": "SPEC-SY-displaced-preimage",
+      "owner_repo": "Synergos",
+      "status": "defined",
+      "owner_doc": "spec/plan/redesign-security.md",
+      "owner_section": "4.14 SECURITY-M14 置換旧バイトの保持、大量変更ブレーカー、保持受領、単一の耐久書込 [変更提案]",
+      "definition_sha256": "8a0fe17d59f685ca0a84d3999972d8b47b65f01c20bdc6f4ebeba523489ed2ee"
+    },
+    {
+      "id": "SPEC-SY-envelope-encryption",
+      "owner_repo": "Synergos",
+      "status": "defined",
+      "owner_doc": "spec/plan/redesign-security.md",
+      "owner_section": "4.24 SECURITY-M27 封筒暗号、テナント分離、チャンク保管の境界",
+      "definition_sha256": "34fe35b98122642ae2847d16b990c59f9435c3ba243423901eb4c57c5686ee26"
+    },
+    {
+      "id": "SPEC-SY-format-policy",
+      "owner_repo": "Synergos",
+      "status": "planned",
+      "owner_doc": null,
+      "owner_section": null,
+      "definition_sha256": null
+    },
+    {
+      "id": "SPEC-SY-format-skew",
+      "owner_repo": "Synergos",
+      "status": "defined",
+      "owner_doc": "spec/plan/redesign-ai-game-dev.md",
+      "owner_section": "4.17 AIGAME-M25 ワークステーション daemon のネイティブ要件、format skew",
+      "definition_sha256": "9671046e8c9a342c31833a1f48719e14a0b6222799ee31a9d6eb7bc8d967d064"
+    },
+    {
+      "id": "SPEC-SY-hlo2-session-binding",
+      "owner_repo": "Synergos",
+      "status": "defined",
+      "owner_doc": "spec/plan/redesign-security.md",
+      "owner_section": "4.2 SECURITY-M02 HLO2 peer セッションと受付パイプライン",
+      "definition_sha256": "cd07a377181a63f806e4dfd316117d5ec755f1f9e7e3ddbd36c702a5eeaa1b03"
+    },
+    {
+      "id": "SPEC-SY-immutable-replica",
+      "owner_repo": "Synergos",
+      "status": "defined",
+      "owner_doc": "spec/plan/redesign-security.md",
+      "owner_section": "4.15 SECURITY-M15 履歴の保持ロック、GC の正本、copy-not-move、不変複製、scrub",
+      "definition_sha256": "234f7c6a5b3b1480dc2ff42f45bd6c2ee6985b87ecf4a2a801c6ab50b6a7c105"
+    },
+    {
+      "id": "SPEC-SY-invite-v2",
+      "owner_repo": "Synergos",
+      "status": "defined",
+      "owner_doc": "spec/plan/redesign-security.md",
+      "owner_section": "4.5 SECURITY-M05 node card による bootstrap、招待 v2、daemon の外向き通信",
+      "definition_sha256": "96c72ef7e72221b7927ccaa2445b75b98fe62fb9f8ec875ad95ef0aedc555a88"
+    },
+    {
+      "id": "SPEC-SY-ipc-capability",
+      "owner_repo": "Synergos",
+      "status": "defined",
+      "owner_doc": "spec/plan/redesign-security.md",
+      "owner_section": "4.11 SECURITY-M11 局所 IPC の capability",
+      "definition_sha256": "ab7bc8f759fecd1387a59db8bf361d68057b0645e324fa84f29414a6bb7f9e3c"
+    },
+    {
+      "id": "SPEC-SY-ipc-v2",
+      "owner_repo": "Synergos",
+      "status": "planned",
+      "owner_doc": null,
+      "owner_section": null,
+      "definition_sha256": null
+    },
+    {
+      "id": "SPEC-SY-lct-v1",
+      "owner_repo": "Synergos",
+      "status": "defined",
+      "owner_doc": "spec/plan/redesign-security.md",
+      "owner_section": "4.1 SECURITY-M01 署名封筒と LCT v1 codec、golden vector",
+      "definition_sha256": "23f772c3f14bd0c289804a2165f5723540605857bf585e274a250a8d5da15d58"
+    },
+    {
+      "id": "SPEC-SY-legacy-import",
+      "owner_repo": "Synergos",
+      "status": "defined",
+      "owner_doc": "spec/plan/redesign-ai-game-dev.md",
+      "owner_section": "4.2 AIGAME-M02 C++ 互換契約の再仕様化と順序、git ポインタ",
+      "definition_sha256": "35bfbbd1d4cc525cc39b6f4bd150d86a36546e9af5bf7a85a746d082897e2653"
+    },
+    {
+      "id": "SPEC-SY-lfs-transfer-agent",
+      "owner_repo": "Synergos",
+      "status": "defined",
+      "owner_doc": "spec/plan/redesign-ai-game-dev.md",
+      "owner_section": "4.16 AIGAME-M23 ツール連携: LFS custom-transfer agent とローカル broker",
+      "definition_sha256": "ce1166d66fc74571179d4cf2056d7b4fd378e459bf0ffc0e13fc72a8eee16abe"
+    },
+    {
+      "id": "SPEC-SY-local-broker",
+      "owner_repo": "Synergos",
+      "status": "defined",
+      "owner_doc": "spec/plan/redesign-ai-game-dev.md",
+      "owner_section": "4.16 AIGAME-M23 ツール連携: LFS custom-transfer agent とローカル broker",
+      "definition_sha256": "62f620076620aa828d8b908e085179498017608bac4e8a10506de44eca3b273b"
+    },
+    {
+      "id": "SPEC-SY-local-index",
+      "owner_repo": "Synergos",
+      "status": "planned",
+      "owner_doc": null,
+      "owner_section": null,
+      "definition_sha256": null
+    },
+    {
+      "id": "SPEC-SY-lock-announce",
+      "owner_repo": "Synergos",
+      "status": "defined",
+      "owner_doc": "spec/plan/redesign-ai-game-dev.md",
+      "owner_section": "4.9 AIGAME-M09 ロックの cache: LockAnnounce と読み取り専用ビット",
+      "definition_sha256": "e0ce09bb809b651dbcde2da0bdbb56e1b83ef59e518edbc85319d2e944c3f13b"
+    },
+    {
+      "id": "SPEC-SY-manifest-v2",
+      "owner_repo": "Synergos",
+      "status": "planned",
+      "owner_doc": null,
+      "owner_section": null,
+      "definition_sha256": null
+    },
+    {
+      "id": "SPEC-SY-membership-token",
+      "owner_repo": "Synergos",
+      "status": "defined",
+      "owner_doc": "spec/plan/redesign-security.md",
+      "owner_section": "4.3 SECURITY-M03 データプレーンの会員資格ゲート",
+      "definition_sha256": "339de787554e8a4ca3a3c16e287f8a720de2caf2491651c510e34a6607b7215b"
+    },
+    {
+      "id": "SPEC-SY-native-framing",
+      "owner_repo": "Synergos",
+      "status": "defined",
+      "owner_doc": "spec/feature/native-contracts.md",
+      "owner_section": "[id: SPEC-SY-native-framing] Bounded IPC framing",
+      "definition_sha256": "c9df50b4c53bd3be6936eadf98a1107913a680e81f29e97c53b3650d46e98e7b"
+    },
+    {
+      "id": "SPEC-SY-native-local-transport",
+      "owner_repo": "Synergos",
+      "status": "defined",
+      "owner_doc": "spec/feature/native-contracts.md",
+      "owner_section": "[id: SPEC-SY-native-local-transport] Local IPC client transport",
+      "definition_sha256": "70e9aeb4f8c8cc18df2195261859c849fdc05ed6e5c24cc983cafcd4962af16b"
+    },
+    {
+      "id": "SPEC-SY-native-membership-codec",
+      "owner_repo": "Synergos",
+      "status": "defined",
+      "owner_doc": "spec/feature/native-contracts.md",
+      "owner_section": "[id: SPEC-SY-native-membership-codec] Cernere membership bindings",
+      "definition_sha256": "2645a95b88eca914157c73c8ee7411baf8692a514abe98328aa21911ad81278f"
+    },
+    {
+      "id": "SPEC-SY-native-metadata",
+      "owner_repo": "Synergos",
+      "status": "defined",
+      "owner_doc": "spec/feature/native-contracts.md",
+      "owner_section": "[id: SPEC-SY-native-metadata] Compatible version metadata",
+      "definition_sha256": "03fe75717c9588ee6952badab974b5eed9aac795b0f5f02c54ff190e3c0484a3"
+    },
+    {
+      "id": "SPEC-SY-node-card",
+      "owner_repo": "Synergos",
+      "status": "defined",
+      "owner_doc": "spec/plan/redesign-security.md",
+      "owner_section": "4.5 SECURITY-M05 node card による bootstrap、招待 v2、daemon の外向き通信",
+      "definition_sha256": "30b786fc3dd46ae3e740f2f4ed1b9de51def92df5850f537929cdc2fb355e4e0"
+    },
+    {
+      "id": "SPEC-SY-node-enrollment",
+      "owner_repo": "Synergos",
+      "status": "defined",
+      "owner_doc": "spec/plan/redesign-security.md",
+      "owner_section": "4.4 SECURITY-M04 ノード enrollment・heartbeat・鍵のライフサイクルと保管",
+      "definition_sha256": "356af7d38a43b185b94a2584e242bad65e2099b2e08d8150e70ce88cbce15e00"
+    },
+    {
+      "id": "SPEC-SY-node-roles",
+      "owner_repo": "Synergos",
+      "status": "planned",
+      "owner_doc": null,
+      "owner_section": null,
+      "definition_sha256": null
+    },
+    {
+      "id": "SPEC-SY-object-get",
+      "owner_repo": "Synergos",
+      "status": "planned",
+      "owner_doc": null,
+      "owner_section": null,
+      "definition_sha256": null
+    },
+    {
+      "id": "SPEC-SY-object-model",
+      "owner_repo": "Synergos",
+      "status": "defined",
+      "owner_doc": "spec/plan/redesign-ai-game-dev.md",
+      "owner_section": "4.1 AIGAME-M01 統一オブジェクトモデル、ID、vector",
+      "definition_sha256": "04fbc189a623b391b7472358d5dd5303b41bc9792abcf0b2c7cc6c4b1f7df282"
+    },
+    {
+      "id": "SPEC-SY-opaque-custody",
+      "owner_repo": "Synergos",
+      "status": "defined",
+      "owner_doc": "spec/feature/opaque-custody.md",
+      "owner_section": "[id: SPEC-SY-opaque-custody] 受付・保管・受領証",
+      "definition_sha256": "4307eb09c9b0d34ff3aa1e82d23938e24890d16fd45cd5124f162edebcb0213f"
+    },
+    {
+      "id": "SPEC-SY-path-policy",
+      "owner_repo": "Synergos",
+      "status": "defined",
+      "owner_doc": "spec/plan/redesign-security.md",
+      "owner_section": "4.13 SECURITY-M13 パス方針、pull 専用の受信、受信前の容量予約",
+      "definition_sha256": "cdd6694289db92b44db825ad0d0c864210663b0b57ab9faa24be7aa2deefd186"
+    },
+    {
+      "id": "SPEC-SY-peer-wire",
+      "owner_repo": "Synergos",
+      "status": "planned",
+      "owner_doc": null,
+      "owner_section": null,
+      "definition_sha256": null
+    },
+    {
+      "id": "SPEC-SY-pull-only-receive",
+      "owner_repo": "Synergos",
+      "status": "defined",
+      "owner_doc": "spec/plan/redesign-security.md",
+      "owner_section": "4.13 SECURITY-M13 パス方針、pull 専用の受信、受信前の容量予約",
+      "definition_sha256": "6b002d52eef298df16e31bab7515f335749bb03f3497f73199790453785467cc"
+    },
+    {
+      "id": "SPEC-SY-range-plan",
+      "owner_repo": "Synergos",
+      "status": "planned",
+      "owner_doc": null,
+      "owner_section": null,
+      "definition_sha256": null
+    },
+    {
+      "id": "SPEC-SY-ref-sync",
+      "owner_repo": "Synergos",
+      "status": "defined",
+      "owner_doc": "spec/plan/redesign-ai-game-dev.md",
+      "owner_section": "4.4 AIGAME-M04 ref の複製 (ref-sync) と keep-set",
+      "definition_sha256": "e6a761e1514b35886910fff7649a8f99a7865dbbd05ccff3b8b71c9bba7aef7e"
+    },
+    {
+      "id": "SPEC-SY-relay-auth",
+      "owner_repo": "Synergos",
+      "status": "defined",
+      "owner_doc": "spec/plan/redesign-security.md",
+      "owner_section": "4.6 SECURITY-M06 relay の認証 (DERP 型の暗号文中継)",
+      "definition_sha256": "41e7253415689e0975e201f172ec7311e0134b77b3fc8661b320679444d41646"
+    },
+    {
+      "id": "SPEC-SY-relay-v2",
+      "owner_repo": "Synergos",
+      "status": "planned",
+      "owner_doc": null,
+      "owner_section": null,
+      "definition_sha256": null
+    },
+    {
+      "id": "SPEC-SY-replica-accounting",
+      "owner_repo": "Synergos",
+      "status": "defined",
+      "owner_doc": "spec/plan/redesign-ai-game-dev.md",
+      "owner_section": "4.13 AIGAME-M20 複製の勘定、履歴の役割、バックアップの完全性",
+      "definition_sha256": "33347520a440287e95ce4466873decf0fcf4bb094c4f7ce3ec298c9a8dd87e2c"
+    },
+    {
+      "id": "SPEC-SY-replication-stream",
+      "owner_repo": "Synergos",
+      "status": "planned",
+      "owner_doc": null,
+      "owner_section": null,
+      "definition_sha256": null
+    },
+    {
+      "id": "SPEC-SY-retention-ack",
+      "owner_repo": "Synergos",
+      "status": "defined",
+      "owner_doc": "spec/plan/redesign-security.md",
+      "owner_section": "4.14 SECURITY-M14 置換旧バイトの保持、大量変更ブレーカー、保持受領、単一の耐久書込 [変更提案]",
+      "definition_sha256": "c3a423e077745091724c7af13fcf6025e0f1c701c86cf61d828a61abb416b455"
+    },
+    {
+      "id": "SPEC-SY-retention-lock",
+      "owner_repo": "Synergos",
+      "status": "defined",
+      "owner_doc": "spec/plan/redesign-security.md",
+      "owner_section": "4.15 SECURITY-M15 履歴の保持ロック、GC の正本、copy-not-move、不変複製、scrub",
+      "definition_sha256": "cd3885b3ab3c88603dfe2aeafbe1f30122f8ef1a224b240f7c0b64998cdbd72c"
+    },
+    {
+      "id": "SPEC-SY-revocation-bundle",
+      "owner_repo": "Synergos",
+      "status": "defined",
+      "owner_doc": "spec/plan/redesign-security.md",
+      "owner_section": "4.7 SECURITY-M07 失効バンドルと事件 API (kill switch)",
+      "definition_sha256": "af775ed3fded8562a04aca367cb5e62db45f3cbbc5b19ee6dc97c3cb5c01af15"
+    },
+    {
+      "id": "SPEC-SY-sandbox-profile",
+      "owner_repo": "Synergos",
+      "status": "defined",
+      "owner_doc": "spec/plan/redesign-security.md",
+      "owner_section": "4.12 SECURITY-M12 hook・解析器・変換器の sandbox profile",
+      "definition_sha256": "bd3682a24f758deccdd381421e2d18f5d20215bac93aa3815dbc832f6abfe4a6"
+    },
+    {
+      "id": "SPEC-SY-signed-envelope",
+      "owner_repo": "Synergos",
+      "status": "defined",
+      "owner_doc": "spec/plan/redesign-security.md",
+      "owner_section": "4.1 SECURITY-M01 署名封筒と LCT v1 codec、golden vector",
+      "definition_sha256": "c386d254e8929a50bf3db8d7cc590a84b95dd0022ad614c6fef1188897ce1c30"
+    },
+    {
+      "id": "SPEC-SY-tombstone",
+      "owner_repo": "Synergos",
+      "status": "defined",
+      "owner_doc": "spec/plan/redesign-ai-game-dev.md",
+      "owner_section": "4.12 AIGAME-M19 消去: 墓標の消費",
+      "definition_sha256": "f4330b2b9e84416ffcff8e639ee2209c342c1ddacf7df2a996e13da1b6b58aec"
+    },
+    {
+      "id": "SPEC-SY-transfer-budget",
+      "owner_repo": "Synergos",
+      "status": "planned",
+      "owner_doc": null,
+      "owner_section": null,
+      "definition_sha256": null
+    },
+    {
+      "id": "SPEC-SY-txf2",
+      "owner_repo": "Synergos",
+      "status": "planned",
+      "owner_doc": null,
+      "owner_section": null,
+      "definition_sha256": null
+    },
+    {
+      "id": "SPEC-SY-workspace-pointer",
+      "owner_repo": "Synergos",
+      "status": "defined",
+      "owner_doc": "spec/plan/redesign-ai-game-dev.md",
+      "owner_section": "4.2 AIGAME-M02 C++ 互換契約の再仕様化と順序、git ポインタ",
+      "definition_sha256": "bfcdde3be8d27408066054c19326a540175bddc8827ae12b9f6147627f56bf8a"
+    },
+    {
+      "id": "SPEC-SY-workspace-view",
+      "owner_repo": "Synergos",
+      "status": "defined",
+      "owner_doc": "spec/plan/redesign-ai-game-dev.md",
+      "owner_section": "4.10 AIGAME-M10 view と部分ワークスペース、shelf (Synergos 側)",
+      "definition_sha256": "c9e90a6d2881ef58d5d9b0207930686ef803ff3fba7f776d718a85c520b6f78c"
+    },
+    {
+      "id": "SPEC-SY-worktree-apply",
+      "owner_repo": "Synergos",
+      "status": "defined",
+      "owner_doc": "spec/plan/redesign-ai-game-dev.md",
+      "owner_section": "4.6 AIGAME-M06 作業ツリーへの反映: 原子的、dirty に安全、同期モード、追いつき",
+      "definition_sha256": "7ec335aaa1db59358571f69aff00948fcdd6e4108689ccbe85324a3ec9b719db"
+    }
+  ]
+}

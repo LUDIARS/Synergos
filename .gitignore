@@ -1,5 +1,6 @@
 /target
 /build-native/
+/build-fuzz/
 
 # synergos-control のレジストリ (組織メンバーのメール / node key ハッシュを含む)
 # と、そこから生成される一時ファイル・実運用設定をリポジトリに入れない。
@@ -14,8 +15,9 @@ synergos-control-store.*.tmp
 .synergos/history/
 .synergos/state.json
 
-# Anatomia のローカル状態 (ドメイン定義の正本は spec/domains/)
-.anatomia/
+# Anatomia のローカル状態。層宣言だけを追跡し、業務ドメイン正本は spec/domains/ に置く。
+.anatomia/*
+!.anatomia/layers.json
 
 # synergos-admin-ui は独立 workspace のため、その target は root の /target に含まれない
 /synergos-admin-ui/target

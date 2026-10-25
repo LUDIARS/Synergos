@@ -1,0 +1,93 @@
+{
+  "version": 1,
+  "decoders": [
+    {
+      "decoder_id": "ipc.frame",
+      "protocol": "ipc",
+      "version": 1,
+      "kind": "frame",
+      "max_len": 1048580,
+      "max_items": 1,
+      "target": "fuzz/targets/ipc.frame.cpp",
+      "corpus_dir": "fuzz/ipc.frame",
+      "domain": "network-transport"
+    },
+    {
+      "decoder_id": "core.manifest",
+      "protocol": "metadata",
+      "version": 1,
+      "kind": "manifest",
+      "max_len": 67108864,
+      "max_items": 1000000,
+      "target": "fuzz/targets/core.manifest.cpp",
+      "corpus_dir": "fuzz/core.manifest",
+      "domain": "mesh-core"
+    },
+    {
+      "decoder_id": "core.version_state",
+      "protocol": "metadata",
+      "version": 1,
+      "kind": "version_state",
+      "max_len": 16777216,
+      "max_items": 1000000,
+      "target": "fuzz/targets/core.version_state.cpp",
+      "corpus_dir": "fuzz/core.version_state",
+      "domain": "mesh-core"
+    },
+    {
+      "decoder_id": "custody.canonical",
+      "protocol": "custody-signature",
+      "version": 1,
+      "kind": "canonical-json",
+      "max_len": 1048576,
+      "max_items": null,
+      "target": "fuzz/targets/custody.canonical.cpp",
+      "corpus_dir": "fuzz/custody.canonical",
+      "domain": "opaque-custody"
+    },
+    {
+      "decoder_id": "trust.jcs",
+      "protocol": "signed-envelope",
+      "version": 1,
+      "kind": "jcs",
+      "max_len": 1048576,
+      "max_items": null,
+      "target": "fuzz/targets/trust.jcs.cpp",
+      "corpus_dir": "fuzz/trust.jcs",
+      "domain": "network-transport"
+    },
+    {
+      "decoder_id": "trust.envelope",
+      "protocol": "signed-envelope",
+      "version": 1,
+      "kind": "payload",
+      "max_len": 1048576,
+      "max_items": null,
+      "target": "fuzz/targets/trust.envelope.cpp",
+      "corpus_dir": "fuzz/trust.envelope",
+      "domain": "network-transport"
+    },
+    {
+      "decoder_id": "trust.lct",
+      "protocol": "lct",
+      "version": 1,
+      "kind": "token",
+      "max_len": 16384,
+      "max_items": 256,
+      "target": "fuzz/targets/trust.lct.cpp",
+      "corpus_dir": "fuzz/trust.lct",
+      "domain": "network-transport"
+    },
+    {
+      "decoder_id": "trust.receipt",
+      "protocol": "custody-receipt",
+      "version": 2,
+      "kind": "receipt",
+      "max_len": 65536,
+      "max_items": 32,
+      "target": "fuzz/targets/trust.receipt.cpp",
+      "corpus_dir": "fuzz/trust.receipt",
+      "domain": "network-transport"
+    }
+  ]
+}

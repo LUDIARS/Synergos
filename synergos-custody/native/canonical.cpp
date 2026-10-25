@@ -1,4 +1,5 @@
 // @implements SPEC-SY-opaque-custody
+// @decoder custody.canonical
 #include "synergos/custody/signature.hpp"
 #include <yyjson.h>
 #include <algorithm>

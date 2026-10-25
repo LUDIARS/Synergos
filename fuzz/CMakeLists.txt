@@ -1,0 +1,31 @@
+# SPEC-SY-decode-bounds の fuzz 登録 (正本は fuzz/registry.json、scripts/gate/fuzz-registry.mjs が突き合わせる)。
+# decoder ごとに 2 つ作る:
+#   fuzz_replay_<name>  見本入力と決まった変形を流す毎回の試験 (ctest: fuzz.replay.<decoder_id>)
+#   fuzz_<name>         libFuzzer (SYNERGOS_FUZZ=ON のときだけ。ルートの CMakeLists.txt が全体に ASan と網羅計測を付ける。
+#                       scripts/gate/fuzz-run.mjs が時間を区切って回す)
+
+function(synergos_fuzz_target decoder_id)
+  string(REPLACE "." "_" name "${decoder_id}")
+  add_executable(fuzz_replay_${name} replay_main.cpp targets/${decoder_id}.cpp)
+  target_link_libraries(fuzz_replay_${name} PRIVATE synergos_native_options ${ARGN})
+  add_test(NAME fuzz.replay.${decoder_id} COMMAND fuzz_replay_${name} ${CMAKE_CURRENT_SOURCE_DIR}/${decoder_id})
+  if(SYNERGOS_FUZZ)
+    add_executable(fuzz_${name} targets/${decoder_id}.cpp)
+    target_link_libraries(fuzz_${name} PRIVATE synergos_native_options ${ARGN})
+    if(MSVC)
+      target_compile_options(fuzz_${name} PRIVATE /fsanitize=fuzzer)
+    else()
+      target_compile_options(fuzz_${name} PRIVATE -fsanitize=fuzzer)
+      target_link_options(fuzz_${name} PRIVATE -fsanitize=fuzzer)
+    endif()
+  endif()
+endfunction()
+
+synergos_fuzz_target(ipc.frame synergos_ipc_native)
+synergos_fuzz_target(core.manifest synergos_version_native)
+synergos_fuzz_target(core.version_state synergos_version_native)
+synergos_fuzz_target(custody.canonical synergos_custody_native)
+synergos_fuzz_target(trust.jcs synergos_trust_native)
+synergos_fuzz_target(trust.envelope synergos_trust_native)
+synergos_fuzz_target(trust.lct synergos_trust_native)
+synergos_fuzz_target(trust.receipt synergos_trust_native)

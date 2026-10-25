@@ -1,0 +1,20 @@
+{
+  "name": "quality-gates",
+  "description": "マージ前の機械検査。 契約登録・署名の直呼び・fuzz 登録のゲートと、 decoder の fuzz target・種入力。",
+  "presetRules": [],
+  "templateRules": [],
+  "membership": [
+    {
+      "pathPattern": "(^|/)scripts/gate/(?:.*/)?[^/]+\\.mjs$"
+    },
+    {
+      "pathPattern": "(^|/)fuzz/(?:.*/)?[^/]+$"
+    },
+    {
+      "pathPattern": "(^|/)praesidium\\.json$"
+    },
+    {
+      "pathPattern": "(^|/)\\.anatomia/layers\\.json$"
+    }
+  ]
+}

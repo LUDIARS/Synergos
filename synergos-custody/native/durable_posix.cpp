@@ -1,4 +1,5 @@
 // @implements SPEC-SY-custody-durability
+#if !defined(_WIN32)
 #include "synergos/custody/durable_file.hpp"
 #include "partial_file.hpp"
 #include <algorithm>
@@ -55,3 +56,4 @@ void write_new(const std::filesystem::path& destination, std::span<const std::by
     sync(directory.get());
 }
 }
+#endif

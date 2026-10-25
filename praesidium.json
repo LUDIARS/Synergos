@@ -1,0 +1,403 @@
+{
+  "version": 1,
+  "native": [
+    {
+      "file": "fuzz/replay_main.cpp",
+      "standard": "c++20",
+      "includes": []
+    },
+    {
+      "file": "fuzz/targets/core.manifest.cpp",
+      "standard": "c++20",
+      "includes": [
+        "synergos-core/native/include"
+      ]
+    },
+    {
+      "file": "fuzz/targets/core.version_state.cpp",
+      "standard": "c++20",
+      "includes": [
+        "synergos-core/native/include"
+      ]
+    },
+    {
+      "file": "fuzz/targets/custody.canonical.cpp",
+      "standard": "c++20",
+      "includes": [
+        "synergos-custody/native/include"
+      ]
+    },
+    {
+      "file": "fuzz/targets/ipc.frame.cpp",
+      "standard": "c++20",
+      "includes": [
+        "synergos-ipc/native/include"
+      ]
+    },
+    {
+      "file": "fuzz/targets/trust.envelope.cpp",
+      "standard": "c++20",
+      "includes": [
+        "synergos-net/native/trust/include"
+      ]
+    },
+    {
+      "file": "fuzz/targets/trust.jcs.cpp",
+      "standard": "c++20",
+      "includes": [
+        "synergos-net/native/trust/include"
+      ]
+    },
+    {
+      "file": "fuzz/targets/trust.lct.cpp",
+      "standard": "c++20",
+      "includes": [
+        "synergos-net/native/trust/include"
+      ]
+    },
+    {
+      "file": "fuzz/targets/trust.receipt.cpp",
+      "standard": "c++20",
+      "includes": [
+        "synergos-net/native/trust/include"
+      ]
+    },
+    {
+      "file": "synergos-core/native/manifest_codec.cpp",
+      "standard": "c++20",
+      "includes": [
+        "synergos-core/native/include"
+      ],
+      "packages": [
+        "yyjson"
+      ]
+    },
+    {
+      "file": "synergos-core/native/manifest_versions.cpp",
+      "standard": "c++20",
+      "includes": [
+        "synergos-core/native/include"
+      ],
+      "packages": [
+        "yyjson"
+      ]
+    },
+    {
+      "file": "synergos-core/native/relative_path.cpp",
+      "standard": "c++20",
+      "includes": [
+        "synergos-core/native/include"
+      ],
+      "packages": [
+        "yyjson"
+      ]
+    },
+    {
+      "file": "synergos-core/native/tests/manifest_codec_test.cpp",
+      "standard": "c++20",
+      "includes": [
+        "synergos-core/native/include"
+      ]
+    },
+    {
+      "file": "synergos-core/native/tests/version_test.cpp",
+      "standard": "c++20",
+      "includes": [
+        "synergos-core/native/include"
+      ]
+    },
+    {
+      "file": "synergos-core/native/version_state.cpp",
+      "standard": "c++20",
+      "includes": [
+        "synergos-core/native/include"
+      ],
+      "packages": [
+        "yyjson"
+      ]
+    },
+    {
+      "file": "synergos-custody/native/canonical.cpp",
+      "standard": "c++20",
+      "includes": [
+        "synergos-custody/native/include"
+      ],
+      "packages": [
+        "yyjson"
+      ]
+    },
+    {
+      "file": "synergos-custody/native/digest_openssl.cpp",
+      "standard": "c++20",
+      "includes": [
+        "synergos-custody/native/include"
+      ],
+      "packages": [
+        "yyjson"
+      ]
+    },
+    {
+      "file": "synergos-custody/native/digest_windows.cpp",
+      "standard": "c++20",
+      "includes": [
+        "synergos-custody/native/include"
+      ],
+      "packages": [
+        "yyjson"
+      ]
+    },
+    {
+      "file": "synergos-custody/native/durable_posix.cpp",
+      "standard": "c++20",
+      "includes": [
+        "synergos-custody/native/include"
+      ],
+      "packages": [
+        "yyjson"
+      ]
+    },
+    {
+      "file": "synergos-custody/native/durable_windows.cpp",
+      "standard": "c++20",
+      "includes": [
+        "synergos-custody/native/include"
+      ],
+      "packages": [
+        "yyjson"
+      ]
+    },
+    {
+      "file": "synergos-custody/native/partial_file.cpp",
+      "standard": "c++20",
+      "includes": [
+        "synergos-custody/native/include"
+      ],
+      "packages": [
+        "yyjson"
+      ]
+    },
+    {
+      "file": "synergos-custody/native/signature.cpp",
+      "standard": "c++20",
+      "includes": [
+        "synergos-custody/native/include"
+      ],
+      "packages": [
+        "yyjson"
+      ]
+    },
+    {
+      "file": "synergos-custody/native/tests/durable_file_test.cpp",
+      "standard": "c++20",
+      "includes": [
+        "synergos-custody/native/include"
+      ]
+    },
+    {
+      "file": "synergos-custody/native/tests/signature_test.cpp",
+      "standard": "c++20",
+      "includes": [
+        "synergos-custody/native/include"
+      ]
+    },
+    {
+      "file": "synergos-ipc/native/frame.cpp",
+      "standard": "c++20",
+      "includes": [
+        "synergos-ipc/native/include"
+      ]
+    },
+    {
+      "file": "synergos-ipc/native/local_channel.cpp",
+      "standard": "c++20",
+      "includes": [
+        "synergos-ipc/native/include"
+      ]
+    },
+    {
+      "file": "synergos-ipc/native/local_stream_posix.cpp",
+      "standard": "c++20",
+      "includes": [
+        "synergos-ipc/native/include"
+      ]
+    },
+    {
+      "file": "synergos-ipc/native/local_stream_windows.cpp",
+      "standard": "c++20",
+      "includes": [
+        "synergos-ipc/native/include"
+      ]
+    },
+    {
+      "file": "synergos-ipc/native/tests/frame_test.cpp",
+      "standard": "c++20",
+      "includes": [
+        "synergos-ipc/native/include"
+      ]
+    },
+    {
+      "file": "synergos-ipc/native/tests/local_endpoint_test.cpp",
+      "standard": "c++20",
+      "includes": [
+        "synergos-ipc/native/include"
+      ]
+    },
+    {
+      "file": "synergos-net/native/trust/caveats.cpp",
+      "standard": "c++20",
+      "includes": [
+        "synergos-net/native/trust/include"
+      ],
+      "packages": [
+        "yyjson",
+        "monocypher",
+        "monocypher-ed25519"
+      ]
+    },
+    {
+      "file": "synergos-net/native/trust/crypto.cpp",
+      "standard": "c++20",
+      "includes": [
+        "synergos-net/native/trust/include"
+      ],
+      "packages": [
+        "yyjson",
+        "monocypher",
+        "monocypher-ed25519"
+      ]
+    },
+    {
+      "file": "synergos-net/native/trust/envelope.cpp",
+      "standard": "c++20",
+      "includes": [
+        "synergos-net/native/trust/include"
+      ],
+      "packages": [
+        "yyjson",
+        "monocypher",
+        "monocypher-ed25519"
+      ]
+    },
+    {
+      "file": "synergos-net/native/trust/error.cpp",
+      "standard": "c++20",
+      "includes": [
+        "synergos-net/native/trust/include"
+      ],
+      "packages": [
+        "yyjson",
+        "monocypher",
+        "monocypher-ed25519"
+      ]
+    },
+    {
+      "file": "synergos-net/native/trust/jcs.cpp",
+      "standard": "c++20",
+      "includes": [
+        "synergos-net/native/trust/include"
+      ],
+      "packages": [
+        "yyjson",
+        "monocypher",
+        "monocypher-ed25519"
+      ]
+    },
+    {
+      "file": "synergos-net/native/trust/lct.cpp",
+      "standard": "c++20",
+      "includes": [
+        "synergos-net/native/trust/include"
+      ],
+      "packages": [
+        "yyjson",
+        "monocypher",
+        "monocypher-ed25519"
+      ]
+    },
+    {
+      "file": "synergos-net/native/trust/profile_rules.cpp",
+      "standard": "c++20",
+      "includes": [
+        "synergos-net/native/trust/include"
+      ],
+      "packages": [
+        "yyjson",
+        "monocypher",
+        "monocypher-ed25519"
+      ]
+    },
+    {
+      "file": "synergos-net/native/trust/receipt.cpp",
+      "standard": "c++20",
+      "includes": [
+        "synergos-net/native/trust/include"
+      ],
+      "packages": [
+        "yyjson",
+        "monocypher",
+        "monocypher-ed25519"
+      ]
+    },
+    {
+      "file": "synergos-net/native/trust/tests/token_surgery.cpp",
+      "standard": "c++20",
+      "includes": [
+        "synergos-net/native/trust/include"
+      ],
+      "packages": [
+        "yyjson"
+      ]
+    },
+    {
+      "file": "synergos-net/native/trust/tests/trust_test.cpp",
+      "standard": "c++20",
+      "includes": [
+        "synergos-net/native/trust/include"
+      ],
+      "packages": [
+        "yyjson"
+      ]
+    },
+    {
+      "file": "synergos-net/native/trust/tests/vector_gen.cpp",
+      "standard": "c++20",
+      "includes": [
+        "synergos-net/native/trust/include"
+      ],
+      "packages": [
+        "yyjson"
+      ]
+    },
+    {
+      "file": "synergos-net/native/trust/tests/vector_gen_lct.cpp",
+      "standard": "c++20",
+      "includes": [
+        "synergos-net/native/trust/include"
+      ],
+      "packages": [
+        "yyjson"
+      ]
+    },
+    {
+      "file": "synergos-net/native/trust/tests/vector_gen_receipt.cpp",
+      "standard": "c++20",
+      "includes": [
+        "synergos-net/native/trust/include"
+      ],
+      "packages": [
+        "yyjson"
+      ]
+    },
+    {
+      "file": "synergos-net/native/trust/tests/vectors.cpp",
+      "standard": "c++20",
+      "includes": [
+        "synergos-net/native/trust/include"
+      ],
+      "packages": [
+        "yyjson"
+      ]
+    }
+  ],
+  "web": []
+}

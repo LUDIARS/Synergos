@@ -34,4 +34,22 @@ int main() {
     ManifestVersions unicode;
     unicode.receive("assets/素材.bin", {1, 3, 4, 5, "node\"\\\n"});
     require(decode_manifest(encode_manifest(unicode, "p"), "p").entries().at("assets/素材.bin").publisher == "node\"\\\n");
+
+    // SPEC-SY-decode-bounds: 長さは解析より前、要素数は要素を読む前に decode.too_large
+    const std::string huge(max_manifest_bytes + 1, ' ');
+    try {
+        static_cast<void>(decode_manifest(huge, "p"));
+        require(false);
+    } catch (const DecodeTooLarge& e) {
+        require(e.decoder_id() == "core.manifest" && e.declared() == max_manifest_bytes + 1 && e.max() == max_manifest_bytes);
+    }
+    std::string many = R"({"project_id":"p","versions":{)";
+    for (std::size_t i = 0; i <= max_version_state_entries; ++i) many += (i ? ",\"f" : "\"f") + std::to_string(i) + "\":1";
+    many += "}}";
+    try {
+        static_cast<void>(decode_version_state(many, "p"));
+        require(false);
+    } catch (const DecodeTooLarge& e) {
+        require(e.decoder_id() == "core.version_state" && e.max() == max_version_state_entries);
+    }
 }

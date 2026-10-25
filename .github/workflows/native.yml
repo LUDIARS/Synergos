@@ -35,3 +35,11 @@ jobs:
           node-version: '22'
       - name: Test analysis verification policy
         run: node --test spec/plan/redesign-analysis/workflows/tests/find-verify.test.mjs
+      - name: Test contract gates
+        run: node --test scripts/gate/tests/contracts.test.mjs scripts/gate/tests/direct-sign.test.mjs scripts/gate/tests/fuzz-registry.test.mjs scripts/gate/tests/fuzz-plan.test.mjs
+      - name: Fuzz registry gate
+        run: node scripts/gate/fuzz-registry.mjs
+      - name: Contract registry gate
+        run: node scripts/gate/contract-registry.mjs
+      - name: No direct sign gate
+        run: node scripts/gate/no-direct-sign.mjs

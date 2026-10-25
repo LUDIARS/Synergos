@@ -1,0 +1,21 @@
+{
+  "layers": [
+    { "glob": "synergos-core/native/tests/**", "layer": "application" },
+    { "glob": "synergos-custody/native/tests/**", "layer": "application" },
+    { "glob": "synergos-ipc/native/tests/**", "layer": "application" },
+    { "glob": "synergos-net/native/trust/tests/**", "layer": "application" },
+    { "glob": "fuzz/**", "layer": "application" },
+    { "glob": "scripts/gate/**", "layer": "application" },
+    { "glob": "synergos-core/native/*.cpp", "layer": "domain" },
+    { "glob": "synergos-core/native/include/**", "layer": "domain" },
+    { "glob": "synergos-net/native/trust/*.cpp", "layer": "domain" },
+    { "glob": "synergos-net/native/trust/*.h", "layer": "domain" },
+    { "glob": "synergos-net/native/trust/include/**", "layer": "domain" },
+    { "glob": "synergos-ipc/native/*.cpp", "layer": "infrastructure" },
+    { "glob": "synergos-ipc/native/include/**", "layer": "infrastructure" },
+    { "glob": "synergos-custody/native/*.cpp", "layer": "infrastructure" },
+    { "glob": "synergos-custody/native/include/**", "layer": "infrastructure" }
+  ],
+  "mergeCouplingThreshold": 1,
+  "order": ["infrastructure", "domain", "application"]
+}

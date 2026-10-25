@@ -1,4 +1,6 @@
-// @implements SPEC-SY-native-metadata
+// @implements SPEC-SY-native-metadata SPEC-SY-decode-bounds
+// @decoder core.manifest
+// @decoder core.version_state
 #include "synergos/core/manifest_codec.hpp"
 #include <yyjson.h>
 #include <cstdlib>
@@ -8,8 +10,19 @@
 #include <stdexcept>
 
 namespace synergos::core {
+DecodeTooLarge::DecodeTooLarge(std::string decoder_id, std::size_t declared, std::size_t max)
+    : std::length_error("decode.too_large " + decoder_id + ": " + std::to_string(declared) + " > " + std::to_string(max)),
+      decoder_id_(std::move(decoder_id)), declared_(declared), max_(max) {}
+
+const std::string& DecodeTooLarge::decoder_id() const noexcept { return decoder_id_; }
+std::size_t DecodeTooLarge::declared() const noexcept { return declared_; }
+std::size_t DecodeTooLarge::max() const noexcept { return max_; }
+
 namespace {
 using Document = std::unique_ptr<yyjson_doc, decltype(&yyjson_doc_free)>;
+void bounded(const char* decoder_id, std::size_t declared, std::size_t max) {
+    if (declared > max) throw DecodeTooLarge(decoder_id, declared, max);
+}
 std::string_view string_value(yyjson_val* value) {
     if (!yyjson_is_str(value)) throw std::invalid_argument("Expected JSON string");
     return {yyjson_get_str(value), yyjson_get_len(value)};
@@ -68,10 +81,12 @@ private:
 };
 }
 ManifestVersions decode_manifest(std::string_view text, std::string_view project_id) {
+    bounded("core.manifest", text.size(), max_manifest_bytes);
     const auto doc = document(text, project_id, true);
     ManifestVersions result;
     auto* files = yyjson_obj_get(yyjson_doc_get_root(doc.get()), "files");
     if (!files) return result;
+    if (yyjson_is_obj(files)) bounded("core.manifest", yyjson_obj_size(files), max_manifest_files);
     object(files);
     auto iter = yyjson_obj_iter_with(files);
     while (auto* key = yyjson_obj_iter_next(&iter)) {
@@ -107,10 +122,12 @@ std::string encode_manifest(const ManifestVersions& manifest, std::string_view p
     return writer.finish(root);
 }
 VersionState decode_version_state(std::string_view text, std::string_view project_id) {
+    bounded("core.version_state", text.size(), max_version_state_bytes);
     const auto doc = document(text, project_id, false);
     VersionState result;
     auto* versions = yyjson_obj_get(yyjson_doc_get_root(doc.get()), "versions");
     if (!versions) return result;
+    if (yyjson_is_obj(versions)) bounded("core.version_state", yyjson_obj_size(versions), max_version_state_entries);
     object(versions);
     auto iter = yyjson_obj_iter_with(versions);
     while (auto* key = yyjson_obj_iter_next(&iter)) {

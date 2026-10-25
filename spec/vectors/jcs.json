@@ -1,0 +1,54 @@
+{
+  "cases": [
+    {
+      "name": "utf16-key-order",
+      "input": "{\"\\ufb01\":1,\"\\ud83d\\ude00\":2,\"a\":3}",
+      "canonical": "{\"a\":3,\"😀\":2,\"ﬁ\":1}"
+    },
+    {
+      "name": "nested-sort",
+      "input": "{ \"b\": {\"d\":1, \"c\":2}, \"a\": [ {\"z\":1,\"y\":2} ] }",
+      "canonical": "{\"a\":[{\"y\":2,\"z\":1}],\"b\":{\"c\":2,\"d\":1}}"
+    },
+    {
+      "name": "escapes",
+      "input": "[\"\\u000f\",\"\\u2028\",\"\\/\",\"\\\"\",\"\\\\\",\"\\n\",\"\\u00e9\"]",
+      "canonical": "[\"\\u000f\",\" \",\"/\",\"\\\"\",\"\\\\\",\"\\n\",\"é\"]"
+    },
+    {
+      "name": "literals",
+      "input": "[true, false, null]",
+      "canonical": "[true,false,null]"
+    },
+    {
+      "name": "safe-integers",
+      "input": "[0, 9007199254740991, -9007199254740991]",
+      "canonical": "[0,9007199254740991,-9007199254740991]"
+    },
+    {
+      "name": "unsafe-integer",
+      "input": "[9007199254740992]",
+      "error": "jcs.unsafe_integer"
+    },
+    {
+      "name": "float",
+      "input": "[1.5]",
+      "error": "jcs.float"
+    },
+    {
+      "name": "exponent",
+      "input": "[1e2]",
+      "error": "jcs.float"
+    },
+    {
+      "name": "duplicate-key",
+      "input": "{\"a\":1,\"a\":2}",
+      "error": "jcs.duplicate_key"
+    },
+    {
+      "name": "invalid-json",
+      "input": "{",
+      "error": "jcs.invalid_json"
+    }
+  ]
+}

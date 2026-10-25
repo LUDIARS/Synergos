@@ -1,1 +1,4 @@
 *.sh text eol=lf
+# fuzz の種入力はバイト列のまま (改行変換で壊さない)
+fuzz/*/** -text
+fuzz/targets/** text

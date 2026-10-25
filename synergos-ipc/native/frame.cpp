@@ -1,4 +1,5 @@
 // @implements SPEC-SY-native-framing
+// @decoder ipc.frame
 #include "synergos/ipc/frame.hpp"
 #include <algorithm>
 #include <utility>

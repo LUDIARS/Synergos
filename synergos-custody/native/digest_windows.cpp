@@ -1,4 +1,5 @@
 // @implements SPEC-SY-opaque-custody
+#if defined(_WIN32)
 #include "digest.hpp"
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -60,3 +61,4 @@ Digest digest(std::string_view message, std::string_view secret, bool hmac) {
 Digest sha256(std::string_view message) { return digest(message, {}, false); }
 Digest hmac_sha256(std::string_view secret, std::string_view message) { return digest(message, secret, true); }
 }
+#endif

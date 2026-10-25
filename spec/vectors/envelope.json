@@ -1,0 +1,56 @@
+{
+  "cases": [
+    {
+      "name": "membership-by-cernere",
+      "ctx": "synergos/membership",
+      "ver": 1,
+      "signer": "cernere",
+      "public_key": "SAdaWX5yGhVuLgeZ3lzAxTJNxufq8c3UYlCGjsUyFd0",
+      "payload": "{\"sub\":\"user-1\", \"org\":\"ludiars\", \"exp\":1800003600}",
+      "message": "c3luZXJnb3MvbWVtYmVyc2hpcAABeyJleHAiOjE4MDAwMDM2MDAsIm9yZyI6Imx1ZGlhcnMiLCJzdWIiOiJ1c2VyLTEifQ",
+      "signature": "-de0diHomXrQ7ILWvcVIIbg2CEzU7lytKUy_pYDk37Tt820koBE6xVVFIyq79piyc4tgf-j3g3NzB9SErHhEDw"
+    },
+    {
+      "name": "peer-session-non-bmp",
+      "ctx": "synergos/peer-session",
+      "ver": 1,
+      "signer": "node",
+      "public_key": "XiEsCYDks5_AlyETSqAhCTdO39JgwNPQPLUByNZUV6k",
+      "payload": "{\"peer\":\"node-\\ud83d\\ude00\",\"nonce\":7}",
+      "message": "c3luZXJnb3MvcGVlci1zZXNzaW9uAAF7Im5vbmNlIjo3LCJwZWVyIjoibm9kZS3wn5iAIn0",
+      "signature": "S6cmYgbTA12nzFW7AXmKgaEHPSlCzKZWnvkLm2fiZ9Vhb4h5x9ksp-FQ6LYasdlD_CZHrqD4FkmNB5aSSZQpDg"
+    },
+    {
+      "name": "checkpoint-by-curare",
+      "ctx": "synergos/journal-checkpoint",
+      "ver": 1,
+      "signer": "curare",
+      "public_key": "F8t5-ytBIPKx7GXkGY1uCLKOgT_rAeSkAIObheGAgM4",
+      "payload": "{\"seq\":42,\"head\":\"sha256:00\"}",
+      "message": "c3luZXJnb3Mvam91cm5hbC1jaGVja3BvaW50AAF7ImhlYWQiOiJzaGEyNTY6MDAiLCJzZXEiOjQyfQ",
+      "signature": "SISpN88TimMW8hKkv7H89a5qlpY4zqqTA9zmTAgTNpE70eLHkKy6GaKmqkiE20bvCBargQvZ6a8M-s7FQ9m0DA"
+    },
+    {
+      "name": "membership-claimed-by-node",
+      "ctx": "synergos/membership",
+      "ver": 1,
+      "signer": "node",
+      "public_key": "SAdaWX5yGhVuLgeZ3lzAxTJNxufq8c3UYlCGjsUyFd0",
+      "payload": "{\"sub\":\"user-1\",\"exp\":1800003600}",
+      "message": "c3luZXJnb3MvbWVtYmVyc2hpcAABeyJleHAiOjE4MDAwMDM2MDAsInN1YiI6InVzZXItMSJ9",
+      "signature": "BQwn3FsCOM5TkhQMHJrCOjDtOTMbRBmrGuWF0Hi3e7oGayEuRbOKi_SENG1wFceyBvdu16SJYEetMpvXQMdaDw",
+      "error": "envelope.bad_signer"
+    },
+    {
+      "name": "ctx-swapped",
+      "ctx": "synergos/node-card",
+      "ver": 1,
+      "signer": "cernere",
+      "public_key": "SAdaWX5yGhVuLgeZ3lzAxTJNxufq8c3UYlCGjsUyFd0",
+      "payload": "{\"sub\":\"user-1\",\"exp\":1800003600}",
+      "message": "c3luZXJnb3Mvbm9kZS1jYXJkAAF7ImV4cCI6MTgwMDAwMzYwMCwic3ViIjoidXNlci0xIn0",
+      "signature": "BQwn3FsCOM5TkhQMHJrCOjDtOTMbRBmrGuWF0Hi3e7oGayEuRbOKi_SENG1wFceyBvdu16SJYEetMpvXQMdaDw",
+      "error": "envelope.bad_signature"
+    }
+  ]
+}

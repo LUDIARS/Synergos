@@ -1,4 +1,5 @@
 // @implements SPEC-SY-custody-durability
+#if defined(_WIN32)
 #include "synergos/custody/durable_file.hpp"
 #include "partial_file.hpp"
 #ifndef NOMINMAX
@@ -50,3 +51,4 @@ void write_new(const std::filesystem::path& destination, std::span<const std::by
     if (!MoveFileExW(partial.c_str(), destination.c_str(), MOVEFILE_WRITE_THROUGH)) fail("Publish durable file");
 }
 }
+#endif

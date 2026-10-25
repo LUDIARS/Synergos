@@ -2,10 +2,13 @@
 
 ## Authorization and outcome
 
-Follow-up on 2026-10-17 narrows the immediate milestone to measuring whether
-the C++ build uses less memory than Rust, with minimal dependencies. Complete
-runtime migration remains a later milestone; do not add networking/UI packages
-just to expand this increment. Report measured target differences explicitly.
+On 2026-10-25 neco requested the complete rewrite and migration, delegated to
+Sol, including alignment with Cernere. This supersedes the 2026-10-17 immediate
+build-memory milestone. Transport, daemon, custody/control, GUI and operations
+are now in scope; build-memory measurements remain evidence, not completion.
+The normative redesign is the three `redesign-*.md` documents in this directory.
+Their approved authority decisions take precedence over the legacy contracts
+below. Runtime cutover still requires review and the acceptance gate.
 
 2026-10-17 neco requested the C++ rewrite, integration of reviewed work, build,
 and execution. This authorizes implementation and verification; it does not
@@ -44,7 +47,24 @@ cutover speed. No native layer may report success for an unsupported operation.
 - Custody: SPEC-SY-opaque-custody, SPEC-SY-custody-durability,
   SPEC-SY-custody-acquisition remain normative. Preserve canonical receipt
   bytes, HMAC, capability method/object/expiry binding, exclusive publication,
-  file/directory durability and tombstones. Cu remains the authorization owner.
+  file/directory durability and tombstones. These are the legacy v1 contracts,
+  not permission to issue new HMAC credentials in the redesigned runtime.
+  New receipts/capabilities follow SPEC-SY-custody-receipt-v2 and
+  SPEC-SY-custody-capability-v2; HMAC is verification-only for stored v1 rows
+  during the bounded migration grace window.
+- Authority: Cernere alone owns project membership (`read`, `publish`, `history`)
+  and the node roster (SPEC-CR-membership-issuer, SPEC-CR-node-roster).
+  Synergos control only relays, caches and verifies Cernere-signed membership
+  LCTs, node cards, ProjectRoster, RosterStatus and OfflineLease. It holds no
+  issuer key for those records and cannot change membership, ownership or
+  reachability. Missing or expired authority evidence fails closed.
+- Service boundary: Synergos transfer, synchronization and storage work without
+  Curare. Curare owns production versions, review, approval and its business
+  retention references; it neither relays bytes nor grants project membership.
+  Curare's custody capability is an additional workflow restriction and cannot
+  substitute for Cernere membership.
+- Relay: implement the authenticated external relay only in C++. Until that
+  acceptance gate passes, use Tailscale and bind the node only to its tailnet IP.
 - Existing CLI, native GUI, admin UI and Ars adapter remain acceptance surfaces.
 
 ## Implementation and verification order
@@ -63,9 +83,13 @@ cutover speed. No native layer may report success for an unsupported operation.
 
 ## Completion gate
 
-All existing feature families above must have passing parity evidence before
+All existing feature families above must have passing acceptance evidence before
 retiring Rust or redirecting the production service. Unit/library tests and
 successful compilation are intermediate evidence, not full runtime acceptance.
+Where the redesign replaces a legacy behavior, acceptance means conformance to
+the new security/transfer/workflow contract, not preservation of that behavior.
+Track codec completion separately from runtime enforcement: signature vectors
+alone do not prove peer authorization, revocation propagation or node enrollment.
 Windows execution cannot establish Linux/macOS runtime parity. External cloud
 and multi-node tests must report unavailable prerequisites as unverified.
 Keep the existing runtime intact until the C++ acceptance gate is satisfied.

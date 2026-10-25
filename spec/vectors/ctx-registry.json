@@ -1,0 +1,97 @@
+{
+  "version": 1,
+  "rows": [
+    {
+      "ctx": "synergos/peer-session",
+      "signers": [
+        "node"
+      ]
+    },
+    {
+      "ctx": "synergos/membership",
+      "signers": [
+        "cernere"
+      ]
+    },
+    {
+      "ctx": "synergos/gossip",
+      "signers": [
+        "node"
+      ]
+    },
+    {
+      "ctx": "synergos/chain",
+      "signers": [
+        "node"
+      ]
+    },
+    {
+      "ctx": "synergos/invite",
+      "signers": [
+        "node"
+      ]
+    },
+    {
+      "ctx": "synergos/node-card",
+      "signers": [
+        "cernere"
+      ]
+    },
+    {
+      "ctx": "synergos/presence",
+      "signers": [
+        "node"
+      ]
+    },
+    {
+      "ctx": "synergos/project-roster",
+      "signers": [
+        "cernere"
+      ]
+    },
+    {
+      "ctx": "synergos/roster-status",
+      "signers": [
+        "cernere"
+      ]
+    },
+    {
+      "ctx": "synergos/heartbeat",
+      "signers": [
+        "node"
+      ]
+    },
+    {
+      "ctx": "synergos/enroll",
+      "signers": [
+        "node"
+      ]
+    },
+    {
+      "ctx": "synergos/revocation",
+      "signers": [
+        "control-deny"
+      ]
+    },
+    {
+      "ctx": "synergos/receipt",
+      "signers": [
+        "custody"
+      ]
+    },
+    {
+      "ctx": "synergos/lct",
+      "signers": [
+        "custody",
+        "holder"
+      ]
+    },
+    {
+      "ctx": "synergos/journal-checkpoint",
+      "signers": [
+        "custody",
+        "curare"
+      ]
+    }
+  ]
+}

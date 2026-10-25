@@ -1,4 +1,5 @@
 // @implements SPEC-SY-opaque-custody
+#if !defined(_WIN32)
 #include "digest.hpp"
 #include <openssl/evp.h>
 #include <stdexcept>
@@ -25,3 +26,4 @@ Digest hmac_sha256(std::string_view secret, std::string_view message) {
     return result;
 }
 }
+#endif

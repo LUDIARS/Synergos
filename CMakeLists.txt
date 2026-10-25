@@ -24,6 +24,24 @@ else()
   target_compile_options(synergos_native_options INTERFACE -Wall -Wextra -Wpedantic -Werror)
 endif()
 
+# fuzz 用のビルド (fuzz/CMakeLists.txt・scripts/gate/fuzz-run.mjs)。全体に ASan と網羅計測を付け、
+# libFuzzer 本体 (main) は fuzz target だけに付ける。通常のビルドでは OFF。
+option(SYNERGOS_FUZZ "Build libFuzzer targets with ASan and coverage on every native library" OFF)
+if(SYNERGOS_FUZZ)
+  if(MSVC)
+    add_compile_options(/fsanitize=address /Zi /fsanitize-coverage=inline-8bit-counters /fsanitize-coverage=edge
+                        /fsanitize-coverage=trace-cmp /fsanitize-coverage=trace-div)
+    add_link_options(/INCREMENTAL:NO /DEBUG)
+  else()
+    add_compile_options(-fsanitize=address,fuzzer-no-link -g)
+    add_link_options(-fsanitize=address)
+  endif()
+endif()
+
 add_subdirectory(synergos-ipc/native)
 add_subdirectory(synergos-core/native)
 add_subdirectory(synergos-custody/native)
+add_subdirectory(synergos-net/native/trust)
+if(BUILD_TESTING)
+  add_subdirectory(fuzz)
+endif()
