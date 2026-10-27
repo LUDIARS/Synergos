@@ -88,6 +88,17 @@
       "target": "fuzz/targets/trust.receipt.cpp",
       "corpus_dir": "fuzz/trust.receipt",
       "domain": "network-transport"
+    },
+    {
+      "decoder_id": "custody.journal",
+      "protocol": "custody-journal",
+      "version": 1,
+      "kind": "journal-row",
+      "max_len": 1048575,
+      "max_items": 1,
+      "target": "fuzz/targets/custody.journal.cpp",
+      "corpus_dir": "fuzz/custody.journal",
+      "domain": "opaque-custody"
     }
   ]
 }

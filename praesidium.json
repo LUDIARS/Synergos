@@ -408,6 +408,49 @@
       "packages": [
         "yyjson"
       ]
+    },
+    {
+      "file": "synergos-custody/native/journal.cpp",
+      "standard": "c++20",
+      "includes": [
+        "synergos-custody/native/include",
+        "synergos-net/native/trust/include"
+      ]
+    },
+    {
+      "file": "synergos-custody/native/journal_file.cpp",
+      "standard": "c++20",
+      "includes": [
+        "synergos-custody/native/include",
+        "synergos-net/native/trust/include"
+      ]
+    },
+    {
+      "file": "synergos-custody/native/journal_row.cpp",
+      "standard": "c++20",
+      "includes": [
+        "synergos-custody/native/include",
+        "synergos-net/native/trust/include"
+      ],
+      "packages": [
+        "yyjson"
+      ]
+    },
+    {
+      "file": "synergos-custody/native/tests/journal_test.cpp",
+      "standard": "c++20",
+      "includes": [
+        "synergos-custody/native/include",
+        "synergos-net/native/trust/include"
+      ]
+    },
+    {
+      "file": "fuzz/targets/custody.journal.cpp",
+      "standard": "c++20",
+      "includes": [
+        "synergos-custody/native/include",
+        "synergos-net/native/trust/include"
+      ]
     }
   ],
   "web": []

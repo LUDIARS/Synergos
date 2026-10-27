@@ -5,7 +5,9 @@
     "spec/feature/opaque-custody.md",
     "spec/feature/native-custody-request.md",
     "spec/plan/redesign-security.md:4.7 SECURITY-M07 失効バンドルと事件 API (kill switch)",
-    "spec/plan/redesign-security.md:4.9 SECURITY-M09 custody のサービス認証・委任・資格 v2"
+    "spec/plan/redesign-security.md:4.9 SECURITY-M09 custody のサービス認証・委任・資格 v2",
+    "spec/feature/native-custody-journal.md",
+    "spec/plan/redesign-security.md:4.22 SECURITY-M25 セキュリティイベントと custody ジャーナル"
   ],
   "presetRules": [],
   "templateRules": [],

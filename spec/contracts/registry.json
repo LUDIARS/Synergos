@@ -386,6 +386,14 @@
       "definition_sha256": "7992fc006a5912a0af80d5c6e8ece73b14594835adc412ceca3e9d6cf1d9f7b9"
     },
     {
+      "id": "SPEC-SY-content-http",
+      "owner_repo": "Synergos",
+      "status": "defined",
+      "owner_doc": "spec/feature/content-http.md",
+      "owner_section": "[id: SPEC-SY-content-http] Additive legacy content adapter",
+      "definition_sha256": "83146741e4ed85e2a893edf36c92a707d0754d1a7cc5148be255201547b64933"
+    },
+    {
       "id": "SPEC-SY-content-identity",
       "owner_repo": "Synergos",
       "status": "planned",
@@ -648,6 +656,14 @@
       "owner_doc": "spec/plan/redesign-security.md",
       "owner_section": "4.3 SECURITY-M03 データプレーンの会員資格ゲート",
       "definition_sha256": "339de787554e8a4ca3a3c16e287f8a720de2caf2491651c510e34a6607b7215b"
+    },
+    {
+      "id": "SPEC-SY-native-custody-journal",
+      "owner_repo": "Synergos",
+      "status": "defined",
+      "owner_doc": "spec/feature/native-custody-journal.md",
+      "owner_section": "[id: SPEC-SY-native-custody-journal] Bounded durable access journal",
+      "definition_sha256": "5165180bfd0fae6c99eefd1a7d69add3e3b1e75c55f064faaf6c493319060a56"
     },
     {
       "id": "SPEC-SY-native-custody-request-boundary",

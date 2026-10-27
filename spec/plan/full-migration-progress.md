@@ -182,3 +182,90 @@ Local unit/integration/CTest/service/live-transfer execution remains prohibited
 (tests=false), and no startup/restart/deployment/main update/push is performed.
 Windows compilation does not establish Linux/macOS runtime parity or a clean
 download build. Review/merge/reflection and the full migration remain open.
+
+## Native custody journal owner checkpoint — 2026-10-27
+
+The preserved native request work was committed as4f7b97d and accepted once as
+Synergos local PR#3492, id36deb804-2607-47cb-b4de-19d84c21df9a, open/queued/standard.
+No review polling or replay followed. This independent M25 journal work starts
+from local mainf5ce437 in `.wt-Synergos-custody-journal`, branch
+`feat/native-custody-journal-20261027`; Cc path/origin/branch match was read back.
+The one exact safe.directory prerequisite was resolved before editing. Neither
+shared main nor the pending request branch is edited by this increment.
+
+The native journal owner now provides exclusive OS file ownership, bounded
+binary UTF-8 JSONL append/flush, startup sequence/stream/JCS/SHA-256 validation,
+metadata-only security-event encoding, and envelope-signed custody checkpoints.
+A partial/corrupt row refuses startup without truncation. Uncertain append or
+flush poisons the live owner rather than automatically retrying. Hash chaining
+alone cannot detect suffix truncation without an external preserved checkpoint.
+No real listener/caller, capability budget, atomic admission transaction,
+upload single-commit ledger, checkpoint schedule/persistence,400-day deletion,
+Vestigium delivery or current Cr authority is implied. Those remain required.
+
+Dependency audit: no package, lockfile, install script or indirect dependency is
+added. OS/standard C++ file primitives provide the stable append/lock boundary;
+existing yyjson/JCS, platform SHA-256 and signed-envelope/Monocypher provide
+parsing and cryptography. No homemade cryptographic algorithm or replacement
+issuer is introduced. Existing pinned offline source caches are reused, not
+downloaded. Compilation is not proof of a clean-download or POSIX runtime build.
+
+Memory/lifetime audit: descriptor ownership is RAII through constructor failures
+and destruction; POSIX directory descriptors close before error propagation.
+File offsets and remaining spool arithmetic are checked, row and event buffers
+are bounded, JSON documents/free buffers are owned, outputs copy strings and
+no JSON borrowed view escapes. A single mutex serializes head/append/checkpoint;
+callers must join operations before destroying the owner. Streams are supplied
+trusted configuration and never used as paths. The parent directory must remain
+private to the OS service identity; file locks do not stop that identity from
+externally replacing its own root. Windows inherits that directory's ACL; POSIX
+requires an owned0600 regular single-link file and rejects symlinks.
+
+The new test/fuzz executables are authored and compiled, never executed locally.
+The fixed first-row digest was independently generated using Node standard
+SHA-256 and canonicalized fixture data, not the implementation under test.
+Malformed/partial/tampered rows, process ownership, stream binding, concurrent
+append, recovery and checkpoint verification are registered for Revisor.
+Fault-injection, crash durability and operating-system/platform behavior still
+need the corresponding runtime acceptance evidence. No unit/integration/CTest,
+fuzz replay, service/live HTTP test, startup/restart/deploy/main update is run.
+
+Verification checkpoint: MSVC19.39 Release compile/link succeeds for
+synergos_custody_journal_test and fuzz_replay_custody_journal; executables are
+not run. Contract registry passes48defined/112referenced, signing lint passes76
+C/C++ files, fuzz registry passes9decoders/9tagged sources. Focused Praesidium
+compiler analysis passes the five new journal/target translation units. The
+full49-unit scan inspects118source files with findings empty but reports
+native.analysis-budget on10units after135504ms; its status is error, not passed.
+Anatomia rule/duplication/spec-linkage/coupling pass after the explicit native
+spec link; convention_drift remains a C++ naming advisory, so overall pass is
+false. Existing C++ snake_case and PascalCase type idioms are preserved, not
+renamed solely to satisfy a sibling heuristic. No policy budget or required
+review/test gate is weakened. Parent's10/27 Actio GET confirms the same existing
+task remains in_progress/sourcecc-command/completionEvidence null; instruction
+link remains separate and unestablished. Review, merge and runtime reflection
+for this independent increment are not yet established.
+
+### Notified journal conflict repair — 2026-10-27
+
+The formal Revisor#3496 merge-conflict notification was followed by one saved-id
+read confirming open/action_required. The branch is rebased onto the existing
+local main69f1c25, which includes formally accepted#3492 (merge7dd63f58e076).
+Both native request and journal source/test CMake entries are retained; both
+progress sections are retained; the contract registry is regenerated from both
+definitions with its supported --write command, not edited as independent hashes.
+Transaction-design commit e8a2330 remains on its separate branch and is not mixed
+into this repair. Parent confirmed the existing Actio task remains in_progress
+with completionEvidence null; instruction linkage remains separate. This is
+ordinary notified conflict repair, not direct merge or runtime reflection.
+The automatic domain-file merge also produced duplicate specRefs keys; these
+are combined into one list preserving the accepted request and new journal
+references. Regeneration additionally records main's existing content-http
+definition, which was absent from its old registry; no content-http code or
+contract is changed. Contract/signing/fuzz gates now pass50/114,79 and9/9.
+MSVC19.39 Release compile/link of both request and journal test targets plus
+the journal fuzz replay target passes with the combined library; none is run.
+The existing focused-analysis evidence and full-analysis budget limitation
+remain distinct. This conflict repair adds no package/unsafe/FFI/resource owner
+or algorithm change; no full-analysis success or operational acceptance is
+inferred from conflict resolution.
