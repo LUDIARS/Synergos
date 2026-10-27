@@ -6,6 +6,7 @@ pub mod checkout;
 pub mod cli;
 pub mod cli_history;
 pub mod cli_hooks;
+pub mod content_http;
 pub mod cli_worktree;
 pub mod conflict;
 pub mod control_heartbeat;

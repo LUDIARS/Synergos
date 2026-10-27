@@ -18,6 +18,9 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Command {
+    /// Transfer verified content blocks over authorized HTTP URLs (no daemon required).
+    #[command(subcommand)]
+    ContentHttp(crate::content_http::cli::ContentCommand),
     /// デーモンを起動する（フォアグラウンド）
     Start {
         /// 設定ファイルパス
@@ -235,6 +238,7 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Project(cmd) => handle_project(cmd).await?,
         Command::Peer(cmd) => handle_peer(cmd).await?,
         Command::Transfer(cmd) => handle_transfer(cmd).await?,
+        Command::ContentHttp(cmd) => crate::content_http::cli::run(cmd).await?,
         Command::History(cmd) => crate::cli_history::handle_history(cmd).await?,
         Command::Hooks(cmd) => crate::cli_hooks::handle_hooks(cmd).await?,
 

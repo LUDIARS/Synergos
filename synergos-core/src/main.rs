@@ -18,9 +18,12 @@ use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    init_logging();
-
     let cli = Cli::parse();
+    // Capability URLs must not reach dependency trace logs, even with RUST_LOG=trace.
+    // This command emits only its public JSON result and sanitized errors.
+    if !matches!(&cli.command, cli::Command::ContentHttp(_)) {
+        init_logging();
+    }
     cli::run(cli).await
 }
 

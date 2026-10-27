@@ -28,6 +28,8 @@ quinn = "0.11"
 
 # Crypto / Hash
 blake3 = "1"
+flate2 = "=1.1.10"
+sha2 = "=0.10.9"
 
 # 外部ストレージローテーション (spec: archive-rotation)
 # S3 backend: object_store は put/get/head/delete だけの薄い ObjectStore trait
