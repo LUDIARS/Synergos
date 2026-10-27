@@ -1,6 +1,12 @@
 {
   "name": "opaque-custody",
   "description": "Cu Serverの受付に基づく不透明な実体の耐久保管。内容検証、受領証、取得と回収を担い、版・提出・保持許可はCuへ委ねる。",
+  "specRefs": [
+    "spec/feature/opaque-custody.md",
+    "spec/feature/native-custody-request.md",
+    "spec/plan/redesign-security.md:4.7 SECURITY-M07 失効バンドルと事件 API (kill switch)",
+    "spec/plan/redesign-security.md:4.9 SECURITY-M09 custody のサービス認証・委任・資格 v2"
+  ],
   "presetRules": [],
   "templateRules": [],
   "membership": [

@@ -42,6 +42,7 @@ inline constexpr std::size_t max_caveat_items = 256; // ops / orgs / object_keys
 struct Presented {
     Profile profile;
     bool url_form = false; // ブラウザ GET の URL 形式 (custody-capability だけ、TTL 120 秒)
+    bool require_sealed = false; // Runtime PEPs opt in; codec/holder inspection still accepts unsealed proof.
 };
 
 struct Minted {
@@ -67,6 +68,7 @@ struct Verified {
     std::int64_t iat;
     std::int64_t exp;
     std::string caveats_json; // 全 block の積集合 (JCS 正規形)
+    std::optional<std::string> delegation_jti{}; // Root delegation label for the redemption budget owner.
 };
 
 /// custody-delegation / custody-capability を発行する。membership は lct.profile_forbidden

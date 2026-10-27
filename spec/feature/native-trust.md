@@ -31,6 +31,12 @@ accepting a membership token. A holder may narrow project roles but cannot
 replace peer/node/principal/device/organization/roster bindings. Root signature
 verification is still insufficient to establish live session authorization.
 
+P3 custody request consumers now set Presented.require_sealed=true; this is an
+explicit PEP boundary and does not change default holder/codec inspection.
+Verified additionally preserves the root delegation_jti for the durable budget
+owner instead of inferring a delegation from the last attenuated label. These
+fields do not provide a live revocation cache or reserve a redemption budget.
+
 | Implementation | Responsibility |
 | --- | --- |
 | `synergos-net/native/trust/lct.cpp` | Token/proof framing, chain verification, attenuation, expiry and revocation |

@@ -650,6 +650,14 @@
       "definition_sha256": "339de787554e8a4ca3a3c16e287f8a720de2caf2491651c510e34a6607b7215b"
     },
     {
+      "id": "SPEC-SY-native-custody-request-boundary",
+      "owner_repo": "Synergos",
+      "status": "defined",
+      "owner_doc": "spec/feature/native-custody-request.md",
+      "owner_section": "[id: SPEC-SY-native-custody-request-boundary] Bind a sealed capability to one request",
+      "definition_sha256": "535f847d0562164b418c3f7f720f76ca29a0d7fd9d3a1f1f4aef975617ce7035"
+    },
+    {
       "id": "SPEC-SY-native-framing",
       "owner_repo": "Synergos",
       "status": "defined",

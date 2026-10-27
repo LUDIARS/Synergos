@@ -58,7 +58,7 @@ struct Parsed {
 
 std::vector<Block> parse_blocks(yyjson_val* blocks);
 
-Parsed parse_token(std::string_view token) {
+Parsed parse_token(std::string_view token, bool require_sealed = false) {
     bounded(token.size(), max_token_bytes, "token bytes");
     std::vector<std::uint8_t> raw;
     try { raw = base64url_decode(token); } catch (const TrustError&) { fail(Code::lct_malformed, "token is not base64url"); }
@@ -77,6 +77,8 @@ Parsed parse_token(std::string_view token) {
     bounded(yyjson_arr_size(blocks), max_blocks, "blocks");
     Parsed parsed;
     parsed.blocks = parse_blocks(blocks);
+    if (require_sealed && !yyjson_is_str(yyjson_obj_get(proof, "seal")))
+        fail(Code::lct_profile_forbidden, "presentation requires a sealed token");
     try {
         if (auto* secret = yyjson_obj_get(proof, "next_secret"); yyjson_is_str(secret))
             parsed.proof.next_secret = base64url_decode_fixed<32>(sv(secret));
@@ -235,7 +237,7 @@ std::string seal(std::string_view token) {
 
 Verified verify(std::string_view token, const std::map<std::string, IssuerKey>& issuers,
                 const RevocationView& revocation, std::int64_t now, const Presented& presented) {
-    const auto parsed = parse_token(token);
+    const auto parsed = parse_token(token, presented.require_sealed);
     const auto& blocks = parsed.blocks;
     const auto& head = blocks.front();
     const auto issuer = issuers.find(head.kid);
@@ -275,7 +277,9 @@ Verified verify(std::string_view token, const std::map<std::string, IssuerKey>& 
     if (effective.projects)
         for (const auto& [ref, role] : *effective.projects)
             if (revocation.frozen_project_refs.count(ref)) fail(Code::lct_revoked, "project frozen");
-    return {presented.profile, *head.profile, head.kid, head.iat, *effective.exp, to_json(effective)};
+    const auto delegation_jti = *head.profile == Profile::custody_delegation
+        ? std::optional<std::string>{head.caveats.strings.at("jti")} : std::nullopt;
+    return {presented.profile, *head.profile, head.kid, head.iat, *effective.exp, to_json(effective), delegation_jti};
 }
 
 } // namespace synergos::trust::lct

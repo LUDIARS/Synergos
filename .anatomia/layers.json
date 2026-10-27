@@ -1,5 +1,7 @@
 {
   "layers": [
+    { "glob": "synergos-custody/native/capability_gate.cpp", "layer": "domain" },
+    { "glob": "synergos-custody/native/include/synergos/custody/capability_gate.h", "layer": "domain" },
     { "glob": "synergos-core/native/tests/**", "layer": "application" },
     { "glob": "synergos-custody/native/tests/**", "layer": "application" },
     { "glob": "synergos-ipc/native/tests/**", "layer": "application" },

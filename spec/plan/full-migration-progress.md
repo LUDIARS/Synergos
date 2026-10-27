@@ -112,3 +112,73 @@ surfaces. Membership codec success is not fresh RosterStatus validation or a
 peer authorization gate. Keep Rust production intact until the redesigned
 acceptance gates pass. Distinguish implementation, review, merge, reflection and
 real environment acceptance throughout.
+
+## Recovery checkpoint and native custody request boundary — 2026-10-27
+
+The successor Sol API worker retained the11 staged implementation files across
+the model-capacity interruption; no reset/stash/recreation or prior PR replay
+occurred. Worktree `.wt-Synergos-custody-request`, branch
+`feat/native-custody-request-boundary-20261026`, is based on local main f5ce437.
+Cc repository/origin/branch were read back against that exact checkout.
+The generic opaque-custody boundary was confirmed through Anatomia where.
+This increment has not previously been submitted; the earlier Curare PRs are
+separate saved review identities, not requests to resend.
+
+Parent's latest existing-task read confirms Actio f18ad452... remains
+in_progress/source cc-command/updated10-17/completionEvidence null. The Cc
+instruction/task link remains unestablished and is not replaced with another
+task or a changed provenance. Curare's consolidated matrix is maintained at
+`../../../Curare/spec/plan/full-migration-execution.md`; it distinguishes P1
+codec review from runtime/Cr/whole-product acceptance. Parent received formal
+Curare#3481 Test OK/merge411bdfcb2147 and #3482 Test OK/mergea4c6c2d24db9, while
+corresponding dist artifacts remain absent and reflection unperformed.
+
+Source inspection confirms native custody currently contains static legacy
+canonical/signature and durable-publication libraries, not a native HTTP
+server, admission store or journal. The coherent P3 addition therefore adds
+the request-bound constraint boundary that those future owners must consume:
+sealed capability only, matching org/project/operation/object, optional trusted
+subject/session, safe GET filename/digest/range, PUT remaining total bytes and
+explicit two-part revocation validity windows. Missing/stale evidence is503;
+invalid/out-of-scope requests are403. LCT verification gains require_sealed
+as an opt-in presentation constraint and preserves root delegation_jti for the
+durable redemption-budget owner. Default P1 holder inspection remains unchanged.
+
+The returned RedemptionConstraints are not a durable admission or authorization
+completion. Atomic per-delegation/per-sub reservation, journal/sequence/signature
+cache validation, current Cr roster/membership, upload_id single commit, bounded
+streaming, durable object state and v2 receipt issuance still need integration.
+No HTTP parser/library, listener, alternate issuer, mTLS fallback or fake cache
+is introduced. Both revocation windows must already come from the separately
+verified cache owner; a caller-constructed timestamp is not a signature proof.
+
+Memory/lifetime review: yyjson documents are RAII-owned; outputs copy strings;
+no request data is used as a filesystem path; no borrowed JSON view escapes.
+Unknown operation and missing metadata fail closed. Nonnegative expiry ordering
+precedes subtraction, upload ceilings subtract only after comparing existing
+bytes, and inclusive ranges are bounded below stored size before addition.
+No shared mutable state/thread/socket/process/startup communication is added.
+The caller must hold immutable/locked key, snapshot and object metadata views.
+Existing yyjson/Monocypher/Bcrypt/standard C++ dependencies and pinned archives
+are reused unchanged. Builds use existing cached source overrides with
+FETCHCONTENT_FULLY_DISCONNECTED=ON; no new dependency/download is introduced.
+
+Verification: MSVC19.39 Release compile/link of synergos_custody_request_test
+passes; it is not executed locally. Praesidium compiler-only analysis passes
+all46 native units/findings empty; no FFI/unsafe/native package is newly added.
+The signing lint passes71 C/C++ files. Contract-registry's supported --write
+path added the one new definition and its check passes48defined/112referenced.
+JSON/diff checks pass. Anatomia rule/duplication/spec-linkage/coupling pass;
+convention_drift reports snake_case on the new C++ functions and the existing
+verify API's sibling-style mismatch. Existing native C++ snake_case interfaces
+are retained rather than renamed or suppressing this heuristic; overall CLI
+pass is false and the review lane must assess the advisory. Cc's static code
+acceptance lists no C++ sources, so it is not evidence of C++ DDD enforcement.
+
+A necessary single Revisor repository-registration read confirms Synergos's
+existing native configure/build-all/CTest cases will discover the new
+native.custody.request_boundary case. No review service configuration is changed.
+Local unit/integration/CTest/service/live-transfer execution remains prohibited
+(tests=false), and no startup/restart/deployment/main update/push is performed.
+Windows compilation does not establish Linux/macOS runtime parity or a clean
+download build. Review/merge/reflection and the full migration remain open.
