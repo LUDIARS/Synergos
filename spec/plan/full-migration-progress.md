@@ -269,3 +269,42 @@ The existing focused-analysis evidence and full-analysis budget limitation
 remain distinct. This conflict repair adds no package/unsafe/FFI/resource owner
 or algorithm change; no full-analysis success or operational acceptance is
 inferred from conflict resolution.
+
+## Custody runtime integration matrix — 2026-10-27
+
+| Item | Current evidence | Open condition |
+|---|---|---|
+| Sealed request constraints | Formal Sy#3492 Test OK/automatic merge7dd63f58e076; parent confirmed included in main69f1c25 | Production caller, signed/fresh cache, cumulative budget consumption and transaction recovery |
+| Durable journal owner | Formal Sy#3496 Test OK/automatic merge51007a48ced9; one notification-driven saved-id GET confirms merged/test_ok at reviewed head4b8a341 and no human question/conflict | Runtime caller, transaction integration, retention/deletion and external delivery remain open |
+| Native custody transaction | Design preserved in native-custody-transaction.md | Atomic budgets, journal ordering, measured stream limits, upload_id single commit, exact v2 receipt persistence |
+| Full migration/operation | Actio existing task remains in_progress/sourcecc-command/completionEvidence null per parent GET | Instruction link separate; Cr ownership, native runtime, reflection, platforms and product acceptance still open |
+
+This checkpoint is saved in a separate local-main-based transaction-design
+worktree, not on the submitted journal branch. Current main69f1c25's separate
+Rust HTTP block-transfer work is acknowledged without treating it as native
+custody completion or modifying that other increment. No production test,
+startup/restart/deploy or main update is performed. Do not submit a document-only
+PR solely to fill the review wait; retain this design with the next coherent
+transaction work after its accepted dependencies are available.
+
+### Journal merge handoff and transaction design alignment — 2026-10-27
+
+Parent confirmed51007a48 is an ancestor of local main and independently confirmed
+the existing Actio task remains in_progress/completionEvidence null. Neither
+readback proves an instruction/task link or runtime reflection. This worker's
+single saved-PR read confirms#3496 merged/test_ok; no ongoing polling follows.
+The dedicated transaction-design branch is rebased from e8a2330 onto existing
+local main51007a48, preserving both the journal and request progress sections.
+No shared main update, push, merge or service operation occurs.
+
+The concrete next design uses typed journal transitions as the sole durable
+reservation/commit truth, verified ancestral budget scopes, exclusive publication
+with pending-intent recovery and exact receipt persistence. It is a proposed
+protocol in native-custody-transaction.md, not a completed transaction owner.
+Before code integration, the transition schema/replay invariants, bounded active
+state and real custody AbusePolicy, rolling-window accounting, checkpoint/index
+retention anchor, serialized hasher version and content-key inputs must be made
+explicit. Current repository contracts contain no custody quota table/numeric
+defaults; no guessed limits, memory-only counter or independent two-file atomic
+claim is implemented. Cr signature/freshness integration, deployment and real
+experience acceptance remain unperformed. tests=false remains unchanged.
